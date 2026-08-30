@@ -54,9 +54,17 @@ cargo run --bin sandman -- task \
 
 ## Produced files
 
-- sqlite DB
-- sandman.log
-- ...?
+A run writes into the working directory. All of it is gitignored, and deleting all
+of it gives you a fresh Sandman.
+
+- `sandman.sqlite` — every Task, Session, transcript, model call and TaskResult.
+- `sandman.log` — one line per Event: the order in which events happened.
+  Truncated at each start. `--verbose` writes the bodies out too.
+- `sandman.sock` — the control socket `sandman task` talks to. Lives in
+  `$XDG_RUNTIME_DIR` when there is one, beside the database otherwise. Only the
+  interactive harness opens it, and a stale one from a killed process is replaced.
+
+`--db`, `--log` and `--socket` move each of the three.
 
 ## Test it
 
