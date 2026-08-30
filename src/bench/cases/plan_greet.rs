@@ -18,7 +18,6 @@ use crate::domain::{
 use crate::harness::Drive;
 use crate::roles::{RoleName, ToolName};
 
-use super::report::RunReport;
 use super::{CheckResult, Rig};
 
 /// Loose enough to allow for a model that says "three minutes" and means
@@ -45,38 +44,28 @@ fn brief() -> NewTask {
 	}
 }
 
-pub(super) async fn run() -> (Option<Rig>, RunReport) {
-	let case = super::find("plan-greet").expect("registered in CASES");
-	let mut rig = match Rig::builder()
+super::bench_case! {
+	name: "plan-greet",
+	builder: Rig::builder()
 		.drive(Drive::Full)
 		.tools(ToolsChoice::Intercept(Box::new(|call| match call.name {
-			ToolName::CreateTaskFull => Answer::Say(
-				"Created t-99. It will run on schedule.".to_string(),
-			),
+			ToolName::CreateTaskFull => {
+				Answer::Say("Created t-99. It will run on schedule.".to_string())
+			},
 			_ => Answer::Deny("not available in this case".to_string()),
-		})))
-		.build()
-		.await
-	{
-		Ok(rig) => rig,
-		Err(trip) => return (None, super::build_failed(case, &trip)),
-	};
-	rig.tripwire(
+		}))),
+	tripwires: [(
 		"create_task_full is reached for at most once",
-		super::at_most_creations(1),
-	);
-
-	let outcome = async {
+		super::at_most_creations(1)
+	)],
+	body: |rig, graders| {
 		let seed = rig.seed_task(brief())?;
 		rig.await_task(seed).await?;
 
 		let mut checks = Vec::new();
 		let creations = rig.interceptor.calls_to(ToolName::CreateTaskFull);
 		checks.push(if creations.len() == 1 {
-			CheckResult::ok(
-				"scheduled once",
-				"create_task_full was called once",
-			)
+			CheckResult::ok("scheduled once", "create_task_full was called once")
 		} else {
 			CheckResult::no(
 				"scheduled once",
@@ -88,8 +77,7 @@ pub(super) async fn run() -> (Option<Rig>, RunReport) {
 		});
 
 		if let Some(call) = creations.first() {
-			let delay =
-				call.args.get("run_at_seconds").and_then(|v| v.as_i64());
+			let delay = call.args.get("run_at_seconds").and_then(|v| v.as_i64());
 			checks.push(match delay {
 				Some(seconds) if EXPECTED_DELAY_SECONDS.contains(&seconds) => {
 					CheckResult::ok(
@@ -112,26 +100,15 @@ pub(super) async fn run() -> (Option<Rig>, RunReport) {
 		}
 
 		let succeeded = matches!(
-			rig.tasks()?
-				.into_iter()
-				.find(|t| t.id == seed)
-				.map(|t| t.state),
+			rig.tasks()?.into_iter().find(|t| t.id == seed).map(|t| t.state),
 			Some(TaskState::Completed { result: TaskResult::Succeeded(_), .. })
 		);
 		checks.push(if succeeded {
 			CheckResult::ok("finished", "the planner submitted a Result")
 		} else {
-			CheckResult::no(
-				"finished",
-				"the Task did not complete as a success",
-			)
+			CheckResult::no("finished", "the Task did not complete as a success")
 		});
 
 		Ok(checks)
 	}
-	.await;
-
-	super::finish(case, rig, outcome, Vec::new()).await
 }
-
-super::bench_test!(plan_greet);

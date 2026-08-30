@@ -41,34 +41,42 @@ time must use the real one: assert on the Schedule it chose and never wait for i
 
 ## A case
 
+Every case is one `super::bench_case! { ... }` invocation, and reads as build, drive,
+check:
+```rust
+super::bench_case! {
+    name: "hello",
+    builder: Rig::builder().drive(Drive::CommsOnly).channel(ChannelKind::Scripted),
+    tripwires: [
+        ("create_task is never reached for", super::at_most_creations(0)),
+    ],
+    body: |rig, graders| {
+        rig.converse(MESSAGE).await?;
+        let replied = rig.transcript()?.iter().any(|u| u.who == Who::Sandman);
+        Ok(vec![if replied {
+            CheckResult::ok("replied", "the comms session said something back")
+        } else {
+            CheckResult::no("replied", "no reply appeared in the transcript")
+        }])
+    }
+}
+```
+The macro expands to `run()` — building the Rig or reporting why not, registering the
+tripwires, winding down into a `RunReport` — and the `#[ignore]`d test next to it. `body`
+runs with `rig: &mut Rig` and `graders: &mut Vec<Grader>` (empty unless it pushes to it)
+in scope, and ends in the same `Result<Vec<CheckResult>, Trip>` a case without the macro
+would build by hand: a `?` anywhere inside ends the run as `tripped`, not as a panic.
+
 `ToolsChoice::Intercept` wraps the real registry: pass a tool through because its effect
 is what is asserted on, answer another from a closure, deny a third because reaching for
 it at all is the failure. The schemas the model is offered never change.
 
-A case that seeds a Task and waits for it reads almost like the scenario itself:
-```rust
-let mut rig = Rig::builder()
-    .drive(Drive::Full)
-    .tools(ToolsChoice::Intercept(Box::new(|call| match call.name {
-        ToolName::CreateTaskFull => Answer::Say("Created t-99.".into()),
-        _ => Answer::Deny("not available in this case".into()),
-    })))
-    .build().await?;
-
-let seed = rig.seed_task(brief())?;
-rig.await_task(seed).await?;
-
-assert_eq!(rig.interceptor.calls_to(ToolName::CreateTaskFull).len(), 1);
-```
-A conversational case is `rig.converse(text)` instead of `seed_task` +
-`await_task` — it opens a Channel, sends, and waits for the Comms Session to
-finish replying, in one call. Both are built on `rig.until`, which follows the
-Event stream — nothing polls — and stay available directly for a case whose
-wait is neither of those two shapes.
-
-`seed_task` and `seed_lesson` write through the ordinary Store path, so a seeded
-Task is a Task in every way; the creation above is answered by the case, so no
-child Worker runs.
+Two shapes of waiting cover every case so far: `rig.converse(text)` — send on the bench
+Channel and wait for the Comms Session to finish replying — and `rig.seed_task(brief)` +
+`rig.await_task(seed)` for a Task seeded straight onto the queue. `seed_task` writes
+through the ordinary Store path, so a seeded Task is a Task in every way; both waits are
+built on `rig.until`, which follows the Event stream — nothing polls — and stays
+available directly inside `body` for a case whose wait is neither shape.
 
 ## Verification
 
@@ -93,19 +101,15 @@ sqlite3 bench/runs/*/plan-greet-run1/store.sqlite \
 ## Adding a case
 
 A new file under `src/bench/cases/` — its module doc comment says the scenario in plain
-language — and a line in `CASES` in `cases/mod.rs`. Decide two things first: **which
+language, one `bench_case!` invocation says the rest — and a line in `CASES` in
+`cases/mod.rs` so `bin/bench` and `find` can see it. Decide two things first: **which
 Session is it about** — a question that needs two Sessions is two cases — and **what must
 never happen**, which is the tripwire that keeps a failing case cheap.
 
-`cases/mod.rs` carries the ceremony every case shares, so a case's `run` is just: build,
-drive, check.
-- Build with `Rig::builder()...build().await`; on `Err`, `return (None,
-  super::build_failed(case, &trip))`.
-- `super::at_most_creations(n)` is a ready-made tripwire for "no more than n Tasks".
-- End with `super::finish(case, rig, outcome, graders).await`, which winds the Rig down,
-  assembles the `RunReport`, and returns the `(Option<Rig>, RunReport)` a case must.
-- `super::bench_test!(case_name);` at the bottom is the whole `#[ignore]`d test wrapper —
-  one line instead of writing it out.
+Everything mechanical lives in `bench_case!` itself, not in each case: the look-up, the
+build-or-report ceremony, registering the tripwires, winding down into a `RunReport`, and
+the `#[ignore]`d test. A case supplies only what makes it unique — the Rig it needs, its
+tripwires, and `body`.
 
 ## Caveats
 

@@ -88,7 +88,11 @@ pub fn find(name: &str) -> Option<&'static Case> {
 
 /// A `RunReport` for a case whose Rig never came up. Not a `RunReport::assemble`
 /// call, because that needs a Rig to wind down and there is none.
-fn build_failed(case: &Case, trip: &Trip) -> RunReport {
+///
+/// `pub(crate)`, not private: [`bench_case!`] expands at each case's own call
+/// site, and a definition-site-private item is not guaranteed reachable from
+/// there.
+pub(crate) fn build_failed(case: &Case, trip: &Trip) -> RunReport {
 	RunReport {
 		case: case.name.to_string(),
 		description: case.description.to_string(),
@@ -112,8 +116,9 @@ fn build_failed(case: &Case, trip: &Trip) -> RunReport {
 ///
 /// The Rig always comes back `Some` here — a build failure never reaches this
 /// far, since there is no Rig yet for `assemble` to wind down; that path is
-/// [`build_failed`] instead.
-async fn finish(
+/// [`build_failed`] instead. `pub(crate)` for the same reason as
+/// `build_failed`.
+pub(crate) async fn finish(
 	case: &'static Case,
 	mut rig: Rig,
 	outcome: Result<Vec<CheckResult>, Trip>,
@@ -127,7 +132,9 @@ async fn finish(
 ///
 /// Counts calls, not rows: a unit bench answers the creation itself, so a
 /// Session that keeps asking for Tasks leaves nothing in the Store to count.
-fn at_most_creations(n: usize) -> impl Fn(&Watch) -> CheckResult + Send + Sync {
+pub(crate) fn at_most_creations(
+	n: usize,
+) -> impl Fn(&Watch) -> CheckResult + Send + Sync {
 	use crate::roles::ToolName;
 	move |watch: &Watch| {
 		let count = watch
@@ -156,25 +163,76 @@ fn at_most_creations(n: usize) -> impl Fn(&Watch) -> CheckResult + Send + Sync {
 	}
 }
 
-/// The `#[ignore]`d test wrapper every case needs: run it for real, fail the
-/// test with the report if it did not pass. One line per case instead of
-/// eight.
-macro_rules! bench_test {
-	($name:ident) => {
+/// A whole case, from just the parts that make it unique.
+///
+/// Expands to `pub(super) async fn run()` plus its `#[ignore]`d test — the
+/// look-up, the build-or-report ceremony, the tripwires, and the wind-down are
+/// all written once here rather than once per case. `body` runs with
+/// `rig: &mut Rig` and a `graders: &mut Vec<Grader>` in scope (empty unless it
+/// pushes to it), ending in the `Result<Vec<CheckResult>, Trip>` `run` reports
+/// — a `?` anywhere inside ends the case as `tripped`, not as a Rust panic.
+///
+/// ```ignore
+/// super::bench_case! {
+///     name: "hello",
+///     builder: Rig::builder().drive(Drive::CommsOnly).channel(ChannelKind::Scripted),
+///     tripwires: [("create_task is never reached for", super::at_most_creations(0))],
+///     body: |rig, graders| {
+///         rig.converse(MESSAGE).await?;
+///         Ok(vec![CheckResult::ok("replied", "said something back")])
+///     }
+/// }
+/// ```
+macro_rules! bench_case {
+	(
+		name: $name:literal,
+		builder: $builder:expr,
+		tripwires: [ $( ($tw_name:expr, $tw_pred:expr) ),* $(,)? ],
+		body: |$rig:ident, $graders:ident| $body:block
+	) => {
+		pub(super) async fn run() -> (
+			Option<$crate::bench::Rig>,
+			$crate::bench::report::RunReport,
+		) {
+			let case =
+				$crate::bench::cases::find($name).expect("registered in CASES");
+			let mut rig = match ($builder).build().await {
+				Ok(rig) => rig,
+				Err(trip) => {
+					return (
+						None,
+						$crate::bench::cases::build_failed(case, &trip),
+					);
+				},
+			};
+			$( rig.tripwire($tw_name, $tw_pred); )*
+
+			let mut graders = Vec::new();
+			let outcome: Result<
+				Vec<$crate::bench::CheckResult>,
+				$crate::bench::Trip,
+			> = async {
+				let $rig = &mut rig;
+				#[allow(unused_variables)]
+				let $graders = &mut graders;
+				$body
+			}
+			.await;
+
+			$crate::bench::cases::finish(case, rig, outcome, graders).await
+		}
+
 		#[cfg(test)]
 		mod tests {
 			#[tokio::test]
 			#[ignore = "spends money on a real model; cargo test -- --ignored"]
-			async fn $name() {
+			async fn passes() {
 				let (_, report) = super::run().await;
 				if !report.pass {
-					panic!(
-						concat!(stringify!($name), " did not pass: {:#?}"),
-						report
-					);
+					panic!("{} did not pass: {:#?}", $name, report);
 				}
 			}
 		}
 	};
 }
-pub(crate) use bench_test;
+pub(crate) use bench_case;

@@ -15,14 +15,13 @@ use crate::domain::ChannelKind;
 use crate::harness::Drive;
 use crate::roles::ToolName;
 
-use super::report::RunReport;
 use super::{CheckResult, Rig};
 
 const MESSAGE: &str = "Hey! Could you greet me again in about 3 minutes? :)";
 
-pub(super) async fn run() -> (Option<Rig>, RunReport) {
-	let case = super::find("greet-again").expect("registered in CASES");
-	let mut rig = match Rig::builder()
+super::bench_case! {
+	name: "greet-again",
+	builder: Rig::builder()
 		.drive(Drive::CommsOnly)
 		.channel(ChannelKind::Scripted)
 		.tools(ToolsChoice::Intercept(Box::new(|call| match call.name {
@@ -30,20 +29,11 @@ pub(super) async fn run() -> (Option<Rig>, RunReport) {
 				Answer::Say("Created t-99. It will be handled.".to_string())
 			},
 			_ => Answer::Deny("not available in this case".to_string()),
-		})))
-		.build()
-		.await
-	{
-		Ok(rig) => rig,
-		Err(trip) => return (None, super::build_failed(case, &trip)),
-	};
-	rig.tripwire(
-		"create_task is reached for at most once",
-		super::at_most_creations(1),
-	);
-
-	let mut graders = Vec::new();
-	let outcome = async {
+		}))),
+	tripwires: [
+		("create_task is reached for at most once", super::at_most_creations(1)),
+	],
+	body: |rig, graders| {
 		rig.converse(MESSAGE).await?;
 
 		let creations = rig.interceptor.calls_to(ToolName::CreateTask);
@@ -79,9 +69,4 @@ pub(super) async fn run() -> (Option<Rig>, RunReport) {
 
 		Ok(checks)
 	}
-	.await;
-
-	super::finish(case, rig, outcome, graders).await
 }
-
-super::bench_test!(greet_again);
