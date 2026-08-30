@@ -15,7 +15,7 @@
 //! failed Result.
 //!
 //! Defines: [`Model`], [`OpenRouter`], [`ModelError`], [`ReasoningEffort`],
-//! [`MODEL`], [`API_KEY`].
+//! [`MODEL`], [`GRADER_MODEL`], [`API_KEY`].
 
 use async_trait::async_trait;
 
@@ -29,6 +29,11 @@ pub const API_KEY: &str =
 /// The model every Session, every review and every interrupt talks to.
 pub const MODEL: &str = "qwen/qwen3.6-35b-a3b";
 
+/// The model a bench grader talks to. Deliberately stronger than [`MODEL`]: a
+/// judge no better than what it judges is not a judge. Nothing in the swarm ever
+/// uses it, and what it costs is never Spend.
+pub const GRADER_MODEL: &str = "z-ai/glm-5.3-flash";
+
 /// Chat completions, as OpenRouter speaks them.
 pub const ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -36,8 +41,8 @@ pub const ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
 ///
 /// `SANDMAN_REASONING_EFFORT` overrides the default, so a bench run can compare
 /// levels without an edit here. It applies to Workers, Comms and metacognition
-/// alike; the bench's grader builds its own request and is left at the model's
-/// own default.
+/// alike; the bench's grader talks to a different model, builds its own request
+/// and is left at that model's own default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ReasoningEffort {
     /// No thinking at all.

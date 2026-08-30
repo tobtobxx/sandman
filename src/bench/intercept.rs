@@ -1,15 +1,14 @@
 //! Watching, and answering, every tool call.
 //!
-//! This is the seam the unit bench is built on. A case takes one real Task, the
-//! real system prompt for its Role, and the real model — and puts an
-//! [`Interceptor`] where the tool registry would be. Every call the model makes
-//! is recorded, and the case decides which of them actually happen.
+//! This is the seam the bench is built on. A case takes one real Task, the real
+//! system prompt for its Role, and the real model — and puts an [`Interceptor`]
+//! where the tool registry would be. Every call the model makes is recorded, and
+//! the case decides which of them actually happen.
 //!
-//! That answers the question a bench about *behaviour* wants to ask: given this
-//! Brief, what does the model reach for, with what arguments, and in what order?
-//! Letting the real tools run would answer a different and much more expensive
-//! question — what the swarm eventually produced — and would drag a web search
-//! and three more Workers into a test about one decision.
+//! That is the only question a case asks: given this Brief, what does the model
+//! reach for, with what arguments, and in what order? It is also what keeps a
+//! case to one Session — letting the real tools run would drag a web search and
+//! three more Workers into a test about one decision.
 //!
 //! Three modes, and a case usually mixes them: pass a tool through because its
 //! effect is what is being asserted on, answer another from a closure because
@@ -53,15 +52,15 @@ pub enum Answer {
 }
 
 /// How a Rig gets its tool calls answered.
+///
+/// There is no "run them all" variant. A case that let the whole registry run
+/// would stop being one Session, and that is the one thing the bench does not
+/// measure.
 pub enum ToolsChoice {
-    /// The real registry, unwatched. Rare in a bench: recording costs nothing.
-    Bare,
-    /// The real registry, with every call recorded.
-    Real,
     /// Every call recorded, and each one answered by the case.
     Intercept(Box<dyn Fn(&RecordedCall) -> Answer + Send + Sync>),
-    /// Every call recorded and refused. For asserting that a Session got where
-    /// it was going without any tool at all.
+    /// Every call recorded and refused. The default, and what a case asserting
+    /// that a Session got where it was going without any tool at all wants.
     Deny,
 }
 

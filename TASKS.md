@@ -83,7 +83,8 @@ then `harness`, then `control`, and `web` and `bench` last.
   interrupt said, so a Session in a loop gets the same nudge worded three ways. The
   reflections are on the Session and could be shown to it.
 
-- **A fourth bench case for `message_human`.** End-to-end delivery — whether the
-  greeting actually reaches the human — is the path most likely to fail and the one
-  nothing covers. It needs a Rig with two Channels open, to make the "which human"
-  guess visible.
+- **A fourth bench case for `message_human`.** Delivery is the path most likely to fail
+  and the one nothing covers: does the Session reach for `message_human`, and does it
+  name the right Channel? It needs a Rig with two Channels open, to make the "which
+  human" guess visible. A unit bench like the rest — the call is intercepted, not
+  delivered.

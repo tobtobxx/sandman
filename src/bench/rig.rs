@@ -5,10 +5,10 @@
 //! with it. Nothing in it is process-global, which is why a case is a test rather
 //! than a process.
 //!
-//! What a case chooses is how much of it is real. The default is: everything.
-//! Real prompts, real model, real tools, real clock. Each of the four can be
-//! replaced on its own, and a case says in its own first lines exactly which
-//! reality it gave up.
+//! What a case chooses is how much of it is real: real prompts, real model, real
+//! clock, unless it says otherwise in its own first lines. The tools are the
+//! exception — they are replaced in every case, because a bench is one Session's
+//! decisions and the interceptor is what keeps it to one.
 //!
 //! Waiting is [`Rig::until`]: it follows the Event stream, re-checks the
 //! predicate whenever something changed, and evaluates every tripwire on the way
@@ -19,7 +19,7 @@
 //! in-flight call so its cost reaches the record; `Drop` aborts the driver tasks
 //! as a backstop, so a case that panics cannot leave a Harness spending.
 //!
-//! Defines: [`Rig`], [`RigBuilder`], [`ModelChoice`], [`ClockChoice`].
+//! Defines: [`Rig`], [`RigBuilder`], [`ModelChoice`], [`ClockChoice`], [`Watch`].
 
 use std::sync::Arc;
 
@@ -54,7 +54,8 @@ pub enum ClockChoice {
     Manual(Arc<crate::domain::ManualClock>),
 }
 
-/// Builds a Rig. Everything defaults to real.
+/// Builds a Rig. Everything defaults to real except the tools, which default to
+/// [`super::ToolsChoice::Deny`]: a case pays for what it asks for.
 pub struct RigBuilder {
     model: ModelChoice,
     tools: super::ToolsChoice,
@@ -82,7 +83,17 @@ pub struct Rig {
 /// A condition evaluated continuously: "this must never happen".
 struct Tripwire {
     name: String,
-    pred: Box<dyn Fn(&Store) -> CheckResult + Send + Sync>,
+    pred: Box<dyn Fn(&Watch) -> CheckResult + Send + Sync>,
+}
+
+/// What a tripwire may look at.
+///
+/// The Store alone is not enough for a unit bench: a case that answers
+/// `create_task` itself leaves no row behind, so "a second Task spawning" can
+/// only be seen in the calls.
+pub struct Watch<'a> {
+    pub store: &'a Store,
+    pub calls: &'a [super::RecordedToolCall],
 }
 
 impl RigBuilder {
@@ -98,9 +109,10 @@ impl RigBuilder {
         unimplemented!()
     }
 
-    /// How much of the swarm runs. [`Drive::CommsOnly`] leaves Tasks on the
-    /// queue unexecuted, so a case about what a Comms Session decides costs
-    /// exactly what that Session costs.
+    /// How much the Harness starts by itself. A case wants the least that gets
+    /// its one Session running: [`Drive::CommsOnly`] for a Comms Session, and
+    /// [`Drive::Full`] for a seeded Task, whose children the interceptor answers
+    /// rather than lets run.
     pub fn drive(self, _drive: Drive) -> Self {
         unimplemented!()
     }
@@ -152,7 +164,7 @@ impl Rig {
     pub fn tripwire(
         &mut self,
         _name: &str,
-        _pred: impl Fn(&Store) -> CheckResult + Send + Sync + 'static,
+        _pred: impl Fn(&Watch) -> CheckResult + Send + Sync + 'static,
     ) {
         unimplemented!()
     }
@@ -171,7 +183,7 @@ impl Rig {
     }
 
     /// Wait for a fixed span, still watching tripwires. For the rare case that
-    /// has to let a swarm keep going for a while.
+    /// has to let a Session keep going for a while.
     pub async fn idle_for(&mut self, _span: Duration) -> Result<(), Trip> {
         unimplemented!()
     }

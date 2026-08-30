@@ -4,17 +4,14 @@ The bench measures what the model does inside Sandman: the same prompts, the sam
 tools, the same scheduler as any other run. It exists to inform prompt and mechanics
 changes.
 
-It answers two different questions, and the difference decides how a case is built.
+It answers one question: **what did the model reach for?** One Session against one real
+Brief, with every tool call intercepted. Cheap, fast, and specific — it says which tool
+the model chose, with what arguments, in what order, and it says nothing at all about
+what the swarm would have done with that choice.
 
-**What did the swarm produce?** Let the whole thing run, and check the state it
-reached. Expensive, slow, and the only way to know whether the parts fit together.
-
-**What did the model reach for?** Run one Session against one real Brief and intercept
-every tool call. Cheap, fast, and specific — it says which tool the model chose, with
-what arguments, in what order, and it says nothing at all about what the swarm would
-have done with that choice.
-
-Most cases should be the second kind.
+There is no second, whole-swarm kind of case. Integration is a series of unit benches:
+each seam gets the case that covers it, and a failure names the decision that was wrong
+instead of a run that ended badly.
 
 ## Running
 
@@ -52,13 +49,13 @@ behind it.
 
 ## What a case chooses to make unreal
 
-Everything is real by default: real prompts, real model, real tools, real clock. Four
-seams can be replaced one at a time, and a case should say in its first lines which
-reality it gave up and why.
+Everything is real by default: real prompts, real model, real clock. Four seams can be
+replaced, and a case should say in its first lines which reality it gave up and why.
+The tools are replaced in every case — that is what keeps a case to one Session.
 
 | Seam | Replace it when |
 | --- | --- |
-| `ToolsChoice` | you want to know what the model reached for, not what happened next |
+| `ToolsChoice` | always: a bench asks what the model reached for, not what happened next |
 | `ModelChoice` | you are testing the Harness — the Turn loop, the scheduler, the review — and a real model would only add cost and variance |
 | `ClockChoice` | you need a scheduled Task to actually fire. That is a case about the Harness, not the model, and it should say so |
 | `Embedder` | you want a ranking that is the same every time |
@@ -68,7 +65,7 @@ of time — did it schedule this three minutes out? — must use the real one, o
 benches a Sandman that does not exist. The three cases below assert on the Schedule the
 model chose and never wait for it.
 
-## Interception: the unit bench
+## Interception: how a case works
 
 `ToolsChoice::Intercept` wraps the real registry. Every call is recorded — which
 Session, which tool, what arguments, what came back — and the case decides which of
@@ -123,25 +120,30 @@ count *before* sending, or it is true before the run has done anything.
 
 ## The three kinds of verification
 
-They exist because a runaway swarm costs money and a wrong answer costs trust, and
+They exist because a runaway Session costs money and a wrong answer costs trust, and
 they fail differently.
 
 - **Tripwires** — evaluated continuously, on every Event. A violation ends the run at
   once: the Harness stops, remaining Tasks are cancelled, and the last in-flight call
-  is given time to land so the cost record stays honest. A looping swarm costs at most
-  a call or two past the violation. Use for "this must never happen": a second Task
-  spawning, a Task creating itself again.
+  is given time to land so the cost record stays honest. A looping Session costs at
+  most a call or two past the violation. Use for "this must never happen": a second
+  `create_task`, a Session asking for the same tool a fifth time. A tripwire is given a
+  `Watch` — the Store *and* the calls so far, because a case that answers `create_task`
+  itself leaves no row to count.
 - **Goal checks** — evaluated once, at the end. A failing check fails the run but does
   not stop it; the work is already done and its evidence is in the artifacts. Use for
   "this must have happened by the end".
-- **Graders** — for outcomes no read of the state can judge: is the spawned Task
-  *really* the one that was wanted? One model call each, against the same model the
-  swarm uses, made directly rather than through the scheduler — a grader is bench
-  machinery, not part of the swarm, so its cost is reported separately and never
-  counts as Spend. Graders run only after every goal check passes. **A reply with no
-  parseable verdict is a FAIL**: an unparseable judgement must never quietly pass.
+- **Graders** — for outcomes no read of the state can judge: does the `create_task`
+  call really carry the Brief that was wanted? Keep them rare and be able to say why
+  a count would not do — a grader is itself a model judgement, it costs a call, and it
+  varies between runs. One model call each, against `GRADER_MODEL`, which is stronger
+  than the model the swarm uses: a judge no better than what it judges is not a judge.
+  The call is made directly rather than through the scheduler — a grader is bench
+  machinery, not part of the swarm, so its cost is reported separately and never counts
+  as Spend. Graders run only after every goal check passes. **A reply with no parseable
+  verdict is a FAIL**: an unparseable judgement must never quietly pass.
 
-Rule of thumb: if a bad outcome would make the swarm keep working, it belongs in a
+Rule of thumb: if a bad outcome would make the Session keep working, it belongs in a
 tripwire; if it can only be known at the end, a check; if a machine cannot judge it at
 all, a grader.
 
@@ -167,22 +169,19 @@ sqlite3 bench/runs/*/plan-greet-run1/store.sqlite \
 
 ## The current cases
 
-- **`hello`** — `"Hello :)"` gets a reply and creates no Tasks. Comms-only.
-- **`greet_again`** — asking to be greeted again in ~3 minutes spins off exactly one
-  Task; a grader judges whether it is a faithful hand-off. The Task is never executed.
-  The grader passes a Task that only describes the delay in words: the Comms Session
-  has no scheduling tool, so turning words into a timed Task is the next Worker's job.
-- **`plan_greet`** — a planning Task seeded from outside spins off exactly one Task
-  scheduled ~3 minutes out, and completes. The whole swarm runs. The scheduled Task is
-  cancelled unexecuted once the planner is done: a case that waits for work it no
-  longer cares about wastes money.
-- **`planner_schedules_the_greeting`** — the same question as `plan_greet`, asked as a
-  unit bench: one Session, every tool call intercepted, assertions on what the model
-  reached for.
+- **`hello`** — `"Hello :)"` gets a reply and reaches for no tool at all. One Comms
+  Session, every call denied.
+- **`greet_again`** — asking to be greeted again in ~3 minutes reaches for
+  `create_task` once; a grader judges whether the Brief is a faithful hand-off. The
+  grader passes a Brief that only describes the delay in words: the Comms Session has
+  no scheduling tool, so turning words into a timed Task is the next Worker's job.
+- **`plan_greet`** — a planning Task seeded from outside reaches for `create_task` once,
+  with a Schedule ~3 minutes out, and completes. The creation is answered by the case,
+  so no child Worker runs and nothing is left to cancel.
 
-Not covered: end-to-end delivery — whether a greeting actually reaches the human,
-through `message_human`. That is the natural next case, and [TASKS.md](../TASKS.md)
-says why it is the one most likely to fail.
+Not covered: delivery — whether a Session reaches for `message_human` and names the
+right Channel. That is the natural next case, and [TASKS.md](../TASKS.md) says why it is
+the one most likely to fail.
 
 ## Adding a case
 
@@ -191,17 +190,16 @@ and build its Rig. There is no registry to add it to.
 
 Two things worth deciding before writing it:
 
-- **Which question is it?** If it is about what the model reached for, intercept the
-  tools and keep the case to one Session. If it is about what the swarm produced, run
-  `Drive::Full` and shape the case to end as soon as its question is answered.
+- **Which Session is it about?** A case covers one. Intercept every tool, and drive
+  only as much as it takes to get that Session running. A question that needs two
+  Sessions is two cases.
 - **What must never happen?** That is a tripwire, and adding it is what keeps a
   failing case cheap.
 
 ## Caveats
 
-- A grader uses the same model as the swarm. It is itself a model judgement and can be
-  wrong in both directions; read `raw` in `result.json` before trusting a marginal
-  verdict.
+- A grader is itself a model judgement and can be wrong in both directions, stronger
+  model or not; read `raw` in `result.json` before trusting a marginal verdict.
 - Real waits are real. A case that has to let three minutes pass on the real clock
   will take three minutes. Shape the case to end before the wait, or use
   `ClockChoice::Manual` and accept that the case is now about the Harness.

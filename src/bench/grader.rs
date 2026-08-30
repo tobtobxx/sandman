@@ -1,14 +1,17 @@
 //! Verification a model has to do.
 //!
-//! Some outcomes no read of the state can judge. That exactly one Task was
-//! created is a count; that it is *the Task that was wanted* — that it kept the
-//! greeting, kept the delay, and added nothing — is a judgement.
+//! **Rare, and warranted.** A grader is a model judgement about a model
+//! judgement: it costs a call, it varies between runs, and it can be wrong in
+//! both directions. Reach for one only when nothing countable answers the
+//! question. That exactly one `create_task` call was made is a count; that it
+//! carries *the Brief that was wanted* — that it kept the greeting, kept the
+//! delay, and added nothing — is a judgement.
 //!
-//! A grader is one model call against the same model the swarm uses, because a
-//! grader must be as good as the combination being measured. It is bench
-//! machinery and not part of the swarm: the call goes straight to the model, not
-//! through the scheduler, and what it costs is reported separately and never
-//! counts as Spend.
+//! A grader runs against [`crate::model::GRADER_MODEL`], which is stronger than
+//! the one the swarm uses: a judge no better than what it judges is not a judge.
+//! It is bench machinery and not part of the swarm: the call goes straight to
+//! the model, not through the scheduler, and what it costs is reported
+//! separately and never counts as Spend.
 //!
 //! Graders run only after every goal check has passed. There is nothing to judge
 //! about a run that already failed on something countable.
@@ -22,7 +25,7 @@ use crate::domain::Cost;
 
 /// What a grader is told it is doing.
 pub const GRADER_SYSTEM: &str = "\
-You grade the outcome of an agent swarm against what was wanted.
+You grade what an agent did against what was wanted.
 Be strict and literal: grade what is written, not what was probably meant.
 End your reply with a verdict on its own line: <verdict>pass</verdict> or <verdict>fail</verdict>.";
 
@@ -36,8 +39,8 @@ pub enum Verdict {
 /// One question put to a model about a finished run.
 pub struct Grader {
     pub name: String,
-    /// The whole user message the grader judges. Built from the run's state by
-    /// the case that owns it.
+    /// The whole user message the grader judges. Built by the case that owns it,
+    /// out of the run's state and the calls the Session made.
     pub input: String,
     /// How to read the reply. [`default_judge`] looks for the verdict tag.
     pub judge: Option<Box<dyn Fn(&str) -> (Verdict, String) + Send + Sync>>,

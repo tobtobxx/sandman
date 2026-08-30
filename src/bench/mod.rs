@@ -14,10 +14,15 @@
 //! Nothing polls, and nothing has to throw across a polling loop to stop a run.
 //!
 //! **Everything a case does not want to be real can be replaced**, at one of
-//! four seams: the model, the tool runner, the clock, the embedder. The
-//! interesting one is the tool runner. Intercepting it is how a unit bench asks
-//! the real model, with the real prompt for one real Task, what it would *do* —
-//! and answers every tool call itself instead of paying for the work behind it.
+//! four seams: the model, the tool runner, the clock, the embedder. The tool
+//! runner is replaced in every case. Intercepting it is how a bench asks the
+//! real model, with the real prompt for one real Brief, what it would *do* — and
+//! answers every tool call itself instead of paying for the work behind it.
+//!
+//! **Every case is a unit bench.** One Session, and assertions on what it
+//! reached for. Nothing here runs a swarm and reads what it produced; that
+//! question is answered by a series of unit benches, each of which stays cheap
+//! and says which decision was wrong.
 //!
 //! Files: [`rig`] the harness under test; [`intercept`] watching and answering
 //! tool calls; [`script`] a model whose replies are written by the test;
@@ -34,13 +39,13 @@ pub mod script;
 
 pub use grader::{Grader, GraderOutcome, Verdict};
 pub use intercept::{Interceptor, RecordedToolCall, ToolsChoice};
-pub use rig::{Rig, RigBuilder};
+pub use rig::{Rig, RigBuilder, Watch};
 pub use script::ScriptedModel;
 
 /// Why a run stopped early.
 ///
 /// A tripwire is "this must never happen", and it is evaluated continuously
-/// while a case drives. Tripping one ends the run at once, so a looping swarm
+/// while a case drives. Tripping one ends the run at once, so a looping Session
 /// costs at most a call or two past the violation.
 ///
 /// This is a value a test propagates with `?`, not a panic and not a process

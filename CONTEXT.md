@@ -99,8 +99,10 @@ stopping over: either the project has a word for it, or you are inventing langua
 - **Rig** — One Sandman under test: its own database, Event stream, scheduler, log and
   Harness, sharing nothing. _Avoid_: Fixture, Sandbox, Environment.
 - **Case** — One question put to the harness-and-model combination, with the verification
-  that answers it. A case is a test. _Avoid_: Scenario, Trial, Experiment.
+  that answers it: one Session, every tool call intercepted, and assertions on what the
+  model reached for. A case is a test. _Avoid_: Scenario, Trial, Experiment.
 - **Tripwire** — A condition evaluated continuously while a case runs: "this must never
   happen". Violating one ends the run at once. _Avoid_: Assertion, Guard, Alarm.
 - **Grader** — Verification a model has to do, for outcomes no read of state can judge.
-  Bench machinery, so its cost is reported apart from Spend. _Avoid_: Judge, Scorer.
+  Rare, and on a stronger model than the swarm's. Bench machinery, so its cost is reported
+  apart from Spend. _Avoid_: Judge, Scorer.
