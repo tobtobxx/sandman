@@ -32,6 +32,7 @@
 //! Defines: [`Trip`], [`CheckResult`].
 
 pub mod cases;
+pub mod color;
 pub mod grader;
 pub mod intercept;
 pub mod report;

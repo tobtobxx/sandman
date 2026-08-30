@@ -104,6 +104,18 @@ async fn run_once(
 	Ok(report)
 }
 
+/// Say a run is starting, before it is awaited — the only reason to see this
+/// at all is that a real model call can take several seconds, and silence
+/// until the result reads like a hang.
+fn announce(on: bool, case: &str, k: usize, times: usize) {
+	let what = if times > 1 {
+		format!("{case} (run {k}/{times})")
+	} else {
+		case.to_string()
+	};
+	println!("{} {what}", sandman::bench::color::cyan(on, "→"));
+}
+
 /// Pass rate, mean wall time and total cost — swarm Spend plus grader cost —
 /// per case, in the order cases were first seen.
 fn summarize(reports: &[(String, RunReport)]) -> Vec<CaseSummary> {
@@ -153,15 +165,39 @@ async fn main() {
 		},
 	};
 
+	let on = sandman::bench::color::enabled();
 	let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+	let total = args.cases.len() * args.times;
+	println!(
+		"{}",
+		sandman::bench::color::bold(
+			on,
+			&format!(
+				"Running {} case(s), {} time(s) each — {total} run(s) total",
+				args.cases.len(),
+				args.times
+			)
+		)
+	);
+
 	let mut reports: Vec<(String, RunReport)> = Vec::new();
+	let mut done = 0usize;
 
 	if args.serial {
 		for &case in &args.cases {
 			for k in 1..=args.times {
+				announce(on, case.name, k, args.times);
 				let dir = report::run_dir(&args.out, &stamp, case.name, k);
+				done += 1;
 				match run_once(case, &dir).await {
 					Ok(report) => {
+						print!(
+							"{} ",
+							sandman::bench::color::dim(
+								on,
+								&format!("[{done}/{total}]")
+							)
+						);
 						report::print_run(&report);
 						reports.push((case.name.to_string(), report));
 					},
@@ -170,18 +206,27 @@ async fn main() {
 			}
 		}
 	} else {
-		let mut handles = Vec::new();
+		let mut set = tokio::task::JoinSet::new();
 		for &case in &args.cases {
 			for k in 1..=args.times {
+				announce(on, case.name, k, args.times);
 				let dir = report::run_dir(&args.out, &stamp, case.name, k);
-				handles.push(tokio::spawn(async move {
-					(case.name, run_once(case, &dir).await)
-				}));
+				set.spawn(
+					async move { (case.name, run_once(case, &dir).await) },
+				);
 			}
 		}
-		for handle in handles {
-			match handle.await {
+		while let Some(outcome) = set.join_next().await {
+			done += 1;
+			match outcome {
 				Ok((name, Ok(report))) => {
+					print!(
+						"{} ",
+						sandman::bench::color::dim(
+							on,
+							&format!("[{done}/{total}]")
+						)
+					);
 					report::print_run(&report);
 					reports.push((name.to_string(), report));
 				},

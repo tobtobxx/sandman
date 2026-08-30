@@ -154,42 +154,92 @@ pub fn write_artifacts(
 	Ok(())
 }
 
-/// One line per run, then a line per failed check.
+/// One line per run, then a line per failed check. Colored so a scan of a long
+/// run finds the failures without reading every line.
 pub fn print_run(report: &RunReport) {
-	let verdict = if report.pass { "PASS" } else { "FAIL" };
+	let on = super::color::enabled();
+	let verdict = if report.pass {
+		super::color::green(on, "PASS")
+	} else {
+		super::color::red(on, "FAIL")
+	};
 	println!(
-		"[{verdict}] {} ({}ms, {}) — {}",
-		report.case, report.wall_ms, report.spend.cost, report.description
+		"[{verdict}] {} {} {} — {}",
+		super::color::bold(on, &report.case),
+		super::color::dim(on, &format!("{}ms", report.wall_ms)),
+		super::color::dim(on, &report.spend.cost.to_string()),
+		report.description
 	);
+
+	let mark = super::color::red(on, "✗");
 	if let Some(trip) = &report.tripped {
-		println!("  tripped: {trip}");
+		println!("  {mark} tripped: {trip}");
 	}
 	for check in &report.checks {
 		if !check.ok {
-			println!("  check `{}` failed: {}", check.name, check.detail);
+			println!(
+				"  {mark} check `{}` failed: {}",
+				check.name, check.detail
+			);
 		}
 	}
 	for grader in &report.graders {
 		if grader.verdict != Verdict::Pass {
-			println!("  grader `{}` failed: {}", grader.name, grader.detail);
+			println!(
+				"  {mark} grader `{}` failed: {}",
+				grader.name, grader.detail
+			);
 		}
 	}
 	for failed in &report.failed_calls {
-		println!("  call failed: {failed}");
+		println!("  {mark} call failed: {failed}");
 	}
 }
 
-/// Pass rate, mean wall time and total cost per case.
+/// Pass rate, mean wall time and total cost per case, aligned into a table,
+/// with a totals line underneath.
 pub fn print_summary(summaries: &[CaseSummary]) {
+	if summaries.is_empty() {
+		return;
+	}
+	let on = super::color::enabled();
+	println!("\n{}", super::color::bold(on, "Summary"));
+
+	let name_width = summaries.iter().map(|s| s.case.len()).max().unwrap_or(0);
+	let mut total_passed = 0;
+	let mut total_runs = 0;
+	let mut total_cost = Cost(0);
+
 	for summary in summaries {
 		println!(
-			"{}: {}/{} passed, mean {}ms, total {}",
+			"  {:<name_width$}  {} passed  mean {:>6}ms   total {}",
 			summary.case,
-			summary.passed,
-			summary.runs,
+			ratio(on, summary.passed, summary.runs),
 			summary.mean_wall_ms,
-			summary.total_cost
+			summary.total_cost,
 		);
+		total_passed += summary.passed;
+		total_runs += summary.runs;
+		total_cost = total_cost + summary.total_cost;
+	}
+
+	println!(
+		"  {} run(s) passed, total spent {}",
+		ratio(on, total_passed, total_runs),
+		total_cost
+	);
+}
+
+/// `passed/runs`, colored green if every run passed, red if none did, yellow
+/// otherwise.
+fn ratio(on: bool, passed: usize, runs: usize) -> String {
+	let text = format!("{passed}/{runs}");
+	if runs > 0 && passed == runs {
+		super::color::green(on, &text)
+	} else if passed == 0 {
+		super::color::red(on, &text)
+	} else {
+		super::color::yellow(on, &text)
 	}
 }
 

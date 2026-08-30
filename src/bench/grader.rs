@@ -66,7 +66,15 @@ pub struct GraderOutcome {
 pub async fn run(
 	grader: &Grader,
 ) -> Result<GraderOutcome, crate::model::ModelError> {
-	let model = OpenRouter::new(ENDPOINT, API_KEY, GRADER_MODEL, None);
+	// Unlike the swarm's own model, `GRADER_MODEL` refuses to have reasoning
+	// disabled outright (HTTP 400: "Reasoning is mandatory for this endpoint");
+	// asking for the least of it is the equivalent for a model that insists.
+	let model = OpenRouter::new(
+		ENDPOINT,
+		API_KEY,
+		GRADER_MODEL,
+		Some("low".to_string()),
+	);
 	let request = CallRequest {
 		messages: vec![
 			Message::System { content: GRADER_SYSTEM.to_string() },
