@@ -10,18 +10,23 @@
 //!
 //! Defines: [`Web`], [`attach`].
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::domain::{ChannelId, ChannelKind};
 
 /// The browser, as a Channel.
 pub struct Web {
-	id: ChannelId,
+	/// Set once, right after the Store mints it — `attach` cannot know it any
+	/// earlier, since the Store is what mints it.
+	id: OnceLock<ChannelId>,
 }
 
 impl crate::comms::Channel for Web {
 	fn id(&self) -> ChannelId {
-		unimplemented!()
+		*self
+			.id
+			.get()
+			.expect("id is set before this Channel is used")
 	}
 
 	fn kind(&self) -> ChannelKind {
@@ -35,7 +40,10 @@ impl crate::comms::Channel for Web {
 
 /// Open the browser Channel.
 pub async fn attach(
-	_harness: Arc<crate::harness::Harness>,
+	harness: Arc<crate::harness::Harness>,
 ) -> Result<ChannelId, crate::store::StoreError> {
-	unimplemented!()
+	let web = Arc::new(Web { id: OnceLock::new() });
+	let id = harness.attach(web.clone()).await?;
+	web.id.set(id).expect("attach runs once per Web");
+	Ok(id)
 }

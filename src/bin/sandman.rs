@@ -16,6 +16,12 @@
 //!     Put a Task into a Sandman that is already running, through its control
 //!     socket, and print the id. This is how anything that is not a Channel —
 //!     cron, an RSS script, a mail watcher — gets work in.
+//!
+//! sandman list [--state pending|running|completed|cancelled] [--count N]
+//!     List a running Sandman's queue, over the control socket.
+//!
+//! sandman spend
+//!     What a running Sandman has spent, over the control socket.
 //! ```
 //!
 //! Common flags: `--db <path>` (default `sandman.sqlite`), `--log <path>`
@@ -25,6 +31,20 @@
 //! [`sandman::tools::ToolRunner`], which [`sandman::domain::Clock`]. Everything
 //! below takes what it needs and builds nothing itself, which is what lets the
 //! bench assemble the same Harness with different pieces.
+//!
+//! The browser Channel is [`sandman::channels::web`]'s to open; nothing here
+//! opens it yet, since the server that would serve it — `sandman::web` — is
+//! not built (see TASKS.md, step 10). Interactive mode runs on the terminal
+//! Channel and the control socket alone until then.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use sandman::domain::{
+	Brief, Creator, Duration, NewTask, Schedule, TaskPriority, TaskState, Title,
+};
+use sandman::harness::{Drive, Harness};
+use sandman::roles::RoleName;
 
 /// Which way in this invocation is.
 enum Command {
@@ -33,6 +53,13 @@ enum Command {
 	Run(TaskArgs),
 	/// A Task into a Sandman already running.
 	Task(TaskArgs),
+	/// A running Sandman's queue, over the control socket.
+	List {
+		state: Option<String>,
+		count: Option<usize>,
+	},
+	/// What a running Sandman has spent, over the control socket.
+	Spend,
 }
 
 /// What both Task-creating commands take.
@@ -52,46 +79,386 @@ struct Paths {
 	socket: std::path::PathBuf,
 }
 
+/// The argv shape, read by `clap`. Kept private to `parse`: everywhere else in
+/// this file works in terms of [`Command`], [`TaskArgs`] and [`Paths`], which
+/// say what Sandman does rather than how the flags spelled it.
+#[derive(clap::Parser)]
+#[command(
+	name = "sandman",
+	about = "An agent swarm that coordinates through a shared queue"
+)]
+struct Cli {
+	#[command(subcommand)]
+	command: Option<Cmd>,
+
+	/// Where the database lives.
+	#[arg(long, global = true, default_value = "sandman.sqlite")]
+	db: PathBuf,
+	/// Where the trace goes.
+	#[arg(long, global = true, default_value = "sandman.log")]
+	log: PathBuf,
+	/// Where the control socket lives. Defaults per [`sandman::control::socket_path`].
+	#[arg(long, global = true)]
+	socket: Option<PathBuf>,
+	/// Write every body in the trace out whole, instead of eliding it.
+	#[arg(long, global = true)]
+	verbose: bool,
+}
+
+#[derive(clap::Subcommand)]
+enum Cmd {
+	/// One Task, run until nothing is left, then print its Results and what it cost.
+	Run(TaskFlags),
+	/// Put a Task into a Sandman that is already running.
+	Task(TaskFlags),
+	/// List a running Sandman's queue.
+	List(ListFlags),
+	/// What a running Sandman has spent.
+	Spend,
+}
+
+#[derive(clap::Args)]
+struct TaskFlags {
+	#[arg(long)]
+	role: String,
+	#[arg(long)]
+	title: Option<String>,
+	#[arg(long)]
+	brief: String,
+	/// Seconds from now before this Task may run.
+	#[arg(long = "at")]
+	at: Option<i64>,
+	/// Seconds between occurrences, anchored to `--at`.
+	#[arg(long = "every")]
+	every: Option<i64>,
+	#[arg(long)]
+	priority: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct ListFlags {
+	/// Only Tasks in this state. Omit for every state.
+	#[arg(long)]
+	state: Option<String>,
+	/// Limit how many to list. Omit for no limit.
+	#[arg(long)]
+	count: Option<usize>,
+}
+
+impl From<TaskFlags> for TaskArgs {
+	fn from(f: TaskFlags) -> TaskArgs {
+		TaskArgs {
+			role: f.role,
+			title: f.title,
+			brief: f.brief,
+			at_seconds: f.at,
+			every_seconds: f.every,
+			priority: f.priority,
+		}
+	}
+}
+
 fn parse(
-	_argv: &[String],
+	argv: &[String],
 ) -> Result<(Command, Paths, sandman::log::Verbosity), String> {
-	unimplemented!()
+	use clap::Parser;
+
+	// `Error::exit` prints to the right stream (stdout for `--help` and
+	// `--version`, stderr otherwise) and leaves with the matching code, so a
+	// bad or absent argv never reaches the rest of this function.
+	let cli = Cli::try_parse_from(argv).unwrap_or_else(|e| e.exit());
+
+	let paths = Paths {
+		db: cli.db,
+		log: cli.log,
+		socket: cli.socket.unwrap_or_else(sandman::control::socket_path),
+	};
+	let verbosity = if cli.verbose {
+		sandman::log::Verbosity::Verbose
+	} else {
+		sandman::log::Verbosity::Terse
+	};
+	let command = match cli.command {
+		None => Command::Interactive,
+		Some(Cmd::Run(flags)) => Command::Run(flags.into()),
+		Some(Cmd::Task(flags)) => Command::Task(flags.into()),
+		Some(Cmd::List(flags)) => {
+			Command::List { state: flags.state, count: flags.count }
+		},
+		Some(Cmd::Spend) => Command::Spend,
+	};
+
+	Ok((command, paths, verbosity))
 }
 
 /// Build a whole Sandman: database, Event stream, logger, model, tools,
 /// scheduler, Harness.
 async fn assemble(
-	_paths: &Paths,
-	_verbosity: sandman::log::Verbosity,
-) -> Result<std::sync::Arc<sandman::harness::Harness>, String> {
-	unimplemented!()
+	paths: &Paths,
+	verbosity: sandman::log::Verbosity,
+) -> Result<Arc<Harness>, String> {
+	use sandman::db::Backing;
+	use sandman::domain::{Clock, SystemClock};
+	use sandman::event::Events;
+	use sandman::log::Logger;
+	use sandman::model::{Model, OpenRouter, MODEL};
+	use sandman::scheduler::Scheduler;
+	use sandman::store::Store;
+	use sandman::tools::Registry;
+
+	let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+	let now = clock.now();
+
+	let events = Arc::new(Events::new(1024));
+
+	let logger =
+		Arc::new(Logger::create(&paths.log, verbosity).map_err(|e| {
+			format!("could not open {}: {e}", paths.log.display())
+		})?);
+	{
+		let logger = logger.clone();
+		let events = events.clone();
+		tokio::spawn(async move { logger.follow(&events).await });
+	}
+
+	let store = Arc::new(
+		Store::open(
+			Backing::File(paths.db.clone()),
+			events.clone(),
+			MODEL,
+			now,
+		)
+		.map_err(|e| format!("could not open {}: {e}", paths.db.display()))?,
+	);
+	logger.note(
+		"sandman",
+		&sandman::log::banner(&format!(
+			"started, model {MODEL}, db {}",
+			paths.db.display()
+		)),
+	);
+	if let Some((from, to)) = store.migration() {
+		logger.note("db", &format!("migrated schema v{from} to v{to}"));
+	}
+
+	let model: Arc<dyn Model> = Arc::new(OpenRouter::from_env());
+	let scheduler = Arc::new(Scheduler::new(model, store.clone()));
+	let tools = Arc::new(Registry::all(events.clone()));
+
+	Ok(Harness::new(store, events, scheduler, tools, clock))
 }
 
 /// Two Channels, a Watcher, and a control socket, running until the human
 /// leaves.
 async fn interactive(
-	_paths: Paths,
-	_verbosity: sandman::log::Verbosity,
+	paths: Paths,
+	verbosity: sandman::log::Verbosity,
 ) -> Result<(), String> {
-	unimplemented!()
+	let harness = assemble(&paths, verbosity).await?;
+
+	sandman::channels::stdio::attach(harness.clone())
+		.await
+		.map_err(|e| format!("could not open the terminal: {e}"))?;
+
+	let socket_harness = harness.clone();
+	let socket_path = paths.socket.clone();
+	tokio::spawn(async move {
+		if let Err(e) =
+			sandman::control::serve(socket_harness, &socket_path).await
+		{
+			eprintln!("control socket stopped: {e}");
+		}
+	});
+
+	tokio::select! {
+		result = harness.run(Drive::Full) => result.map_err(|e| e.to_string())?,
+		// Ctrl+C leaves the same way `/quit` does: stop starting new work,
+		// then wind down. `harness.run` notices `stop()` and returns on its
+		// own, so nothing here is left half-finished.
+		_ = tokio::signal::ctrl_c() => harness.stop(),
+	}
+
+	harness.wind_down(Duration::from_secs(30)).await;
+	let _ = harness.store.end_run(harness.now());
+	let _ = std::fs::remove_file(&paths.socket);
+
+	Ok(())
 }
 
 /// One Task in its own Harness, until nothing is left. Prints every Task's
 /// Result and what the run spent.
 async fn one_shot(
-	_args: TaskArgs,
-	_paths: Paths,
-	_verbosity: sandman::log::Verbosity,
+	args: TaskArgs,
+	paths: Paths,
+	verbosity: sandman::log::Verbosity,
 ) -> Result<(), String> {
-	unimplemented!()
+	let harness = assemble(&paths, verbosity).await?;
+
+	let role = RoleName::parse(&args.role)
+		.ok_or_else(|| format!("`{}` is not a Role.", args.role))?;
+	let title =
+		Title::try_from(args.title.unwrap_or_else(|| args.brief.clone()))
+			.map_err(|e| e.to_string())?;
+	let brief = Brief::try_from(args.brief).map_err(|e| e.to_string())?;
+	let priority = match args.priority.as_deref() {
+		None => TaskPriority::default(),
+		Some(given) => TaskPriority::parse(given).ok_or_else(|| {
+			format!("`{given}` is not a priority. Use high, normal or low.")
+		})?,
+	};
+	let schedule = Schedule::from_offsets(
+		args.at_seconds,
+		args.every_seconds,
+		harness.now(),
+	);
+
+	let new = NewTask {
+		title,
+		brief,
+		role,
+		schedule,
+		subscriber: None,
+		priority,
+		created_by: Creator::Cli,
+	};
+	harness.create_task(new).map_err(|e| e.to_string())?;
+
+	harness
+		.run_until_idle(Drive::Full)
+		.await
+		.map_err(|e| e.to_string())?;
+
+	let tasks = harness
+		.store
+		.tasks_of_run(harness.store.run())
+		.map_err(|e| e.to_string())?;
+	for task in &tasks {
+		match &task.state {
+			TaskState::Completed { result, .. } => {
+				println!(
+					"{} \"{}\": {}",
+					task.id,
+					task.title,
+					result.content()
+				);
+			},
+			TaskState::Cancelled { .. } => {
+				println!("{} \"{}\": cancelled.", task.id, task.title);
+			},
+			TaskState::Pending | TaskState::Running { .. } => {},
+		}
+	}
+
+	let spend = harness.spend().map_err(|e| e.to_string())?;
+	println!(
+		"Spent {} call(s), {} token(s), {}",
+		spend.calls, spend.tokens, spend.cost
+	);
+
+	harness.wind_down(Duration::from_secs(30)).await;
+	let _ = harness.store.end_run(harness.now());
+
+	Ok(())
 }
 
 /// One Task into a running Sandman, over the control socket.
-async fn into_running(_args: TaskArgs, _paths: Paths) -> Result<(), String> {
-	unimplemented!()
+async fn into_running(args: TaskArgs, paths: Paths) -> Result<(), String> {
+	let request = sandman::control::Request::CreateTask {
+		role: args.role,
+		title: args.title.unwrap_or_else(|| args.brief.clone()),
+		brief: args.brief,
+		run_at_seconds: args.at_seconds,
+		repeat_seconds: args.every_seconds,
+		priority: args.priority,
+	};
+	let response = sandman::control::send(&paths.socket, &request)
+		.await
+		.map_err(|e| e.to_string())?;
+
+	match response {
+		sandman::control::Response::Created { id } => {
+			println!("{id}");
+			Ok(())
+		},
+		sandman::control::Response::Error { message } => Err(message),
+		_ => Err("the control socket answered a CreateTask with something \
+		          else."
+			.to_string()),
+	}
+}
+
+/// A running Sandman's queue, over the control socket.
+async fn list(
+	state: Option<String>,
+	count: Option<usize>,
+	paths: Paths,
+) -> Result<(), String> {
+	let request = sandman::control::Request::ListTasks { state, count };
+	let response = sandman::control::send(&paths.socket, &request)
+		.await
+		.map_err(|e| e.to_string())?;
+
+	match response {
+		sandman::control::Response::Tasks { tasks } => {
+			if tasks.is_empty() {
+				println!("No Tasks match.");
+			}
+			for task in tasks {
+				println!(
+					"{} [{}] {}: {}",
+					task.id, task.state, task.role, task.title
+				);
+			}
+			Ok(())
+		},
+		sandman::control::Response::Error { message } => Err(message),
+		_ => Err("the control socket answered a ListTasks with something \
+		          else."
+			.to_string()),
+	}
+}
+
+/// What a running Sandman has spent, over the control socket.
+async fn spend(paths: Paths) -> Result<(), String> {
+	let response = sandman::control::send(
+		&paths.socket,
+		&sandman::control::Request::Spend,
+	)
+	.await
+	.map_err(|e| e.to_string())?;
+
+	match response {
+		sandman::control::Response::Spent { calls, tokens, cost } => {
+			println!("Spent {calls} call(s), {tokens} token(s), {cost}");
+			Ok(())
+		},
+		sandman::control::Response::Error { message } => Err(message),
+		_ => Err("the control socket answered a Spend with something else."
+			.to_string()),
+	}
 }
 
 #[tokio::main]
 async fn main() {
-	unimplemented!()
+	let argv: Vec<String> = std::env::args().collect();
+	let (command, paths, verbosity) = match parse(&argv) {
+		Ok(parsed) => parsed,
+		Err(message) => {
+			eprintln!("{message}");
+			std::process::exit(1);
+		},
+	};
+
+	let result = match command {
+		Command::Interactive => interactive(paths, verbosity).await,
+		Command::Run(args) => one_shot(args, paths, verbosity).await,
+		Command::Task(args) => into_running(args, paths).await,
+		Command::List { state, count } => list(state, count, paths).await,
+		Command::Spend => spend(paths).await,
+	};
+
+	if let Err(message) = result {
+		eprintln!("{message}");
+		std::process::exit(1);
+	}
 }

@@ -86,6 +86,9 @@ pub struct Harness {
 	/// ever in flight per Channel.
 	comms_driving: Mutex<HashSet<ChannelId>>,
 	running: std::sync::atomic::AtomicBool,
+	/// Woken by [`Harness::stop`], so [`Harness::run`]'s wait does not sit out
+	/// its sleep or wait for an unrelated Event once nothing is left to do.
+	woken: tokio::sync::Notify,
 }
 
 impl Harness {
@@ -107,6 +110,7 @@ impl Harness {
 			driving: Mutex::new(HashSet::new()),
 			comms_driving: Mutex::new(HashSet::new()),
 			running: std::sync::atomic::AtomicBool::new(true),
+			woken: tokio::sync::Notify::new(),
 		})
 	}
 
@@ -359,6 +363,7 @@ impl Harness {
 			tokio::select! {
 				_ = &mut sleep => {},
 				event = events.recv() => self.forward_said(event),
+				_ = self.woken.notified() => {},
 			}
 			// Drain whatever else arrived without waiting again, so a burst
 			// of Events does not cost a re-check each.
@@ -477,6 +482,10 @@ impl Harness {
 	/// Stop starting new work. Loops already running finish their turn.
 	pub fn stop(&self) {
 		self.running.store(false, Ordering::SeqCst);
+		// `notify_one`, not `notify_waiters`: `run`'s select may not have
+		// reached its wait yet, and only `notify_one` leaves a permit for a
+		// waiter that has not registered yet.
+		self.woken.notify_one();
 	}
 
 	/// Stop everything and make sure nothing can still spend: cancel every Task

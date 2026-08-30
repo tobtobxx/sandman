@@ -15,8 +15,7 @@
 use async_trait::async_trait;
 
 use crate::domain::{
-	Brief, Creator, Duration, NewTask, Schedule, TaskId, TaskPriority,
-	Timestamp, Title, ToolSchema,
+	Brief, Creator, NewTask, Schedule, TaskId, TaskPriority, Title, ToolSchema,
 };
 use crate::roles::{RoleName, SchemaCtx, ToolName};
 use crate::session::SessionCtx;
@@ -89,33 +88,16 @@ fn require_role(role: Option<String>) -> Result<RoleName, ToolError> {
 	RoleName::parse(&given).ok_or(ToolError::NoSuchRole { given })
 }
 
-/// `create_task_full`'s Schedule: `Now` unless a delay or a repeat was given.
-fn schedule_from(
-	run_at_seconds: Option<i64>,
-	repeat_seconds: Option<i64>,
-	now: Timestamp,
-) -> Schedule {
-	let first = now.plus(Duration::from_secs(run_at_seconds.unwrap_or(0)));
-	match repeat_seconds {
-		Some(secs) => {
-			Schedule::Repeating { first, every: Duration::from_secs(secs) }
-		},
-		None if run_at_seconds.is_some() => Schedule::At(first),
-		None => Schedule::Now,
-	}
-}
-
 /// `create_task_full`'s Priority, or why the one given is not one. Defaults
 /// to normal.
 fn priority_from(priority: Option<String>) -> Result<TaskPriority, ToolError> {
 	match priority.as_deref() {
 		None => Ok(TaskPriority::default()),
-		Some("high") => Ok(TaskPriority::High),
-		Some("normal") => Ok(TaskPriority::Normal),
-		Some("low") => Ok(TaskPriority::Low),
-		Some(other) => Err(ToolError::Rejected(format!(
-			"`{other}` is not a priority. Use high, normal or low."
-		))),
+		Some(other) => TaskPriority::parse(other).ok_or_else(|| {
+			ToolError::Rejected(format!(
+				"`{other}` is not a priority. Use high, normal or low."
+			))
+		}),
 	}
 }
 
@@ -299,7 +281,7 @@ impl Tool for CreateTaskFull {
 
 	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String {
 		let parsed = parse_args(&args);
-		let schedule = schedule_from(
+		let schedule = Schedule::from_offsets(
 			parsed.run_at_seconds,
 			parsed.repeat_seconds,
 			ctx.clock.now(),

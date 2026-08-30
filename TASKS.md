@@ -20,32 +20,16 @@ Ten steps, bottom up. `cargo check` passes today and must pass after each step.
 
 ### 6. `session.rs`, `reflect.rs`, `worker.rs`, `comms.rs` — done
 
-### 7. `harness.rs`
+### 7. `harness.rs` — done
 
-Watch out:
-- `step` starts only what is not in motion. Test and insert `driving` /
-  `comms_driving` under one lock.
-- `run` sleeps on `next_due_in` and wakes on the Event stream. Looping on `step` burns
-  a core.
-- `complete_task`: record, deliver, release waiters, re-arm — in that order.
-- `cancel_task` stops the whole chain, then releases waiters with `render_cancelled`.
-  There is no chain id to match on (see Known debt).
-- Nothing touches a running Task's Session. It reads the cancelled state itself.
-- `run_until_idle` counts a Session blocked in `await_result`, and a Task waiting on
-  its own time, as busy.
-- `wind_down` cancels first, then waits for the last call, so its cost is recorded.
+### 8. `channels/`, `control.rs`, `bin/sandman.rs` — first runnable Sandman — done
 
-### 8. `channels/`, `control.rs`, `bin/sandman.rs` — first runnable Sandman
-
-Watch out:
-- Only the conversation reaches stdout. The trace goes to `sandman.log`.
-- Stdin blocks. Read it on a blocking task.
-- A unix socket, owner-only, and a stale file from a killed process is replaced.
-- The socket never writes the database. It calls the Harness.
-- Wiring lives here alone. Nothing below builds a Model, a Clock or a Registry.
-- If `Store::migration()` is `Some((from, to))` after `Store::open`, note it on
-  the Logger once — `db::schema::apply` already reports it; nothing before
-  this step has a Logger to hand it to.
+The Web Channel opens (`channels::web::attach`), but `interactive()` does not attach it
+or start a server for it yet — `src/web/` is step 10. `stop()` alone did not wake
+`Harness::run`'s select when the swarm was fully idle (a `/quit` or Ctrl-D could hang
+for up to an hour); fixed with a `tokio::sync::Notify` on the Harness, woken by `stop()`,
+with a matching branch in `run`'s select. Ctrl+C is also wired into `interactive()` now,
+alongside `/quit`.
 
 ### 9. `bench/`, `tests/cases.rs`, `bin/bench.rs`
 

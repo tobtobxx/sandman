@@ -115,6 +115,19 @@ pub enum TaskPriority {
 	Low,
 }
 
+impl TaskPriority {
+	/// The three names it goes by on a tool call, the control socket and the
+	/// command line — one parser, so they cannot drift apart.
+	pub fn parse(name: &str) -> Option<TaskPriority> {
+		match name {
+			"high" => Some(TaskPriority::High),
+			"normal" => Some(TaskPriority::Normal),
+			"low" => Some(TaskPriority::Low),
+			_ => None,
+		}
+	}
+}
+
 /// Who put this Task on the queue.
 #[derive(
 	Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
@@ -202,6 +215,24 @@ impl Schedule {
 				every: *every,
 			}),
 			_ => None,
+		}
+	}
+
+	/// Build from a tool call's, a control request's or the command line's pair
+	/// of seconds-from-now offsets: a delay before the first run, and how often
+	/// it repeats after that. One parser, so the three cannot drift apart.
+	pub fn from_offsets(
+		run_at_seconds: Option<i64>,
+		repeat_seconds: Option<i64>,
+		now: Timestamp,
+	) -> Schedule {
+		let first = now.plus(Duration::from_secs(run_at_seconds.unwrap_or(0)));
+		match repeat_seconds {
+			Some(secs) => {
+				Schedule::Repeating { first, every: Duration::from_secs(secs) }
+			},
+			None if run_at_seconds.is_some() => Schedule::At(first),
+			None => Schedule::Now,
 		}
 	}
 }
