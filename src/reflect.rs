@@ -35,26 +35,15 @@
 //! Defines: [`reflect`], [`interrupt`], [`due_for_interrupt`], [`INTERRUPT_EVERY`],
 //! [`section`].
 
-use crate::domain::{Nudge, Outcome, SessionId};
+use crate::domain::{
+	CallRequest, LessonSubject, Message, NewLesson, Nudge, Outcome, Reflection,
+	ReflectionKind, ReflectionResult, Reply, SessionId, SessionKind,
+};
+use crate::scheduler::{SchedulerError, Tier};
 use crate::session::SessionCtx;
-
-/// How many messages may pass without any metacognition before an interrupt
-/// fires.
-///
-/// Counted from the last one of either kind. A review has just read the whole
-/// conversation and had its own chance at feedback, so an interrupt one message
-/// later would only spend money to repeat it. A Worker taking short turns is
-/// reviewed and never interrupted; a Comms Session — never reviewed — is
-/// interrupted on a plain message count.
-pub const INTERRUPT_EVERY: usize = 15;
 
 /// Every section metacognition may write. A section ends where the next begins.
 pub const SECTIONS: [&str; 3] = ["summary", "feedback", "lessons"];
-
-/// Is this Session due for an interrupt on its next model call?
-pub async fn due_for_interrupt(_ctx: &SessionCtx) -> bool {
-	unimplemented!()
-}
 
 /// Review one Worker Session's conversation.
 ///
@@ -64,8 +53,14 @@ pub async fn due_for_interrupt(_ctx: &SessionCtx) -> bool {
 ///
 /// Neither a summary nor feedback means the review had nothing to say, and the
 /// caller falls back to what the Worker itself wrote last.
-pub async fn reflect(_ctx: &SessionCtx) -> Outcome {
-	unimplemented!()
+pub async fn reflect(ctx: &SessionCtx) -> Outcome {
+	metacognise(
+		ctx,
+		ReflectionKind::Review,
+		crate::prompts::META_SYSTEM,
+		crate::prompts::REVIEW,
+	)
+	.await
 }
 
 /// Interrupt a Session mid-turn and ask whether the run is still going somewhere:
@@ -75,8 +70,18 @@ pub async fn reflect(_ctx: &SessionCtx) -> Outcome {
 /// A summary is dropped rather than obeyed. The interrupt was told not to write
 /// one, and a model that writes it anyway is answering a Task on behalf of a
 /// Session that never offered an answer. An empty answer is the expected one.
-pub async fn interrupt(_ctx: &SessionCtx) -> Nudge {
-	unimplemented!()
+pub async fn interrupt(ctx: &SessionCtx) -> Nudge {
+	match metacognise(
+		ctx,
+		ReflectionKind::Interrupt,
+		crate::prompts::META_SYSTEM,
+		crate::prompts::INTERRUPT,
+	)
+	.await
+	{
+		Outcome::Feedback(text) => Nudge::Feedback(text),
+		Outcome::Complete(_) | Outcome::Nothing => Nudge::Nothing,
+	}
 }
 
 /// One metacognitive call, whichever it is.
@@ -98,12 +103,97 @@ pub async fn interrupt(_ctx: &SessionCtx) -> Nudge {
 ///   Reflection on and none is written. Failing open still holds: the Session
 ///   carries on either way.
 async fn metacognise(
-	_ctx: &SessionCtx,
-	_kind: crate::domain::ReflectionKind,
-	_system: &str,
-	_question: &str,
+	ctx: &SessionCtx,
+	kind: ReflectionKind,
+	system: &str,
+	question: &str,
 ) -> Outcome {
-	unimplemented!()
+	let Ok(after_message) = ctx.store.message_count(ctx.id) else {
+		return Outcome::Nothing;
+	};
+	let Ok(transcript) = ctx.store.messages(ctx.id) else {
+		return Outcome::Nothing;
+	};
+
+	let mut messages = Vec::with_capacity(transcript.len() + 2);
+	messages.push(Message::System { content: system.to_string() });
+	for message in transcript {
+		messages.push(match message {
+			Message::System { content } => Message::User { content },
+			other => other,
+		});
+	}
+	messages.push(Message::User { content: question.to_string() });
+
+	let request = CallRequest { messages, tools: Vec::new() };
+	let now = ctx.clock.now();
+
+	match ctx
+		.scheduler
+		.request(ctx.id, request, Tier::Metacognition, now)
+		.await
+	{
+		Ok((call, completion)) => {
+			let content = match completion.reply {
+				Reply::Text(text) => text,
+				Reply::Calls { preamble, .. } => preamble.unwrap_or_default(),
+			};
+
+			let feedback = section(&content, "feedback")
+				.map(|s| s.trim().to_string())
+				.filter(|s| !s.is_empty());
+			let summary = if kind == ReflectionKind::Review {
+				section(&content, "summary")
+					.map(|s| s.trim().to_string())
+					.filter(|s| !s.is_empty())
+			} else {
+				None
+			};
+
+			let outcome = match feedback {
+				Some(text) => Outcome::Feedback(text),
+				None => match summary {
+					Some(text) => Outcome::Complete(text),
+					None => Outcome::Nothing,
+				},
+			};
+
+			let _ = ctx.store.record_reflection(
+				ctx.id,
+				Reflection {
+					kind,
+					call,
+					after_message,
+					at: now,
+					result: ReflectionResult::Ran {
+						reasoning: completion.reasoning,
+						content: content.clone(),
+						outcome: outcome.clone(),
+					},
+				},
+			);
+
+			keep_lessons(ctx, ctx.id, &content).await;
+
+			outcome
+		},
+		Err(SchedulerError::Call { call, source }) => {
+			let _ = ctx.store.record_reflection(
+				ctx.id,
+				Reflection {
+					kind,
+					call,
+					after_message,
+					at: now,
+					result: ReflectionResult::FailedOpen {
+						error: source.to_string(),
+					},
+				},
+			);
+			Outcome::Nothing
+		},
+		Err(SchedulerError::Store(_)) => Outcome::Nothing,
+	}
 }
 
 /// Keep what a metacognition thought was worth keeping.
@@ -112,8 +202,32 @@ async fn metacognise(
 /// expected answer; either way it writes nothing. A lesson never re-enters the
 /// conversation it came from — the Session still cannot see what was written
 /// about it.
-async fn keep_lessons(_ctx: &SessionCtx, _session: SessionId, _content: &str) {
-	unimplemented!()
+async fn keep_lessons(ctx: &SessionCtx, session: SessionId, content: &str) {
+	let Some(lessons) = section(content, "lessons") else {
+		return;
+	};
+	let text = lessons.trim();
+	if text.is_empty() {
+		return;
+	}
+	let Ok(Some(loaded)) = ctx.store.session(session) else {
+		return;
+	};
+	let about = match loaded.kind {
+		SessionKind::Worker { task, role } => {
+			let Ok(Some(t)) = ctx.store.task(task) else {
+				return;
+			};
+			LessonSubject::Task { task, role, title: t.title }
+		},
+		SessionKind::Comms { channel, .. } => {
+			LessonSubject::Conversation { channel }
+		},
+	};
+	let _ = ctx.store.keep_lesson(
+		NewLesson { text: text.to_string(), session, about },
+		ctx.clock.now(),
+	);
 }
 
 /// Read one `<name>…</name>` section out of what the metacognition wrote.
@@ -122,6 +236,27 @@ async fn keep_lessons(_ctx: &SessionCtx, _session: SessionId, _content: &str) {
 /// meant as this one's text, so a section stops there rather than at the end of
 /// the reply — otherwise an unclosed `<lessons>` swallows the summary written
 /// after it.
-pub fn section(_content: &str, _name: &str) -> Option<String> {
-	unimplemented!()
+pub fn section(content: &str, name: &str) -> Option<String> {
+	let tag_start = format!("<{name}");
+	let idx = content.find(&tag_start)?;
+	let rest = content[idx + tag_start.len()..].trim_start();
+
+	if let Some(after_self) = rest.strip_prefix("/>") {
+		let _ = after_self;
+		return Some(String::new());
+	}
+
+	let after_open = rest.strip_prefix('>')?;
+
+	let close_tag = format!("</{name}>");
+	let mut end = after_open.find(&close_tag).unwrap_or(after_open.len());
+
+	for other in SECTIONS.iter().filter(|s| **s != name) {
+		let other_open = format!("<{other}");
+		if let Some(pos) = after_open.find(&other_open) {
+			end = end.min(pos);
+		}
+	}
+
+	Some(after_open[..end].trim().to_string())
 }

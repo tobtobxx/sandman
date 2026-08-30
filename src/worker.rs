@@ -17,7 +17,10 @@
 //!
 //! Defines: [`Worked`], [`new_worker_session`], [`work_turn`].
 
-use crate::domain::{Task, TaskResult};
+use crate::domain::{
+	Message, NewSession, Outcome, SessionKind, SessionStatus, Task, TaskResult,
+};
+use crate::scheduler::Tier;
 use crate::session::SessionCtx;
 
 /// What one [`work_turn`] did.
@@ -38,10 +41,21 @@ pub enum Worked {
 /// and "earlier" mean something to a Session that runs for a while. Separate
 /// from running it, so a caller can put something in the context first.
 pub async fn new_worker_session(
-	_ctx: &SessionCtx,
-	_task: &Task,
+	ctx: &SessionCtx,
+	task: &Task,
 ) -> Result<crate::domain::SessionId, crate::store::StoreError> {
-	unimplemented!()
+	let now = ctx.clock.now();
+	let brief =
+		format!("{}\n\n{}", crate::domain::time::stamp(now), task.brief);
+	let new = NewSession {
+		kind: SessionKind::Worker { task: task.id, role: task.role },
+		status: SessionStatus::Waiting,
+		messages: vec![
+			Message::System { content: crate::roles::system_prompt(task.role) },
+			Message::User { content: brief },
+		],
+	};
+	ctx.store.start_session(new, now)
 }
 
 /// One turn for a Worker Session, and what follows it.
@@ -56,6 +70,73 @@ pub async fn new_worker_session(
 ///
 /// A review that wrote neither a summary nor feedback falls back to what the
 /// Worker itself wrote last; a review of silence sends the Worker back to work.
-pub async fn work_turn(_ctx: &SessionCtx) -> Worked {
-	unimplemented!()
+pub async fn work_turn(ctx: &SessionCtx) -> Worked {
+	let Ok(Some(session)) = ctx.store.session(ctx.id) else {
+		return Worked::Aborted;
+	};
+	let Some(task_id) = session.kind.task() else {
+		return Worked::Aborted;
+	};
+	let tier = match ctx.store.task(task_id) {
+		Ok(Some(task)) => Tier::from(task.priority),
+		_ => Tier::TaskNormal,
+	};
+
+	match crate::session::turn(ctx, tier).await {
+		crate::session::Turn::Cancelled => {
+			let now = ctx.clock.now();
+			let _ = ctx.store.end_session(ctx.id, SessionStatus::Finished, now);
+			Worked::Aborted
+		},
+
+		crate::session::Turn::Unreachable(error) => {
+			let now = ctx.clock.now();
+			let _ = ctx.store.end_session(
+				ctx.id,
+				SessionStatus::Failed { reason: error.clone() },
+				now,
+			);
+			Worked::Done(TaskResult::Failed(error))
+		},
+
+		crate::session::Turn::Text(text) => {
+			// A review that has nothing to say falls back to the Worker's
+			// own text as the Task's answer.
+			review(ctx, Worked::Done(TaskResult::Succeeded(text))).await
+		},
+
+		crate::session::Turn::Silent => {
+			// A review of silence that has nothing to say sends the Worker
+			// back to work.
+			review(ctx, Worked::Continue).await
+		},
+	}
+}
+
+/// Review the turn just taken and act on it. `on_nothing` is what a review
+/// with neither a summary nor feedback falls back to.
+async fn review(ctx: &SessionCtx, on_nothing: Worked) -> Worked {
+	let _ = ctx.store.set_status(ctx.id, SessionStatus::Reflecting);
+	match crate::reflect::reflect(ctx).await {
+		Outcome::Complete(answer) => {
+			let now = ctx.clock.now();
+			let _ = ctx.store.end_session(ctx.id, SessionStatus::Finished, now);
+			Worked::Done(TaskResult::Succeeded(answer))
+		},
+		Outcome::Feedback(feedback) => {
+			crate::session::tell(ctx, &feedback).await;
+			let _ = ctx.store.set_status(ctx.id, SessionStatus::Waiting);
+			Worked::Continue
+		},
+		Outcome::Nothing => {
+			if matches!(on_nothing, Worked::Done(_)) {
+				let now = ctx.clock.now();
+				let _ =
+					ctx.store.end_session(ctx.id, SessionStatus::Finished, now);
+			} else {
+				let _ = ctx.store.set_status(ctx.id, SessionStatus::Waiting);
+			}
+			on_nothing
+		},
+	}
 }

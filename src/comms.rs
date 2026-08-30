@@ -20,7 +20,11 @@
 //!
 //! Defines: [`Channel`], [`open`], [`receive`], [`respond`], [`NO_RESPONSE`].
 
-use crate::domain::{ChannelId, ChannelKind, IncomingFrom, SessionId};
+use crate::domain::{
+	ChannelId, ChannelKind, Incoming, IncomingFrom, Message, SessionId,
+	SessionStatus, Utterance, Who,
+};
+use crate::scheduler::Tier;
 use crate::session::SessionCtx;
 
 /// How a turn says nothing.
@@ -46,10 +50,15 @@ pub trait Channel: Send + Sync {
 /// be open at once and they share nothing, so as far as the swarm is concerned
 /// there are several humans.
 pub async fn open(
-	_ctx: &SessionCtx,
-	_kind: ChannelKind,
+	ctx: &SessionCtx,
+	kind: ChannelKind,
 ) -> Result<(ChannelId, SessionId), crate::store::StoreError> {
-	unimplemented!()
+	let now = ctx.clock.now();
+	let messages = vec![Message::System {
+		content: crate::prompts::COMMS_SESSION.to_string(),
+	}];
+	let (session, channel) = ctx.store.open_comms(kind, messages, now)?;
+	Ok((channel, session))
 }
 
 /// Put something in this Session's mailbox.
@@ -57,8 +66,28 @@ pub async fn open(
 /// What the human says also goes into the Channel's transcript; what the swarm
 /// sends does not, because the human has not seen it yet — the Session decides
 /// whether and how to pass it on.
-pub async fn receive(_ctx: &SessionCtx, _text: &str, _from: IncomingFrom) {
-	unimplemented!()
+pub async fn receive(ctx: &SessionCtx, text: &str, from: IncomingFrom) {
+	let now = ctx.clock.now();
+
+	if from == IncomingFrom::Human {
+		if let Some(channel) = ctx
+			.store
+			.session(ctx.id)
+			.ok()
+			.flatten()
+			.and_then(|s| s.kind.channel())
+		{
+			let _ = ctx.store.say(
+				channel,
+				Utterance { who: Who::Human, text: text.to_string(), at: now },
+			);
+		}
+	}
+
+	let _ = ctx.store.receive_mail(
+		ctx.id,
+		Incoming { from, text: text.to_string(), at: now },
+	);
 }
 
 /// Read the mailbox, take one turn, and say whatever came of it.
@@ -71,11 +100,52 @@ pub async fn receive(_ctx: &SessionCtx, _text: &str, _from: IncomingFrom) {
 /// The turn runs at [`crate::scheduler::Tier::Comms`], the top tier: its calls
 /// jump the queue in front of every Task, which is how a human is never left
 /// waiting behind the swarm's work.
-pub async fn respond(_ctx: &SessionCtx) {
-	unimplemented!()
+pub async fn respond(ctx: &SessionCtx) {
+	let Ok(mail) = ctx.store.take_mail(ctx.id) else {
+		return;
+	};
+	if mail.is_empty() {
+		return;
+	}
+
+	for item in &mail {
+		let who = match item.from {
+			IncomingFrom::Human => "human",
+			IncomingFrom::Swarm => "swarm",
+		};
+		let content = format!(
+			"[{who}, {}] {}",
+			crate::domain::time::stamp(item.at),
+			item.text
+		);
+		crate::session::tell(ctx, &content).await;
+	}
+
+	if let crate::session::Turn::Text(text) =
+		crate::session::turn(ctx, Tier::Comms).await
+	{
+		if !text.contains(NO_RESPONSE) {
+			say(ctx, &text).await;
+		}
+	}
+
+	let _ = ctx.store.set_status(ctx.id, SessionStatus::Idle);
 }
 
 /// Say something to the human: into the transcript, then out on the transport.
-async fn say(_ctx: &SessionCtx, _text: &str) {
-	unimplemented!()
+async fn say(ctx: &SessionCtx, text: &str) {
+	let Some(channel) = ctx
+		.store
+		.session(ctx.id)
+		.ok()
+		.flatten()
+		.and_then(|s| s.kind.channel())
+	else {
+		return;
+	};
+	let now = ctx.clock.now();
+	let _ = ctx.store.say(
+		channel,
+		Utterance { who: Who::Sandman, text: text.to_string(), at: now },
+	);
 }

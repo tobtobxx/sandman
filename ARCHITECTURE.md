@@ -45,18 +45,48 @@ emits `ToolCalled`/`ToolReturned` on its own handle.
 
 ## Sessions
 
-One Turn loop, both shapes. **A Turn decides nothing.** It reports how it ended — text,
-silence, unreachable model, Task cancelled underneath it — and the caller says what that
-means. State lives in the Store, so the loop stays watchable while it awaits.
+Three layers: the Harness starts Sessions, `worker.rs` and `comms.rs` hold the policy,
+`session.rs` holds the loop. Neither policy file references the other.
+
+```
+Harness::run → step                  starts only what is not already in motion
+  ├ drive_comms(channel)             drains the mailbox, one respond at a time
+  │   └ comms::respond ────┐         mail → tell each → one Turn → idle
+  └ drive_worker(session)  │         repeats until Done or Aborted
+      └ worker::work_turn ─┤
+          │                ▼
+          │        session::turn(ctx, tier)      loop, per iteration:
+          │          Task cancelled            → Turn::Cancelled
+          │          msgs since last metacognition ≥ INTERRUPT_EVERY
+          │                                    → reflect::interrupt → tell
+          │          scheduler.request           one call, Tier from the caller
+          │          Reply::Calls               → tools.run each, then loop
+          │          Reply::Text                → Turn::Text / Turn::Silent
+          └ reflect::reflect → tell             Worker only
+```
+
+`SessionCtx` — Store, Events, Scheduler, ToolRunner, Clock, Harness, each an `Arc` — is
+the one handle, passed down all three layers and into every tool. A Session owns nothing;
+its state is in the Store, so the loop stays watchable while it awaits.
+
+**A Turn decides nothing.** It reports how it ended and the caller says what that means:
+
+| `Turn` | `worker.rs` | `comms.rs` |
+| --- | --- | --- |
+| `Text` | Review, which writes the Result | said to the human |
+| `Silent` | Review; nothing to say sends it back to work | a legitimate ending |
+| `Unreachable` | Task failed — the one Result written without a Review | idle |
+| `Cancelled` | Session ends, no Result | unreachable: no Task |
+
+Both shapes get the Interrupt, because it fires inside the loop where no policy sees it —
+a Worker grinding on tool calls never returns a Turn at all.
 
 **Worker.** From a Task. Sees the Brief and nothing of the work behind it. No tool to
-submit with. Plain text triggers the Review, which reads the whole conversation:
-`<summary>` is the answer, `<feedback>` buys a Turn, `<lessons>` is kept. Neither, and the
-Worker's last words stand. Silence, and it goes back to work.
+submit with.
 
-**Comms.** One per Channel, standing, never ends. Text is something to say, then idle.
-`<no-response />` is silence, because models are bad at empty replies. Owes no Result,
-never reviewed, only interrupted. Owns the human-facing voice: verbatim or reworded.
+**Comms.** One per Channel, standing, never ends. Owes no Result, never reviewed. Owns the
+human-facing voice: verbatim or reworded. `<no-response />` is silence, because models are
+bad at empty replies.
 
 **Scheduler.** One call in flight; the rest ordered by Tier, then arrival. A higher Tier
 jumps the *waiting* queue, never aborts the call in flight — that one is committed and
@@ -64,14 +94,12 @@ paid. Recorded on joining the queue, so waiting is as visible as working.
 
 ## Metacognition and Lessons
 
-**Review**: a Worker ends a Turn without calling a tool. **Interrupt**: mid-Turn, on a
-message count.
+**Review**: a Worker ends a Turn without calling a tool. It reads the whole conversation
+and writes `<summary>`, the Task's answer, or `<feedback>`, which buys a Turn, or
+`<lessons>`. Neither of the first two, and the Worker's last words stand.
+**Interrupt**: mid-Turn, counted from the last metacognition of either kind.
 
 - An Interrupt decides nothing about the Task. Its signature says so; it is not a check.
-- It covers what a Review structurally cannot see — a Worker that never stops calling
-  tools, and Comms Sessions, which are never reviewed at all.
-- Fires from the top of the Turn loop, where every tool call already has its result.
-  The count runs from the last metacognition of either kind.
 - Recorded on the Session judged, for inspection. Only Feedback reaches it.
 - **Both fail open.** A call that cannot be made found nothing.
 - Neither is an agent. As swarm members their outcome would be asynchronous, and answers
@@ -135,10 +163,9 @@ guessing lives: several Channels may be open, and a Brief carries no record of w
 work came from. See [TASKS.md](./TASKS.md).
 
 Three ways in, then: a human on a Channel, a control socket request, a one-shot command
-line run. The Harness does not round-robin — its loop starts only what is not yet in
-motion, a Pending Task whose time has come or a Comms Session with mail. Each Session runs
-its own Turn loop, every call waiting on the scheduler. So two children of one Session run
-at once, and the one needing fewer Turns finishes first.
+line run. The Harness does not round-robin. Every Session loop runs at once and every call
+waits on the scheduler, so two children of one Session run together and the one needing
+fewer Turns finishes first.
 
 ## Invariants
 
@@ -176,9 +203,7 @@ src/
   prompts.rs      Every prompt, compiled in from prompts/ (one Markdown file each).
   tools/          The Tool and ToolRunner seams, and every tool.
   reflect.rs      Metacognition: the Review, and the Interrupt.
-  session.rs      The Turn. Both shapes run this, and it decides nothing; policy lives in
-                  worker.rs (prose triggers a Review) and comms.rs (prose is something to
-                  say).
+  session.rs      The Turn loop. Both shapes run it; policy is in worker.rs and comms.rs.
   harness.rs      Task lifecycle, delivery, and the loops that start work.
   channels/       One connection to a human each; control.rs is the socket for the rest.
   web/            The Watcher UI: sockets, and Events as frames.

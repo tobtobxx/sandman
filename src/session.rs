@@ -23,10 +23,14 @@
 
 use std::sync::Arc;
 
-use crate::domain::{Clock, SessionId};
+use crate::domain::{
+	AssistantBody, CallRequest, Clock, Message, Reply, SessionId,
+	SessionStatus, TaskState,
+};
 use crate::event::Events;
 use crate::harness::Harness;
-use crate::scheduler::{Scheduler, Tier};
+use crate::roles::{SchemaCtx, COMMS_SESSION_TOOLS};
+use crate::scheduler::{Scheduler, SchedulerError, Tier};
 use crate::store::Store;
 use crate::tools::ToolRunner;
 
@@ -64,21 +68,139 @@ pub enum Turn {
 	Cancelled,
 }
 
+/// How many messages may pass without any metacognition before an interrupt
+/// fires.
+///
+/// Counted from the last one of either kind. A review has just read the whole
+/// conversation and had its own chance at feedback, so an interrupt one message
+/// later would only spend money to repeat it. A Worker taking short turns is
+/// reviewed and never interrupted; a Comms Session — never reviewed — is
+/// interrupted on a plain message count.
+pub const INTERRUPT_EVERY: usize = 15;
+
 /// One turn.
 ///
 /// The tier is the caller's, because this one loop drives both shapes: a Worker
 /// passes its Task's tier, a Comms Session passes [`Tier::Comms`]. Metacognition
 /// runs its own calls through the scheduler directly and never has to ask.
-pub async fn turn(_ctx: &SessionCtx, _tier: Tier) -> Turn {
-	unimplemented!()
+pub async fn turn(ctx: &SessionCtx, tier: Tier) -> Turn {
+	loop {
+		// Check if cancelled
+		if let Ok(Some(session)) = ctx.store.session(ctx.id) {
+			if let Some(task) = session.kind.task() {
+				if matches!(
+					ctx.store.task_state(task),
+					Ok(Some(TaskState::Cancelled { .. }))
+				) {
+					return Turn::Cancelled;
+				}
+			}
+		}
+
+		// Check if due for interrupt
+		if let Ok(count) = ctx.store.message_count(ctx.id) {
+			let after = ctx
+				.store
+				.last_reflection(ctx.id)
+				.ok()
+				.flatten()
+				.map(|r| r.after_message)
+				.unwrap_or(0);
+			if count.saturating_sub(after) >= INTERRUPT_EVERY {
+				check_in(ctx).await;
+			}
+		};
+
+		// Get message history
+		let Ok(Some(session)) = ctx.store.session(ctx.id) else {
+			return Turn::Unreachable("the Session vanished".to_string());
+		};
+		let Ok(messages) = ctx.store.messages(ctx.id) else {
+			return Turn::Unreachable(
+				"could not read the Session's messages".to_string(),
+			);
+		};
+
+		// Collect tool schemas
+		let tool_names = match &session.kind {
+			crate::domain::SessionKind::Worker { role, .. } => {
+				crate::roles::tools_for(*role)
+			},
+			crate::domain::SessionKind::Comms { .. } => {
+				&COMMS_SESSION_TOOLS[..]
+			},
+		};
+		let schema_ctx =
+			SchemaCtx { open_channels: ctx.harness.open_channels() };
+		let tools = ctx.tools.schemas(tool_names, &schema_ctx);
+
+		// Schedule request
+		let _ = ctx.store.set_status(ctx.id, SessionStatus::Thinking);
+		let request = CallRequest { messages, tools };
+		let now = ctx.clock.now();
+		let outcome = ctx.scheduler.request(ctx.id, request, tier, now).await;
+
+		// Process outcome
+		let completion = match outcome {
+			Ok((_call, completion)) => completion,
+			Err(SchedulerError::Call { source, .. }) => {
+				return Turn::Unreachable(source.to_string());
+			},
+			Err(SchedulerError::Store(e)) => {
+				return Turn::Unreachable(e.to_string());
+			},
+		};
+
+		match completion.reply {
+			Reply::Text(text) => {
+				let _ = ctx.store.append_message(
+					ctx.id,
+					Message::Assistant {
+						body: AssistantBody::Text(text.clone()),
+						reasoning: completion.reasoning,
+					},
+				);
+				if text.trim().is_empty() {
+					return Turn::Silent;
+				}
+				return Turn::Text(text);
+			},
+			Reply::Calls { preamble, calls } => {
+				let _ = ctx.store.append_message(
+					ctx.id,
+					Message::Assistant {
+						body: AssistantBody::Calls {
+							preamble,
+							calls: calls.clone(),
+						},
+						reasoning: completion.reasoning,
+					},
+				);
+
+				let _ = ctx.store.set_status(ctx.id, SessionStatus::Tools);
+				for call in calls.iter() {
+					let output = ctx.tools.run(ctx, call).await;
+					let _ = ctx.store.append_message(
+						ctx.id,
+						Message::Tool {
+							tool_call_id: call.id.clone(),
+							content: output,
+						},
+					);
+				}
+			},
+		}
+	}
 }
 
 /// Put something in the context for the next turn to see.
 ///
 /// The only way anything reaches a Session from outside: mail, a child's answer,
 /// and the feedback metacognition wrote all arrive as one of these.
-pub async fn tell(_ctx: &SessionCtx, _content: &str) {
-	unimplemented!()
+pub async fn tell(ctx: &SessionCtx, content: &str) {
+	let _ = ctx
+		.store
+		.append_message(ctx.id, Message::User { content: content.to_string() });
 }
 
 /// The interrupt, fired from the top of the loop.
@@ -86,6 +208,11 @@ pub async fn tell(_ctx: &SessionCtx, _content: &str) {
 /// Records what it found either way. An interrupt that found nothing wrong is
 /// the normal outcome — and a run where none ever fired and a run where they all
 /// passed would otherwise look identical from outside.
-async fn check_in(_ctx: &SessionCtx) {
-	unimplemented!()
+async fn check_in(ctx: &SessionCtx) {
+	let _ = ctx.store.set_status(ctx.id, SessionStatus::Reflecting);
+	if let crate::domain::Nudge::Feedback(text) =
+		crate::reflect::interrupt(ctx).await
+	{
+		tell(ctx, &text).await;
+	}
 }

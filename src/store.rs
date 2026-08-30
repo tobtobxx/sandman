@@ -1062,6 +1062,89 @@ impl Store {
 
 	// --- Channels ----------------------------------------------------------
 
+	/// Open a Channel and stand a fresh Comms Session on it, minting both ids
+	/// in one transaction.
+	///
+	/// Neither `start_session` nor `open_channel` alone can do this: a Comms
+	/// Session's `kind` carries the Channel it stands on, and a Channel's row
+	/// is a real foreign key to its Session. Whichever went first would need
+	/// an id that does not exist yet. Minting both here, in one transaction,
+	/// is what breaks the cycle.
+	pub fn open_comms(
+		&self,
+		kind: ChannelKind,
+		messages: Vec<Message>,
+		now: Timestamp,
+	) -> Result<(SessionId, ChannelId), StoreError> {
+		let mut conn = self.conn.lock().unwrap();
+		let tx = conn.transaction().store()?;
+		let session_id =
+			SessionId(crate::db::counters::take(&tx, SessionId::COUNTER)?);
+		let channel_id =
+			ChannelId(crate::db::counters::take(&tx, ChannelId::COUNTER)?);
+
+		let session_kind =
+			SessionKind::Comms { channel: channel_id, mailbox: Vec::new() };
+		let status = SessionStatus::Idle;
+		let status_row = crate::db::rows::session_status_to_row(&status)?;
+
+		tx.execute(
+			"INSERT INTO sessions (
+				id, run, kind, task, role, channel, status, status_json,
+				started_at
+			) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+			rusqlite::params![
+				session_id.0,
+				self.run.0,
+				"comms",
+				Option::<i64>::None,
+				Option::<String>::None,
+				channel_id.0,
+				status_row.tag,
+				status_row.json,
+				now.0,
+			],
+		)
+		.store()?;
+
+		for (idx, message) in messages.iter().enumerate() {
+			let row = crate::db::rows::message_to_row(message)?;
+			tx.execute(
+				"INSERT INTO messages (session, idx, role, body_json)
+				 VALUES (?1,?2,?3,?4)",
+				rusqlite::params![session_id.0, idx as i64, row.tag, row.json],
+			)
+			.store()?;
+		}
+
+		tx.execute(
+			"INSERT INTO channels (id, kind, session) VALUES (?1,?2,?3)",
+			rusqlite::params![channel_id.0, kind.discriminant(), session_id.0],
+		)
+		.store()?;
+
+		tx.commit().store()?;
+
+		let session = Session {
+			id: session_id,
+			run: self.run,
+			kind: session_kind,
+			status,
+			messages,
+			reflections: Vec::new(),
+			calls: Vec::new(),
+			started_at: now,
+			ended_at: None,
+		};
+		drop(conn);
+		self.events.emit(Event::SessionStarted(session));
+		self.events.emit(Event::ChannelOpened {
+			channel: channel_id,
+			session: session_id,
+		});
+		Ok((session_id, channel_id))
+	}
+
 	pub fn open_channel(
 		&self,
 		kind: ChannelKind,

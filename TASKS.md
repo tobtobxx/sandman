@@ -18,19 +18,7 @@ Ten steps, bottom up. `cargo check` passes today and must pass after each step.
 
 ### 5. `roles.rs`, `prompts.rs`, `waiters.rs`, `memory.rs`, `tools/` — done
 
-### 6. `session.rs`, `reflect.rs`, `worker.rs`, `comms.rs`
-
-Watch out:
-- A Turn decides nothing. Any `if` on what the text *meant* belongs in `worker.rs` or
-  `comms.rs`.
-- The interrupt fires at the top of the loop, where every tool call has its result.
-- Both metacognitions fail open. A call that cannot be made is `FailedOpen` and the
-  Session carries on.
-- Feedback is read before summary; an interrupt's `<summary>` is dropped.
-- `section()` stops at the next section tag, not at the end of the reply.
-- The judged Session sees only the feedback, as a User message of its own.
-- `work_turn` returns `Done`; it must not write the Result itself, or delivery,
-  waiters and re-arm are all skipped.
+### 6. `session.rs`, `reflect.rs`, `worker.rs`, `comms.rs` — done
 
 ### 7. `harness.rs`
 
