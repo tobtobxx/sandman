@@ -1,125 +1,104 @@
 # Architecture
 
-How the parts fit. For what the terms mean, read [CONTEXT.md](./CONTEXT.md) — this file
-does not repeat definitions.
+One queue, one database, one Event stream, two shapes of live agent context.
 
-One queue, one database, one Event stream, two shapes of live agent context. Only those
-two — the Worker Session and the Comms Session — are agentic; the Harness, Store,
-Scheduler, Waiters, Role registry, Channel adapters, control socket and web server are
-plain code. A Worker needing another's answer does not park and get rebuilt: it holds
-inside `await_result` and the answer returns as that call's result, in the same Turn. A
-Comms Session cannot — it is never re-run — so it subscribes and gets mail instead.
+Agentic: the Worker Session and the Comms Session. Plain code: Harness, Store, Scheduler,
+Waiters, Role registry, Channel adapters, control socket, web server.
+
+A Worker needing another's answer does not park and get rebuilt. It holds inside
+`await_result`; the answer returns as that call's result, same Turn. A Comms Session is
+never re-run — it subscribes and gets mail.
 
 ## Store, database, Events
 
-The Store speaks domain verbs — `start_task`, `complete_task`, `append_message` — not
-fields, and returns owned values. Two properties hold structurally: **a change without an
-Event cannot be written** (the connection is private, no method mutates without emitting),
-and **a lock is never held across an await** (every method takes `&self` and returns; the
-`std::sync::Mutex` is deliberate, so an await inside would not compile).
+SQLite is the single source of truth. No in-memory mirror. Structural, not documented:
 
-SQLite is the single source of truth — no in-memory mirror, nothing to disagree about.
-**A transcript is a query, not a blob**: messages, mail, utterances and reflections get a
-row each, keyed `(owner, idx)`, where a JSON column would make a long Comms Session
-quadratic. **Sum types are a discriminant column plus JSON**, so `tasks.state` is its own
-column and the queue scan is an index lookup. Ids come from `counters` inside the
-transaction using them, so a fresh database counts from one and two Harnesses can share
-a process; migrations are ordered under `meta.schema_version`, and a newer database is
-refused.
+- **No change without an Event.** The connection is private; no method mutates silently.
+- **No lock across an await.** Every method takes `&self`. The `std::sync::Mutex` is
+  deliberate: an await inside would not compile.
+- **A transcript is a query, not a blob.** Row per entry, keyed `(owner, idx)`. A JSON
+  column would make a long Comms Session quadratic.
+- **Sum types are a discriminant column plus JSON.** The queue scan is an index lookup.
 
-Every change emits one Event, and `log.rs`, `web/` and bench cases read that one stream.
-It is broadcast, so a slow consumer loses Events rather than slowing the swarm — the state
-is still in the database. Tool calls are not state changes, so the tool registry emits
-`ToolCalled`/`ToolReturned` on its own handle.
+Ids from `counters`, inside the transaction using them — so two Harnesses can share a
+process. Migrations ordered under `meta.schema_version`; a newer database is refused.
 
-## Task queue, Roles, ways in
+One Event stream, read by `log.rs`, `web/` and bench cases. Broadcast: a slow consumer
+loses Events, never slows the swarm. Tool calls are not state changes, so the registry
+emits `ToolCalled`/`ToolReturned` on its own handle.
 
-The queue is the only route between agents; no direct agent-to-agent call exists. Being
-picked has one condition: time — holding for other work happens inside a Turn, after a
-Task has started. Completing a repeating Task creates the next occurrence, anchored to the
-schedule. Cancelling is terminal: a running Task ends at its Session's next decision point
-with no Result, a repeating one stops as a chain, and whoever waited is told.
+## Queue, Roles, ways in
 
-`RoleName` is the source of truth for Roles; the prompt and tool functions match on it
-exhaustively, so a Role added without either does not compile. Every prompt is a Markdown
-file compiled in with `include_str!`, and a Worker's system message is the shared mechanics
-joined to its Role's file — nothing templated, nothing conditional. The cost is repetition,
-paid on purpose: a prompt assembled in the reader's head hides its contradictions.
-
-A Channel adapter converts one transport's traffic into Comms Session input and sends its
-output back; adding a transport must not change the Session. The control socket is a Unix
-domain socket, one line of JSON in and one out, rather than a second database writer: a
-direct insert would bypass the Store and emit no Event, blinding the log and every Watcher.
+- Picked on one condition: time.
+- Completing a repeating Task creates the next occurrence, anchored to the schedule.
+- Cancel is terminal. The Session stops at its next decision point, no Result; a repeating
+  chain ends; waiters are told.
+- A Role added without a prompt or without tools does not compile — `RoleName` is matched
+  exhaustively.
+- Prompts: Markdown, `include_str!`, shared mechanics plus the Role's file. Nothing
+  templated, nothing conditional. Repetition is the price, paid on purpose — a prompt
+  assembled in the reader's head hides its contradictions.
+- Channel adapter: one transport's traffic ↔ Comms Session input. A new transport must not
+  change the Session.
+- Control socket: one line of JSON each way, never a second database writer. A direct
+  insert would bypass the Store and emit no Event.
 
 ## Sessions
 
-Both shapes run one Turn loop, and **a Turn decides nothing**: it reports how it ended —
-text, silence, an unreachable model, a Task cancelled underneath it — and the caller says
-what that means. They differ by almost nothing else, and once drifted apart as two copies
-of one loop. Session state lives in the Store, which is why the loop is a function over a
-context: it must stay watchable while the loop awaits.
+One Turn loop, both shapes. **A Turn decides nothing.** It reports how it ended — text,
+silence, unreachable model, Task cancelled underneath it — and the caller says what that
+means. State lives in the Store, so the loop stays watchable while it awaits.
 
-**Worker** — created from a Task, ends when it completes, sees the Brief and nothing of the
-work that led to it. It has no tool to submit anything: on plain text the Review reads the
-whole conversation, and its `<summary>` is the answer, `<feedback>` buys another Turn,
-`<lessons>` is kept. A Review writing neither falls back to the Worker's last words, one of
-silence sends it back to work, and only an unreachable model fails a Task without a Review.
+**Worker.** From a Task. Sees the Brief and nothing of the work behind it. No tool to
+submit with. Plain text triggers the Review, which reads the whole conversation:
+`<summary>` is the answer, `<feedback>` buys a Turn, `<lessons>` is kept. Neither, and the
+Worker's last words stand. Silence, and it goes back to work.
 
-**Comms** — one per Channel, standing, never ending. A Turn's text is something to say,
-then it goes idle; text carrying `<no-response />` is silence, because models are bad at
-empty replies. Silence is legitimate: it owes nobody a Result and is never reviewed, only
-interrupted. It owns the human-facing voice, passing content on verbatim or rewording it.
+**Comms.** One per Channel, standing, never ends. Text is something to say, then idle.
+`<no-response />` is silence, because models are bad at empty replies. Owes no Result,
+never reviewed, only interrupted. Owns the human-facing voice: verbatim or reworded.
 
-**The scheduler** holds every call: one in flight, the rest waiting by Tier then arrival,
-which makes a run possible to follow — the only guard against runaway work. A higher-Tier
-call jumps the *waiting* queue but never aborts the one in flight, which is committed and
-paid, and a call is recorded when it joins the queue, so waiting is as visible as working.
+**Scheduler.** One call in flight; the rest ordered by Tier, then arrival. A higher Tier
+jumps the *waiting* queue, never aborts the call in flight — that one is committed and
+paid. Recorded on joining the queue, so waiting is as visible as working.
 
 ## Metacognition and Lessons
 
-A **Review** runs when a Worker ends a Turn without calling a tool. An **Interrupt** runs
-mid-Turn on a message count and decides nothing about the Task; it exists for the failure
-a Review structurally cannot see — a Worker that never stops calling tools is never
-reviewed — and it reaches Comms Sessions, which are never reviewed at all. It fires from
-the top of the Turn loop, where every tool call already has its result and a pushed message
-cannot split the two, and its count runs from the last metacognition of either kind. That
-an Interrupt cannot complete a Task is a fact about its signature, not a check. Both are
-recorded on the Session judged, for inspection only; only Feedback reaches it, and **both
-fail open** — a call that cannot be made is recorded as having found nothing, so broken
-metacognition never wedges a run. Neither is an agent, which is load-bearing: as a swarm
-member its outcome would be asynchronous, and answers would hang on a pending Review.
+**Review**: a Worker ends a Turn without calling a tool. **Interrupt**: mid-Turn, on a
+message count.
 
-A lesson is anchored on the Session judged — the way back to the conversation. Nothing
-reads one back automatically; the `memory` Role finds it later, across every Run, by
-meaning: text to a vector ranked by cosine, brute force, which stops being right in the
-tens of thousands of entries. **Indexing is lazy**, since embedding at creation would put
-a network call on the synchronous `create_task` path; the first search embeds what is
-uncached in one batch with the query riding along, and a cached vector is never stale
-because nothing in the corpus is edited. Embedding calls skip the scheduler, having no
-Session and nothing to follow, so they never reach Spend. See [TASKS.md](./TASKS.md).
+- An Interrupt decides nothing about the Task. Its signature says so; it is not a check.
+- It covers what a Review structurally cannot see — a Worker that never stops calling
+  tools, and Comms Sessions, which are never reviewed at all.
+- Fires from the top of the Turn loop, where every tool call already has its result.
+  The count runs from the last metacognition of either kind.
+- Recorded on the Session judged, for inspection. Only Feedback reaches it.
+- **Both fail open.** A call that cannot be made found nothing.
+- Neither is an agent. As swarm members their outcome would be asynchronous, and answers
+  would hang on a pending Review.
+
+A lesson is anchored on the Session judged. Nothing reads one back automatically; `memory`
+finds it later, across every Run, by meaning — cosine, brute force, wrong somewhere in the
+tens of thousands. **Indexing is lazy**: embedding at creation would put a network call on
+the synchronous `create_task` path. The first search embeds the uncached in one batch. A
+cached vector is never stale, because nothing in the corpus is edited. Embedding calls skip
+the scheduler and never reach Spend. See [TASKS.md](./TASKS.md).
 
 ## Tools
 
-Three create-task tools, so the common case carries no arguments to get wrong:
-`create_task` (planning work; `research`, `planning`, `memory`, Comms),
-`create_research_task` (`research`), and `create_task_full` with Role, timing and priority
-(`planning`, `task_manager`). All return an id, none wait. Every Worker Role has
-`await_result`, which holds the Turn until a Task completes or returns a notice if it was
-cancelled; `planning` alone has `message_human`. `research` gets `web_search` — which reads
-`unresponsive_engines`, so a rate limit is told apart from an empty web — and `web_fetch`,
-whose scripts never run. `memory` gets `search_lessons`, `search_tasks` (also
-`task_manager`; ranks on Title and Brief, never the Result), `view_session` and
-`current_time`; `task_manager` gets `list_tasks` and `cancel_task`, which tells whoever
-waited. That is the whole set, and metacognition holds none of it: it answers in
-`<summary>`, `<feedback>` and `<lessons>` for the Harness to read. A tool answers in words,
-always, including when it failed — an error a model can read is domain output, not a Rust
-error. Schemas are per Session, because `message_human` must offer the Channels open now.
+Role to tools is `roles.rs`. Across all of them:
+
+- Three create-task tools, so the common case carries no arguments to get wrong.
+- `await_result` is the only one that holds a Turn.
+- Metacognition has none. It answers in `<summary>`, `<feedback>` and `<lessons>`.
+- A tool answers in words, always, including when it failed. An error a model can read is
+  domain output, not a Rust error.
+- Schemas are per Session — `message_human` must offer the Channels open now.
 
 ## Seams
 
-Four traits, each with a real adapter and a bench adapter — two adapters is what makes a
-seam real rather than hypothetical. The scheduler decides *when* a call goes out; `Model`
-decides *how*.
+Four traits, two adapters each. Two is what makes a seam real rather than hypothetical.
+The scheduler decides *when* a call goes out; `Model` decides *how*.
 
 | Trait | Real | Bench |
 | --- | --- | --- |
@@ -129,43 +108,52 @@ decides *how*.
 | `Embedder` | the embedding service | whatever a test wants |
 
 `Model` sits **under** the scheduler, so a scripted bench still exercises the real queue,
-Tier ordering and one-call-at-a-time. `ToolRunner` wrapped in a recorder watches every call
-without touching a prompt, and answering from a closure drives a model down a path without
-paying for the work behind it. `web_search` and `web_fetch` need no HTTP seam: being tools,
-they are already interceptable here. Two boundaries hold without a trait and matter as
-much: the queue is the only path between agents, so new capability arrives as a Task with
-a Role; and the Brief is the boundary between parent and child, so whatever the parent did
-not write down is lost — the most likely source of trouble.
+Tier ordering and one-call-at-a-time. `ToolRunner` in a recorder watches every call without
+touching a prompt; answering from a closure drives a model down a path without paying for
+the work behind it. `web_search` and `web_fetch` need no HTTP seam — being tools, they are
+already interceptable.
 
-## Data flow
+Two boundaries hold without a trait, and matter as much:
 
-Work starts one of three ways: a human on a Channel (the Comms Session answers or issues a
-Task), a control socket request, or a one-shot command line run. The Harness does not
-round-robin — its loop only starts what is not yet in motion, a Pending Task whose time has
-come or a Comms Session with mail — and each Session then runs its own Turn loop, every
-call waiting on the scheduler. So two children of one Session run at once, and the one
-needing fewer Turns finishes first.
+- The queue is the only path between agents. New capability arrives as a Task with a Role.
+- The Brief is the parent/child boundary. Whatever the parent did not write down is lost —
+  the most likely source of trouble.
 
-Reaching a human has one route in two directions. **Pull**: the Comms Session issues a Task
-subscribed to its Channel, and the answer lands in its Mailbox. **Push**: a Worker creates
-a `planning` Task nobody subscribed to, whose Worker calls `message_human`. Push is where
-the guessing lives — with several Channels open that Worker chooses which human to tell,
-and a Brief carries no record of where the work came from. See [TASKS.md](./TASKS.md).
+## What happens when you type something
+
+1. The message reaches the **Comms Session** on that Channel. It answers if it can.
+2. Otherwise it creates a **Task**: Role, Title, and a **Brief** that has to make sense to
+   someone who was not there. Subscribed to that Channel.
+3. The Harness starts a **Worker Session** — the Brief and nothing else. It may create
+   Tasks of its own and hold for their answers.
+4. The Worker ends in plain text. The Review writes the **Result**.
+5. The Result arrives as mail, and the Comms Session says it in its own words.
+
+That is **pull**. **Push**: a Worker creates a `planning` Task nobody subscribed to, whose
+Worker calls `message_human` — the swarm saying something unasked. Push is where the
+guessing lives: several Channels may be open, and a Brief carries no record of where the
+work came from. See [TASKS.md](./TASKS.md).
+
+Three ways in, then: a human on a Channel, a control socket request, a one-shot command
+line run. The Harness does not round-robin — its loop starts only what is not yet in
+motion, a Pending Task whose time has come or a Comms Session with mail. Each Session runs
+its own Turn loop, every call waiting on the scheduler. So two children of one Session run
+at once, and the one needing fewer Turns finishes first.
 
 ## Invariants
 
 A Session is `waiting`, `thinking`, `tools`, `idle` (Comms only), `reflecting`, then
 `finished` or `failed`, and stays in the database once done. A model call is `queued`,
 `in_flight`, then `done` or `failed`, recording tokens and what the provider billed as an
-integer of nano-dollars. And these hold everywhere:
+integer of nano-dollars. And everywhere:
 
 - One Task concept: human request, investigation and delegated work are the same thing.
 - A Task has exactly one Result, on success or failure — or it is cancelled and has none.
-- Only the Review completes a Task; only an unreachable model fails one without a Review;
-  only a cancellation stops one mid-run.
+- Only the Review completes a Task. Only an unreachable model fails one without a Review.
+  Only a cancellation stops one mid-run.
 - One Comms Session per Channel. A Role is a property of a Task, never a kind of agent.
 - Every Task becomes a Worker Session, never a Comms Session, so dispatch is branchless.
-- Exactly one model call in flight, across the whole Harness, and every state change emits
+- Exactly one model call in flight, across the whole Harness. Every state change emits
   exactly one Event. Nothing but the Store writes to the database.
 - Spend is re-summed on every read, never accumulated, so it cannot drift. Nothing else is
   bounded: no cap on any loop, and the human watching is the guard rail.
@@ -174,10 +162,9 @@ integer of nano-dollars. And these hold everywhere:
 
 ```
 src/
-  domain/         Every definition, no logic: ids (newtypes, minted by the Store), text
-                  (Title, Brief, Day), time (Timestamp, Cost, the Clock seam), run, task,
-                  session (and metacognition's record of it), call, channel, lesson,
-                  message.
+  domain/         Every definition, no logic: ids (newtypes, minted by the Store), text,
+                  time (including the Clock seam), run, task, session, call, channel,
+                  lesson, message.
   event.rs        The one ordered trace, which log.rs writes out as sandman.log.
   db/             SQLite: schema, migrations, rows to domain values.
   store.rs        All state, behind one vocabulary. Emits every Event.
@@ -198,5 +185,3 @@ src/
   bench/          A Sandman under test, with four seams to make unreal. bin/ holds sandman
                   and the bench driver, tests/cases.rs the cases themselves.
 ```
-
-
