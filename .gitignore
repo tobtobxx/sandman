@@ -1,0 +1,13 @@
+/target
+/bench/runs
+
+# State and trace of a local run.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+sandman.log
+sandman.sock
+
+# The prototype this design came from. Kept on disk for reference, with its own
+# history; not part of this repo.
+/typescript-prototype
