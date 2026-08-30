@@ -16,16 +16,6 @@ Ten steps, bottom up. `cargo check` passes today and must pass after each step.
 
 ### 4. `model.rs`, `scheduler.rs` — done
 
-Watch out:
-- Do not build the queue by holding the `tokio::sync::Mutex` across `send`. Mutex
-  wakeups are not tier-ordered. Register `(tier, arrival)`, pick the lowest, notify.
-- `queue_call` before the wait, `InFlight` on send, `Done`/`Failed` on return. Waiting
-  is as visible as working.
-- A higher tier jumps the waiting calls only. The call in flight is paid for.
-- `Reply::Empty` is a successful call, not an error.
-- Cost comes off the response, never off a price list.
-- `From<&Message> for WireMessage` drops reasoning. Keep the wire shape private.
-
 ### 5. `roles.rs`, `prompts.rs`, `waiters.rs`, `memory.rs`, `tools/`
 
 Watch out:

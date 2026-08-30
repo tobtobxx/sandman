@@ -63,7 +63,10 @@ impl Logger {
 			match rx.recv().await {
 				Ok(event) => self.write(&event),
 				Err(RecvError::Lagged(n)) => {
-					self.note("log", &format!("fell behind, dropped {n} event(s)"));
+					self.note(
+						"log",
+						&format!("fell behind, dropped {n} event(s)"),
+					);
 				},
 				Err(RecvError::Closed) => return,
 			}
@@ -72,8 +75,12 @@ impl Logger {
 
 	/// Write one Event.
 	pub fn write(&self, event: &Event) {
-		let line =
-			format!("{} {:<7} {}", timestamp(), event.category(), self.render(event));
+		let line = format!(
+			"{} {:<7} {}",
+			timestamp(),
+			event.category(),
+			self.render(event)
+		);
 		self.append(&line);
 	}
 
@@ -93,7 +100,9 @@ impl Logger {
 	/// carries.
 	fn render(&self, event: &Event) -> String {
 		match event {
-			Event::RunStarted(run) => format!("{} started, model {}", run.id, run.model),
+			Event::RunStarted(run) => {
+				format!("{} started, model {}", run.id, run.model)
+			},
 			Event::RunEnded(run) => format!("{} ended", run.id),
 
 			Event::TaskCreated(task) => format!(
@@ -108,7 +117,11 @@ impl Logger {
 			},
 
 			Event::SessionStarted(session) => {
-				format!("{} started, {}", session.id, session.kind.discriminant())
+				format!(
+					"{} started, {}",
+					session.id,
+					session.kind.discriminant()
+				)
 			},
 			Event::SessionStatusChanged { session, to } => {
 				format!("{session} -> {}", to.discriminant())
@@ -131,7 +144,10 @@ impl Logger {
 			),
 
 			Event::CallQueued(call) => {
-				format!("{} queued, model {}, tier {:?}", call.id, call.model, call.tier)
+				format!(
+					"{} queued, model {}, tier {:?}",
+					call.id, call.model, call.tier
+				)
 			},
 			Event::CallStatusChanged { call, to } => {
 				format!("{call} -> {}", to.discriminant())
@@ -154,7 +170,10 @@ impl Logger {
 			),
 
 			Event::ToolCalled { session, name, args } => {
-				format!("{session} called {name} {}", self.body(&args.to_string()))
+				format!(
+					"{session} called {name} {}",
+					self.body(&args.to_string())
+				)
 			},
 			Event::ToolReturned { session, name, output } => {
 				format!("{session} {name} returned {}", self.body(output))
@@ -177,7 +196,9 @@ fn message_text(message: &Message) -> &str {
 		Message::System { content } | Message::User { content } => content,
 		Message::Assistant { body, .. } => match body {
 			AssistantBody::Text(text) => text,
-			AssistantBody::Calls { preamble, .. } => preamble.as_deref().unwrap_or(""),
+			AssistantBody::Calls { preamble, .. } => {
+				preamble.as_deref().unwrap_or("")
+			},
 		},
 		Message::Tool { content, .. } => content,
 	}
@@ -211,5 +232,8 @@ fn elide(text: &str) -> String {
 
 /// The header a run opens with: when, which model, which database.
 pub fn banner(what: &str) -> String {
-	format!("{} {what}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
+	format!(
+		"{} {what}",
+		chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+	)
 }
