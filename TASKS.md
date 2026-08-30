@@ -5,16 +5,110 @@ Scratchpad. Debt goes here as it is created, not afterwards.
 ## Not built yet
 
 Every source file has its definitions and its documentation; the bodies are
-`unimplemented!()`. Order worth building in: `db` and `store`, then `event` and `log`,
-then `scheduler` and `model`, then `session`/`worker`/`comms`/`reflect`, then `tools`,
-then `harness`, then `control`, and `web` and `bench` last.
+`unimplemented!()`. The docstring is the intent; a body that differs is the bug.
+Ten steps, bottom up. `cargo check` passes today and must pass after each step.
 
+### 1. `domain/` — ids, text, time, and the small helpers — done
+
+### 2. `event.rs`, `db/`, `store.rs` — done
+
+### 3. `log.rs`
+
+Watch out:
+- `follow` must survive `RecvError::Lagged` — a dropped Event is a note, not an end.
+- Terse elides bodies to a length and a count; the database holds the content.
+- The log opens by path. Two Harnesses in one process share no file.
+
+### 4. `model.rs`, `scheduler.rs`
+
+Watch out:
+- Do not build the queue by holding the `tokio::sync::Mutex` across `send`. Mutex
+  wakeups are not tier-ordered. Register `(tier, arrival)`, pick the lowest, notify.
+- `queue_call` before the wait, `InFlight` on send, `Done`/`Failed` on return. Waiting
+  is as visible as working.
+- A higher tier jumps the waiting calls only. The call in flight is paid for.
+- `Reply::Empty` is a successful call, not an error.
+- Cost comes off the response, never off a price list.
+- `From<&Message> for WireMessage` drops reasoning. Keep the wire shape private.
+
+### 5. `roles.rs`, `prompts.rs`, `waiters.rs`, `memory.rs`, `tools/`
+
+Watch out:
+- `roles::schemas_for` and `Registry::schemas` must not build two schema sets. One
+  calls the other.
+- `await_result` registers the wait *before* it reads the Task state. The other order
+  hangs a Worker on a Task that completed in between.
+- A tool that creates or cancels a Task calls the Harness, not the Store. The Store
+  does not deliver, release waiters or re-arm.
+- Every tool answers in words, failures included. `ToolError` becomes a string before
+  the model sees it.
+- `message_human` builds its `channel` enum from the Channels open now.
+- `memory::rank` embeds only what has no cached vector, with the query in the same
+  batch, keyed on the embedding model. Truncate at `MAX_INPUT_CHARS` rather than
+  failing the batch.
+
+### 6. `session.rs`, `reflect.rs`, `worker.rs`, `comms.rs`
+
+Watch out:
+- A Turn decides nothing. Any `if` on what the text *meant* belongs in `worker.rs` or
+  `comms.rs`.
+- The interrupt fires at the top of the loop, where every tool call has its result.
+- Both metacognitions fail open. A call that cannot be made is `FailedOpen` and the
+  Session carries on.
+- Feedback is read before summary; an interrupt's `<summary>` is dropped.
+- `section()` stops at the next section tag, not at the end of the reply.
+- The judged Session sees only the feedback, as a User message of its own.
+- `work_turn` returns `Done`; it must not write the Result itself, or delivery,
+  waiters and re-arm are all skipped.
+
+### 7. `harness.rs`
+
+Watch out:
+- `step` starts only what is not in motion. Test and insert `driving` /
+  `comms_driving` under one lock.
+- `run` sleeps on `next_due_in` and wakes on the Event stream. Looping on `step` burns
+  a core.
+- `complete_task`: record, deliver, release waiters, re-arm — in that order.
+- `cancel_task` stops the whole chain, then releases waiters with `render_cancelled`.
+  There is no chain id to match on (see Known debt).
+- Nothing touches a running Task's Session. It reads the cancelled state itself.
+- `run_until_idle` counts a Session blocked in `await_result`, and a Task waiting on
+  its own time, as busy.
+- `wind_down` cancels first, then waits for the last call, so its cost is recorded.
+
+### 8. `channels/`, `control.rs`, `bin/sandman.rs` — first runnable Sandman
+
+Watch out:
+- Only the conversation reaches stdout. The trace goes to `sandman.log`.
+- Stdin blocks. Read it on a blocking task.
+- A unix socket, owner-only, and a stale file from a killed process is replaced.
+- The socket never writes the database. It calls the Harness.
+- Wiring lives here alone. Nothing below builds a Model, a Clock or a Registry.
+- If `Store::migration()` is `Some((from, to))` after `Store::open`, note it on
+  the Logger once — `db::schema::apply` already reports it; nothing before
+  this step has a Logger to hand it to.
+
+### 9. `bench/`, `tests/cases.rs`, `bin/bench.rs`
+
+Watch out:
+- `Rig::until` checks the predicate before it waits, and survives `Lagged`.
+- `Interceptor::schemas` passes through unchanged. Changing them changes what is
+  measured.
+- `Drop` aborts the drivers. A panicking case must not leave a Harness spending.
+- A grader reply with no verdict tag is a FAIL, and grader cost is never Spend.
+- Cases keep the real clock unless the case is about the Harness.
+
+### 10. `web/`
+
+Watch out:
 - **The Watcher UI has no front end.** `src/web/` serves it and turns Events into
-  frames, but nothing under `web/` exists to receive them. The wire format it must
-  read is `src/web/wire.rs`: one `init` frame carrying everything, then a `patch` per
-  Event. The prototype's `web/app.js` is a reasonable starting shape but reads a
-  different wire format — it merged whole entities out of a twice-a-second diff, and
-  there are no diffs now.
+  frames; nothing under `web/` exists to receive them. The prototype's `web/app.js` is
+  a reasonable starting shape but reads a different wire format — it merged whole
+  entities out of a twice-a-second diff, and there are no diffs now.
+- `patch_for` returns `None` for Events a Watcher shows nothing for.
+- Nothing in `wire.rs` recomputes. Fields come off the value the Store handed over.
+- Two writes only: a message on the browser's Channel, and a Lessons search — ranked
+  in the server, with the embedder the `memory` Role uses.
 
 ## Known debt
 
@@ -77,11 +171,6 @@ then `harness`, then `control`, and `web` and `bench` last.
   to keep Tasks and Lessons and drop the conversations behind old finished Sessions.
 
 ## To do
-
-- **Give the interrupt a way to know it is repeating itself.** It fires on a message
-  count and reads the whole conversation each time, but it cannot see what the previous
-  interrupt said, so a Session in a loop gets the same nudge worded three ways. The
-  reflections are on the Session and could be shown to it.
 
 - **A fourth bench case for `message_human`.** Delivery is the path most likely to fail
   and the one nothing covers: does the Session reach for `message_human`, and does it

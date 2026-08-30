@@ -70,7 +70,13 @@ impl From<TaskPriority> for Tier {
 impl Tier {
 	/// 1 to 5, as the call record and the Watcher show it.
 	pub fn as_number(&self) -> u8 {
-		unimplemented!()
+		match self {
+			Tier::Comms => 1,
+			Tier::TaskHigh => 2,
+			Tier::Metacognition => 3,
+			Tier::TaskNormal => 4,
+			Tier::TaskLow => 5,
+		}
 	}
 }
 

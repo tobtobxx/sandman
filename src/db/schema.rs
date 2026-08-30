@@ -19,16 +19,17 @@
 //! Opening a database written by a newer binary is a clean error rather than a
 //! partial read.
 //!
-//! Defines: [`MIGRATIONS`], [`SCHEMA_VERSION`], [`apply`].
+//! Defines: [`MIGRATIONS`], [`SCHEMA_VERSION`], [`apply`], [`version_of`].
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 /// The schema version this binary writes and expects.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Every migration, oldest first. Index + 1 is the version it produces.
 ///
-/// A migration is never edited once released; a change is a new entry.
+/// As this is a prototype for now, you are allowed to always rewrite
+/// the first migration. Do ask the user first however.
 pub const MIGRATIONS: &[&str] = &[
 	// v1 — the initial schema.
 	r#"
@@ -170,11 +171,60 @@ pub const MIGRATIONS: &[&str] = &[
 ///
 /// Applying from empty and applying twice both end in the same place. A database
 /// at a version this binary does not know is refused, not read.
-pub fn apply(_conn: &Connection) -> Result<(), super::DbError> {
-	unimplemented!()
+///
+/// Returns `(from, to)` if a migration actually ran, or `None` if the database
+/// was already current — the one thing worth a log line, and the only place
+/// that knows it: [`version_of`] afterwards would just report [`SCHEMA_VERSION`]
+/// either way.
+pub fn apply(conn: &Connection) -> Result<Option<(u32, u32)>, super::DbError> {
+	let found = version_of(conn)?;
+	if found > SCHEMA_VERSION {
+		return Err(super::DbError::SchemaVersion {
+			found,
+			expected: SCHEMA_VERSION,
+		});
+	}
+	if found == SCHEMA_VERSION {
+		return Ok(None);
+	}
+
+	for migration in &MIGRATIONS[found as usize..] {
+		conn.execute_batch(migration)?;
+	}
+	conn.execute(
+		"INSERT INTO meta (key, value) VALUES ('schema_version', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+		[SCHEMA_VERSION],
+	)?;
+	Ok(Some((found, SCHEMA_VERSION)))
 }
 
 /// The version a database is currently at. Zero for an empty one.
-pub fn version_of(_conn: &Connection) -> Result<u32, super::DbError> {
-	unimplemented!()
+pub fn version_of(conn: &Connection) -> Result<u32, super::DbError> {
+	let has_meta: bool = conn.query_row(
+		"SELECT EXISTS (
+             SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'
+         )",
+		[],
+		|row| row.get(0),
+	)?;
+	if !has_meta {
+		return Ok(0);
+	}
+
+	let version: Option<String> = conn
+		.query_row(
+			"SELECT value FROM meta WHERE key = 'schema_version'",
+			[],
+			|row| row.get(0),
+		)
+		.optional()?;
+	match version {
+		Some(v) => v.parse().map_err(|_| {
+			super::DbError::Corrupt(format!(
+				"meta.schema_version is `{v}`, not a number"
+			))
+		}),
+		None => Ok(0),
+	}
 }

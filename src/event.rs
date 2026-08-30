@@ -107,21 +107,22 @@ pub struct Events {
 impl Events {
 	/// A new bus with room for `capacity` events per consumer before the slowest
 	/// one starts losing them.
-	pub fn new(_capacity: usize) -> Self {
-		unimplemented!()
+	pub fn new(capacity: usize) -> Self {
+		let (tx, _rx) = broadcast::channel(capacity);
+		Events { tx }
 	}
 
 	/// Put one Event on the bus. Never fails and never blocks: an Event with no
 	/// listeners is simply dropped.
-	pub fn emit(&self, _event: Event) {
-		unimplemented!()
+	pub fn emit(&self, event: Event) {
+		let _ = self.tx.send(event);
 	}
 
 	/// Listen from now on. Events emitted before this returns are not replayed —
 	/// a consumer that needs the state so far asks the Store for a snapshot
 	/// first.
 	pub fn subscribe(&self) -> broadcast::Receiver<Event> {
-		unimplemented!()
+		self.tx.subscribe()
 	}
 }
 
@@ -129,6 +130,24 @@ impl Event {
 	/// The category this Event is logged under: `task`, `session`, `llm`,
 	/// `tool`, `meta`, `comms`, `run`.
 	pub fn category(&self) -> &'static str {
-		unimplemented!()
+		match self {
+			Event::RunStarted(_) | Event::RunEnded(_) => "run",
+
+			Event::TaskCreated(_) | Event::TaskStateChanged { .. } => "task",
+
+			Event::SessionStarted(_)
+			| Event::SessionStatusChanged { .. }
+			| Event::MessageAppended { .. } => "session",
+
+			Event::ReflectionRecorded { .. } | Event::LessonKept(_) => "meta",
+
+			Event::MailReceived { .. }
+			| Event::ChannelOpened { .. }
+			| Event::Said { .. } => "comms",
+
+			Event::CallQueued(_) | Event::CallStatusChanged { .. } => "llm",
+
+			Event::ToolCalled { .. } | Event::ToolReturned { .. } => "tool",
+		}
 	}
 }
