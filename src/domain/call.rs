@@ -38,8 +38,6 @@ pub struct LlmCall {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CallRequest {
 	pub messages: Vec<Message>,
-	/// Empty for a metacognitive call: neither the review nor the interrupt
-	/// holds any tool.
 	pub tools: Vec<ToolSchema>,
 }
 
