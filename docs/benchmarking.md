@@ -44,23 +44,31 @@ time must use the real one: assert on the Schedule it chose and never wait for i
 `ToolsChoice::Intercept` wraps the real registry: pass a tool through because its effect
 is what is asserted on, answer another from a closure, deny a third because reaching for
 it at all is the failure. The schemas the model is offered never change.
+
+A case that seeds a Task and waits for it reads almost like the scenario itself:
 ```rust
 let mut rig = Rig::builder()
     .drive(Drive::Full)
     .tools(ToolsChoice::Intercept(Box::new(|call| match call.name {
-        ToolName::CreateTaskFull => Answer::Say("Created Task t-99.".into()),
+        ToolName::CreateTaskFull => Answer::Say("Created t-99.".into()),
         _ => Answer::Deny("not available in this case".into()),
     })))
     .build().await?;
 
-let seed = rig.seed_task(planning("Greet the human in 3 minutes", "..."))?;
-rig.until("the planner completes", |s| s.is_completed(seed)).await?;
+let seed = rig.seed_task(brief())?;
+rig.await_task(seed).await?;
 
 assert_eq!(rig.interceptor.calls_to(ToolName::CreateTaskFull).len(), 1);
 ```
-No child Worker runs and no web search happens. `seed_task` and `seed_lesson` write
-through the ordinary Store path, so a seeded Task is a Task in every way. `rig.until`
-follows the Event stream — nothing polls.
+A conversational case is `rig.converse(text)` instead of `seed_task` +
+`await_task` — it opens a Channel, sends, and waits for the Comms Session to
+finish replying, in one call. Both are built on `rig.until`, which follows the
+Event stream — nothing polls — and stay available directly for a case whose
+wait is neither of those two shapes.
+
+`seed_task` and `seed_lesson` write through the ordinary Store path, so a seeded
+Task is a Task in every way; the creation above is answered by the case, so no
+child Worker runs.
 
 ## Verification
 
@@ -85,13 +93,19 @@ sqlite3 bench/runs/*/plan-greet-run1/store.sqlite \
 ## Adding a case
 
 A new file under `src/bench/cases/` — its module doc comment says the scenario in plain
-language — a line in `CASES` in `cases/mod.rs`, and an `#[ignore]`d `#[cfg(test)]` wrapper
-at the bottom of the same file. Decide two things first: **which Session is it about** —
-a question that needs two Sessions is two cases — and **what must never happen**, which
-is the tripwire that keeps a failing case cheap.
+language — and a line in `CASES` in `cases/mod.rs`. Decide two things first: **which
+Session is it about** — a question that needs two Sessions is two cases — and **what must
+never happen**, which is the tripwire that keeps a failing case cheap.
 
-`report::assemble` does the rest: it winds the Rig down, turns a tripwire into
-`tripped` rather than an early return, and runs the graders only if every check passed.
+`cases/mod.rs` carries the ceremony every case shares, so a case's `run` is just: build,
+drive, check.
+- Build with `Rig::builder()...build().await`; on `Err`, `return (None,
+  super::build_failed(case, &trip))`.
+- `super::at_most_creations(n)` is a ready-made tripwire for "no more than n Tasks".
+- End with `super::finish(case, rig, outcome, graders).await`, which winds the Rig down,
+  assembles the `RunReport`, and returns the `(Option<Rig>, RunReport)` a case must.
+- `super::bench_test!(case_name);` at the bottom is the whole `#[ignore]`d test wrapper —
+  one line instead of writing it out.
 
 ## Caveats
 

@@ -41,8 +41,8 @@ mod plan_greet;
 use std::future::Future;
 use std::pin::Pin;
 
-use super::report::RunReport;
-use super::{CheckResult, Rig, Trip, Watch};
+use super::report::{self, RunReport};
+use super::{CheckResult, Grader, Rig, Trip, Watch};
 
 /// One case, run to the end.
 ///
@@ -107,6 +107,22 @@ fn build_failed(case: &Case, trip: &Trip) -> RunReport {
 	}
 }
 
+/// Wind a Rig down, assemble its report, and hand back the `(Option<Rig>,
+/// RunReport)` shape every case's `run` returns.
+///
+/// The Rig always comes back `Some` here — a build failure never reaches this
+/// far, since there is no Rig yet for `assemble` to wind down; that path is
+/// [`build_failed`] instead.
+async fn finish(
+	case: &'static Case,
+	mut rig: Rig,
+	outcome: Result<Vec<CheckResult>, Trip>,
+	graders: Vec<Grader>,
+) -> (Option<Rig>, RunReport) {
+	let report = report::assemble(case, &mut rig, outcome, graders).await;
+	(Some(rig), report)
+}
+
 /// Tripwire: a Task-creating tool is never reached for more than `n` times.
 ///
 /// Counts calls, not rows: a unit bench answers the creation itself, so a
@@ -140,21 +156,25 @@ fn at_most_creations(n: usize) -> impl Fn(&Watch) -> CheckResult + Send + Sync {
 	}
 }
 
-/// True once a Comms Session has taken a Turn and gone back to waiting for mail:
-/// idle, nothing unread, and at least one model call more than `baseline`.
-///
-/// `baseline` must be the call count taken *before* the message was sent, or
-/// this reads true before the Session has done anything — a fresh Comms
-/// Session is minted already `Idle` with an empty mailbox.
-fn comms_finished(
-	store: &crate::store::Store,
-	session: crate::domain::SessionId,
-	baseline: usize,
-) -> bool {
-	let Ok(Some(row)) = store.session(session) else {
-		return false;
+/// The `#[ignore]`d test wrapper every case needs: run it for real, fail the
+/// test with the report if it did not pass. One line per case instead of
+/// eight.
+macro_rules! bench_test {
+	($name:ident) => {
+		#[cfg(test)]
+		mod tests {
+			#[tokio::test]
+			#[ignore = "spends money on a real model; cargo test -- --ignored"]
+			async fn $name() {
+				let (_, report) = super::run().await;
+				if !report.pass {
+					panic!(
+						concat!(stringify!($name), " did not pass: {:#?}"),
+						report
+					);
+				}
+			}
+		}
 	};
-	let idle = matches!(row.status, crate::domain::SessionStatus::Idle);
-	let has_mail = matches!(store.has_mail(session), Ok(true));
-	idle && !has_mail && row.calls.len() > baseline
 }
+pub(crate) use bench_test;

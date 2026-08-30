@@ -11,17 +11,17 @@
 
 use crate::bench::grader::Grader;
 use crate::bench::intercept::{Answer, ToolsChoice};
-use crate::bench::report::{self, RunReport};
-use crate::bench::{CheckResult, Rig};
 use crate::domain::ChannelKind;
 use crate::harness::Drive;
 use crate::roles::ToolName;
+
+use super::report::RunReport;
+use super::{CheckResult, Rig};
 
 const MESSAGE: &str = "Hey! Could you greet me again in about 3 minutes? :)";
 
 pub(super) async fn run() -> (Option<Rig>, RunReport) {
 	let case = super::find("greet-again").expect("registered in CASES");
-
 	let mut rig = match Rig::builder()
 		.drive(Drive::CommsOnly)
 		.channel(ChannelKind::Scripted)
@@ -37,7 +37,6 @@ pub(super) async fn run() -> (Option<Rig>, RunReport) {
 		Ok(rig) => rig,
 		Err(trip) => return (None, super::build_failed(case, &trip)),
 	};
-
 	rig.tripwire(
 		"create_task is reached for at most once",
 		super::at_most_creations(1),
@@ -45,22 +44,7 @@ pub(super) async fn run() -> (Option<Rig>, RunReport) {
 
 	let mut graders = Vec::new();
 	let outcome = async {
-		let channel = rig.channel.expect("build() opened one");
-		let session = rig
-			.store
-			.channel_session(channel)?
-			.expect("a comms session stands on this channel");
-		let baseline = rig
-			.store
-			.session(session)?
-			.map(|s| s.calls.len())
-			.unwrap_or(0);
-
-		rig.send(MESSAGE).await;
-		rig.until("the comms session finishes replying", move |store| {
-			super::comms_finished(store, session, baseline)
-		})
-		.await?;
+		rig.converse(MESSAGE).await?;
 
 		let creations = rig.interceptor.calls_to(ToolName::CreateTask);
 		let checks = vec![if creations.len() == 1 {
@@ -97,20 +81,7 @@ pub(super) async fn run() -> (Option<Rig>, RunReport) {
 	}
 	.await;
 
-	let report = report::assemble(case, &mut rig, outcome, graders).await;
-	(Some(rig), report)
+	super::finish(case, rig, outcome, graders).await
 }
 
-#[cfg(test)]
-mod tests {
-	use super::run;
-
-	#[tokio::test]
-	#[ignore = "spends money on a real model; cargo test -- --ignored"]
-	async fn greet_again() {
-		let (_, report) = run().await;
-		if !report.pass {
-			panic!("greet-again did not pass: {report:#?}");
-		}
-	}
-}
+super::bench_test!(greet_again);

@@ -28,7 +28,7 @@ use crate::db::Backing;
 use crate::domain::{
 	CallId, CallStatus, ChannelId, ChannelKind, Clock, Duration, FixedClock,
 	IncomingFrom, NewLesson, NewTask, SessionId, SessionStatus, Spend,
-	SystemClock, Task, TaskId, Timestamp, Utterance,
+	SystemClock, Task, TaskId, TaskState, Timestamp, Utterance,
 };
 use crate::event::Events;
 use crate::harness::{Drive, Harness};
@@ -445,6 +445,49 @@ impl Rig {
 		let idle = matches!(row.status, SessionStatus::Idle);
 		let has_mail = self.store.has_mail(session)?;
 		Ok(idle && !has_mail && row.calls.len() > since_calls)
+	}
+
+	/// Say this on the bench Channel, and wait for the Comms Session to finish
+	/// answering it — mail read, idle, one more model call than before. The
+	/// ceremony every conversational case needs, written once here instead of
+	/// by hand in each one.
+	pub async fn converse(&mut self, text: &str) -> Result<(), Trip> {
+		let channel = self
+			.channel
+			.expect("a case that calls converse() opened a channel first");
+		let session = self
+			.store
+			.channel_session(channel)?
+			.expect("a comms session stands on this channel");
+		let baseline = self
+			.store
+			.session(session)?
+			.map(|s| s.calls.len())
+			.unwrap_or(0);
+
+		self.send(text).await;
+		self.until("the comms session finishes replying", move |store| {
+			let Ok(Some(row)) = store.session(session) else {
+				return false;
+			};
+			let idle = matches!(row.status, SessionStatus::Idle);
+			let has_mail = matches!(store.has_mail(session), Ok(true));
+			idle && !has_mail && row.calls.len() > baseline
+		})
+		.await
+	}
+
+	/// Wait for a seeded Task to reach a terminal Result, success or failure —
+	/// what a case that seeded one wants before reading [`Rig::tasks`] for the
+	/// outcome.
+	pub async fn await_task(&mut self, task: TaskId) -> Result<(), Trip> {
+		self.until("the Task completes", move |store| {
+			matches!(
+				store.task(task),
+				Ok(Some(t)) if matches!(t.state, TaskState::Completed { .. })
+			)
+		})
+		.await
 	}
 
 	// --- Reading ------------------------------------------------------------

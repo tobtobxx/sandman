@@ -11,13 +11,15 @@
 //! whole case is one Session's decision.
 
 use crate::bench::intercept::{Answer, ToolsChoice};
-use crate::bench::report::{self, RunReport};
-use crate::bench::{CheckResult, Rig};
 use crate::domain::{
-	Brief, Creator, NewTask, Schedule, TaskPriority, TaskState, Title,
+	Brief, Creator, NewTask, Schedule, TaskPriority, TaskResult, TaskState,
+	Title,
 };
 use crate::harness::Drive;
 use crate::roles::{RoleName, ToolName};
+
+use super::report::RunReport;
+use super::{CheckResult, Rig};
 
 /// Loose enough to allow for a model that says "three minutes" and means
 /// somewhere close to it, tight enough that "tomorrow" or "right now" both
@@ -45,7 +47,6 @@ fn brief() -> NewTask {
 
 pub(super) async fn run() -> (Option<Rig>, RunReport) {
 	let case = super::find("plan-greet").expect("registered in CASES");
-
 	let mut rig = match Rig::builder()
 		.drive(Drive::Full)
 		.tools(ToolsChoice::Intercept(Box::new(|call| match call.name {
@@ -60,7 +61,6 @@ pub(super) async fn run() -> (Option<Rig>, RunReport) {
 		Ok(rig) => rig,
 		Err(trip) => return (None, super::build_failed(case, &trip)),
 	};
-
 	rig.tripwire(
 		"create_task_full is reached for at most once",
 		super::at_most_creations(1),
@@ -68,17 +68,9 @@ pub(super) async fn run() -> (Option<Rig>, RunReport) {
 
 	let outcome = async {
 		let seed = rig.seed_task(brief())?;
-
-		rig.until("the planner completes", move |store| {
-			matches!(
-				store.task(seed),
-				Ok(Some(t)) if matches!(t.state, TaskState::Completed { .. })
-			)
-		})
-		.await?;
+		rig.await_task(seed).await?;
 
 		let mut checks = Vec::new();
-
 		let creations = rig.interceptor.calls_to(ToolName::CreateTaskFull);
 		checks.push(if creations.len() == 1 {
 			CheckResult::ok(
@@ -119,11 +111,12 @@ pub(super) async fn run() -> (Option<Rig>, RunReport) {
 			});
 		}
 
-		let task = rig.tasks()?.into_iter().find(|t| t.id == seed);
 		let succeeded = matches!(
-			task.map(|t| t.state),
-			Some(TaskState::Completed { result, .. })
-				if matches!(result, crate::domain::TaskResult::Succeeded(_))
+			rig.tasks()?
+				.into_iter()
+				.find(|t| t.id == seed)
+				.map(|t| t.state),
+			Some(TaskState::Completed { result: TaskResult::Succeeded(_), .. })
 		);
 		checks.push(if succeeded {
 			CheckResult::ok("finished", "the planner submitted a Result")
@@ -138,20 +131,7 @@ pub(super) async fn run() -> (Option<Rig>, RunReport) {
 	}
 	.await;
 
-	let report = report::assemble(case, &mut rig, outcome, Vec::new()).await;
-	(Some(rig), report)
+	super::finish(case, rig, outcome, Vec::new()).await
 }
 
-#[cfg(test)]
-mod tests {
-	use super::run;
-
-	#[tokio::test]
-	#[ignore = "spends money on a real model; cargo test -- --ignored"]
-	async fn plan_greet() {
-		let (_, report) = run().await;
-		if !report.pass {
-			panic!("plan-greet did not pass: {report:#?}");
-		}
-	}
-}
+super::bench_test!(plan_greet);
