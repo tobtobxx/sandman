@@ -11,3 +11,4 @@ sandman.sock
 # The prototype this design came from. Kept on disk for reference, with its own
 # history; not part of this repo.
 /typescript-prototype
+prototype.tar.gzip
