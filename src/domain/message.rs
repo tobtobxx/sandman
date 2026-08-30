@@ -108,21 +108,23 @@ pub struct NonEmpty<T> {
 }
 
 impl<T> NonEmpty<T> {
-	pub fn new(_head: T, _tail: Vec<T>) -> Self {
-		unimplemented!()
+	pub fn new(head: T, tail: Vec<T>) -> Self {
+		NonEmpty { head, tail }
 	}
 
 	/// Build from a list, or fail because it was empty.
-	pub fn from_vec(_items: Vec<T>) -> Option<Self> {
-		unimplemented!()
+	pub fn from_vec(items: Vec<T>) -> Option<Self> {
+		let mut items = items.into_iter();
+		let head = items.next()?;
+		Some(NonEmpty { head, tail: items.collect() })
 	}
 
 	pub fn first(&self) -> &T {
-		unimplemented!()
+		&self.head
 	}
 
 	pub fn len(&self) -> usize {
-		unimplemented!()
+		1 + self.tail.len()
 	}
 
 	pub fn is_empty(&self) -> bool {
@@ -138,11 +140,8 @@ impl<T> NonEmpty<T> {
 /// every stored assistant message and on every wire frame, which is the shape of
 /// the guarantee rather than the shape of the data.
 impl<T: serde::Serialize> serde::Serialize for NonEmpty<T> {
-	fn serialize<S: serde::Serializer>(
-		&self,
-		_s: S,
-	) -> Result<S::Ok, S::Error> {
-		unimplemented!()
+	fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+		s.collect_seq(self.iter())
 	}
 }
 
@@ -150,9 +149,12 @@ impl<T: serde::Serialize> serde::Serialize for NonEmpty<T> {
 /// round trip through the database rather than being re-checked after it.
 impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for NonEmpty<T> {
 	fn deserialize<D: serde::Deserializer<'de>>(
-		_d: D,
+		d: D,
 	) -> Result<Self, D::Error> {
-		unimplemented!()
+		let items = <Vec<T> as serde::Deserialize>::deserialize(d)?;
+		NonEmpty::from_vec(items).ok_or_else(|| {
+			serde::de::Error::custom("expected a non-empty array")
+		})
 	}
 }
 
@@ -160,6 +162,18 @@ impl Message {
 	/// One line naming what this message is, for the log. The body stays in the
 	/// database.
 	pub fn describe(&self) -> String {
-		unimplemented!()
+		match self {
+			Message::System { .. } => "system".to_string(),
+			Message::User { .. } => "user".to_string(),
+			Message::Assistant { body, .. } => match body {
+				AssistantBody::Text(_) => "assistant: text".to_string(),
+				AssistantBody::Calls { calls, .. } => {
+					format!("assistant: {} tool call(s)", calls.len())
+				},
+			},
+			Message::Tool { tool_call_id, .. } => {
+				format!("tool result for {tool_call_id}")
+			},
+		}
 	}
 }

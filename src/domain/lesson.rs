@@ -67,10 +67,20 @@ pub struct Hit<T> {
 impl LessonSubject {
 	/// One line naming what this lesson is about, for a search hit.
 	pub fn describe(&self) -> String {
-		unimplemented!()
+		match self {
+			LessonSubject::Task { task, role, title } => {
+				format!("{title} ({role}, {task})")
+			},
+			LessonSubject::Conversation { channel } => {
+				format!("conversation on {channel}")
+			},
+		}
 	}
 
 	pub fn discriminant(&self) -> &'static str {
-		unimplemented!()
+		match self {
+			LessonSubject::Task { .. } => "task",
+			LessonSubject::Conversation { .. } => "conversation",
+		}
 	}
 }

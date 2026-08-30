@@ -83,23 +83,23 @@ pub struct Spend {
 
 impl Timestamp {
 	/// This instant plus a span.
-	pub fn plus(self, _d: Duration) -> Timestamp {
-		unimplemented!()
+	pub fn plus(self, d: Duration) -> Timestamp {
+		Timestamp(self.0 + d.0)
 	}
 
 	/// How long from this instant to a later one. Saturates at zero.
-	pub fn until(self, _later: Timestamp) -> Duration {
-		unimplemented!()
+	pub fn until(self, later: Timestamp) -> Duration {
+		Duration((later.0 - self.0).max(0))
 	}
 }
 
 impl Duration {
-	pub const fn from_secs(_s: i64) -> Duration {
-		unimplemented!()
+	pub const fn from_secs(s: i64) -> Duration {
+		Duration(s * 1_000)
 	}
 
-	pub const fn from_millis(_ms: i64) -> Duration {
-		unimplemented!()
+	pub const fn from_millis(ms: i64) -> Duration {
+		Duration(ms)
 	}
 }
 
@@ -128,31 +128,32 @@ pub struct ManualClock {
 
 impl Clock for SystemClock {
 	fn now(&self) -> Timestamp {
-		unimplemented!()
+		Timestamp(chrono::Utc::now().timestamp_millis())
 	}
 }
 
 impl Clock for FixedClock {
 	fn now(&self) -> Timestamp {
-		unimplemented!()
+		self.0
 	}
 }
 
 impl Clock for ManualClock {
 	fn now(&self) -> Timestamp {
-		unimplemented!()
+		*self.now.lock().unwrap()
 	}
 }
 
 impl ManualClock {
-	pub fn starting_at(_t: Timestamp) -> Self {
-		unimplemented!()
+	pub fn starting_at(t: Timestamp) -> Self {
+		ManualClock { now: std::sync::Mutex::new(t) }
 	}
 
 	/// Move time forward. Anything waiting on the clock sees the new instant on
 	/// its next read.
-	pub fn advance(&self, _by: Duration) {
-		unimplemented!()
+	pub fn advance(&self, by: Duration) {
+		let mut now = self.now.lock().unwrap();
+		*now = now.plus(by);
 	}
 }
 
@@ -161,19 +162,23 @@ impl ManualClock {
 /// Time enters a Session as text riding on whatever arrived — a Brief, a piece
 /// of mail — rather than as a tool. A Session that runs for a while needs "just
 /// now" and "earlier" to mean something.
-pub fn stamp(_at: Timestamp) -> String {
-	unimplemented!()
+pub fn stamp(at: Timestamp) -> String {
+	use chrono::TimeZone;
+	let local = chrono::Local.timestamp_millis_opt(at.0).unwrap();
+	local.format("%A, %Y-%m-%d %H:%M").to_string()
 }
 
 impl fmt::Display for Cost {
-	fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		unimplemented!()
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let dollars = self.0 / 1_000_000_000;
+		let micros = (self.0 % 1_000_000_000) / 1_000;
+		write!(f, "${}.{:06}", dollars, micros)
 	}
 }
 
 impl std::ops::Add for Cost {
 	type Output = Cost;
-	fn add(self, _rhs: Cost) -> Cost {
-		unimplemented!()
+	fn add(self, rhs: Cost) -> Cost {
+		Cost(self.0 + rhs.0)
 	}
 }

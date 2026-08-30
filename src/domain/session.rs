@@ -186,38 +186,61 @@ pub enum Nudge {
 }
 
 impl From<Nudge> for Outcome {
-	fn from(_n: Nudge) -> Outcome {
-		unimplemented!()
+	fn from(n: Nudge) -> Outcome {
+		match n {
+			Nudge::Feedback(text) => Outcome::Feedback(text),
+			Nudge::Nothing => Outcome::Nothing,
+		}
 	}
 }
 
 impl SessionKind {
 	/// The Task this Session holds, if it is a Worker.
 	pub fn task(&self) -> Option<TaskId> {
-		unimplemented!()
+		match self {
+			SessionKind::Worker { task, .. } => Some(*task),
+			SessionKind::Comms { .. } => None,
+		}
 	}
 
 	/// The Channel this Session stands on, if it is a Comms Session.
 	pub fn channel(&self) -> Option<ChannelId> {
-		unimplemented!()
+		match self {
+			SessionKind::Comms { channel, .. } => Some(*channel),
+			SessionKind::Worker { .. } => None,
+		}
 	}
 
 	/// The Role of the Task this Session holds, if it is a Worker.
 	pub fn role(&self) -> Option<RoleName> {
-		unimplemented!()
+		match self {
+			SessionKind::Worker { role, .. } => Some(*role),
+			SessionKind::Comms { .. } => None,
+		}
 	}
 
 	pub fn discriminant(&self) -> &'static str {
-		unimplemented!()
+		match self {
+			SessionKind::Worker { .. } => "worker",
+			SessionKind::Comms { .. } => "comms",
+		}
 	}
 }
 
 impl SessionStatus {
 	pub fn discriminant(&self) -> &'static str {
-		unimplemented!()
+		match self {
+			SessionStatus::Thinking => "thinking",
+			SessionStatus::Tools => "tools",
+			SessionStatus::Reflecting => "reflecting",
+			SessionStatus::Waiting => "waiting",
+			SessionStatus::Idle => "idle",
+			SessionStatus::Finished => "finished",
+			SessionStatus::Failed { .. } => "failed",
+		}
 	}
 
 	pub fn is_terminal(&self) -> bool {
-		unimplemented!()
+		matches!(self, SessionStatus::Finished | SessionStatus::Failed { .. })
 	}
 }

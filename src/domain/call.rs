@@ -87,16 +87,24 @@ pub struct NewCall {
 
 impl CallStatus {
 	pub fn discriminant(&self) -> &'static str {
-		unimplemented!()
+		match self {
+			CallStatus::Queued => "queued",
+			CallStatus::InFlight { .. } => "in_flight",
+			CallStatus::Done { .. } => "done",
+			CallStatus::Failed { .. } => "failed",
+		}
 	}
 
 	/// What this call consumed, if it finished successfully. Spend sums these.
 	pub fn usage(&self) -> Option<Usage> {
-		unimplemented!()
+		match self {
+			CallStatus::Done { usage, .. } => Some(*usage),
+			_ => None,
+		}
 	}
 
 	/// Whether this call is still expected to produce something.
 	pub fn is_outstanding(&self) -> bool {
-		unimplemented!()
+		matches!(self, CallStatus::Queued | CallStatus::InFlight { .. })
 	}
 }

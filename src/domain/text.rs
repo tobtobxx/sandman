@@ -85,63 +85,74 @@ pub enum TextError {
 impl Title {
 	/// The Title as written. Borrowed, because most readers only print it.
 	pub fn as_str(&self) -> &str {
-		unimplemented!()
+		&self.0
 	}
 }
 
 impl Brief {
 	/// The Brief as written.
 	pub fn as_str(&self) -> &str {
-		unimplemented!()
+		&self.0
 	}
 }
 
 impl Day {
 	/// Today, in the local zone.
-	pub fn today(_now: super::time::Timestamp) -> Self {
-		unimplemented!()
+	pub fn today(now: super::time::Timestamp) -> Self {
+		use chrono::TimeZone;
+		let local = chrono::Local.timestamp_millis_opt(now.0).unwrap();
+		Day(local.format("%Y-%m-%d").to_string())
 	}
 
 	pub fn as_str(&self) -> &str {
-		unimplemented!()
+		&self.0
 	}
 }
 
 impl TryFrom<String> for Title {
 	type Error = TextError;
-	fn try_from(_s: String) -> Result<Self, Self::Error> {
-		unimplemented!()
+	fn try_from(s: String) -> Result<Self, Self::Error> {
+		let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+		if collapsed.is_empty() {
+			return Err(TextError::Empty { what: "title" });
+		}
+		Ok(Title(collapsed))
 	}
 }
 
 impl TryFrom<String> for Brief {
 	type Error = TextError;
-	fn try_from(_s: String) -> Result<Self, Self::Error> {
-		unimplemented!()
+	fn try_from(s: String) -> Result<Self, Self::Error> {
+		if s.trim().is_empty() {
+			return Err(TextError::Empty { what: "brief" });
+		}
+		Ok(Brief(s))
 	}
 }
 
 impl TryFrom<String> for Day {
 	type Error = TextError;
-	fn try_from(_s: String) -> Result<Self, Self::Error> {
-		unimplemented!()
+	fn try_from(s: String) -> Result<Self, Self::Error> {
+		chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d")
+			.map_err(|_| TextError::NotADay { text: s.clone() })?;
+		Ok(Day(s))
 	}
 }
 
 impl fmt::Display for Title {
-	fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		unimplemented!()
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self.0)
 	}
 }
 
 impl fmt::Display for Brief {
-	fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		unimplemented!()
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self.0)
 	}
 }
 
 impl fmt::Display for Day {
-	fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		unimplemented!()
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self.0)
 	}
 }

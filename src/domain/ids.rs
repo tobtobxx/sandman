@@ -42,25 +42,33 @@ macro_rules! id_type {
 		impl FromStr for $name {
 			type Err = IdError;
 
-			fn from_str(_s: &str) -> Result<Self, Self::Err> {
-				unimplemented!()
+			fn from_str(s: &str) -> Result<Self, Self::Err> {
+				s.strip_prefix($prefix)
+					.and_then(|rest| rest.strip_prefix('-'))
+					.and_then(|n| n.parse::<u32>().ok())
+					.map($name)
+					.ok_or_else(|| IdError {
+						text: s.to_string(),
+						expected: $prefix,
+					})
 			}
 		}
 
 		impl serde::Serialize for $name {
 			fn serialize<S: serde::Serializer>(
 				&self,
-				_s: S,
+				s: S,
 			) -> Result<S::Ok, S::Error> {
-				unimplemented!()
+				s.collect_str(self)
 			}
 		}
 
 		impl<'de> serde::Deserialize<'de> for $name {
 			fn deserialize<D: serde::Deserializer<'de>>(
-				_d: D,
+				d: D,
 			) -> Result<Self, D::Error> {
-				unimplemented!()
+				let s = <String as serde::Deserialize>::deserialize(d)?;
+				s.parse().map_err(serde::de::Error::custom)
 			}
 		}
 	};

@@ -61,6 +61,10 @@ pub enum Who {
 
 impl ChannelKind {
 	pub fn discriminant(&self) -> &'static str {
-		unimplemented!()
+		match self {
+			ChannelKind::Stdio => "stdio",
+			ChannelKind::Web => "web",
+			ChannelKind::Scripted => "scripted",
+		}
 	}
 }

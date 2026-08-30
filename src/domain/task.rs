@@ -156,32 +156,53 @@ pub struct TaskSummary {
 impl TaskState {
 	/// The one-word name this state goes into the database and the wire under.
 	pub fn discriminant(&self) -> &'static str {
-		unimplemented!()
+		match self {
+			TaskState::Pending => "pending",
+			TaskState::Running { .. } => "running",
+			TaskState::Completed { .. } => "completed",
+			TaskState::Cancelled { .. } => "cancelled",
+		}
 	}
 
 	/// Whether nothing further will happen to a Task in this state.
 	pub fn is_terminal(&self) -> bool {
-		unimplemented!()
+		matches!(
+			self,
+			TaskState::Completed { .. } | TaskState::Cancelled { .. }
+		)
 	}
 }
 
 impl TaskResult {
 	/// The text itself, whichever way it went.
 	pub fn content(&self) -> &str {
-		unimplemented!()
+		match self {
+			TaskResult::Succeeded(text) => text,
+			TaskResult::Failed(text) => text,
+		}
 	}
 }
 
 impl Schedule {
 	/// The earliest instant a Task on this schedule may run.
 	pub fn not_before(&self, _created_at: Timestamp) -> Option<Timestamp> {
-		unimplemented!()
+		match self {
+			Schedule::Now => None,
+			Schedule::At(t) => Some(*t),
+			Schedule::Repeating { first, .. } => Some(*first),
+		}
 	}
 
 	/// The schedule the next occurrence takes, if this one repeats. Anchored to
 	/// the schedule, not to when the finishing run happened to end.
 	pub fn next_occurrence(&self) -> Option<Schedule> {
-		unimplemented!()
+		match self {
+			Schedule::Repeating { first, every } => Some(Schedule::Repeating {
+				first: first.plus(*every),
+				every: *every,
+			}),
+			_ => None,
+		}
 	}
 }
 
@@ -189,12 +210,16 @@ impl Task {
 	/// This Task's Result as the text that crosses between agents: an answer
 	/// with nothing but the Task it answers and what was found.
 	pub fn render_answer(&self) -> String {
-		unimplemented!()
+		let content = match &self.state {
+			TaskState::Completed { result, .. } => result.content(),
+			_ => "",
+		};
+		format!("Answer to \"{}\":\n{}", self.title, content)
 	}
 
 	/// The notice a cancellation sends where a Result would have gone, so
 	/// whoever waited on this Task does not hang on it.
 	pub fn render_cancelled(&self) -> String {
-		unimplemented!()
+		format!("Task \"{}\" was cancelled.", self.title)
 	}
 }
