@@ -27,16 +27,18 @@
 //! Files: [`rig`] the harness under test; [`intercept`] watching and answering
 //! tool calls; [`script`] a model whose replies are written by the test;
 //! [`grader`] verification a model has to do; [`report`] what a run leaves
-//! behind.
+//! behind; [`cases`] the cases, which `tests/cases.rs` and `bin/bench` share.
 //!
 //! Defines: [`Trip`], [`CheckResult`].
 
+pub mod cases;
 pub mod grader;
 pub mod intercept;
 pub mod report;
 pub mod rig;
 pub mod script;
 
+pub use cases::{Case, CASES};
 pub use grader::{Grader, GraderOutcome, Verdict};
 pub use intercept::{Interceptor, RecordedToolCall, ToolsChoice};
 pub use rig::{Rig, RigBuilder, Watch};

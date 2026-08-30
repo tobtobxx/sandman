@@ -16,7 +16,7 @@
 
 use crate::domain::{Cost, Spend};
 
-use super::{CheckResult, GraderOutcome};
+use super::{CheckResult, Grader, GraderOutcome, Trip};
 
 /// Everything one run of one case found.
 #[derive(Debug, Clone)]
@@ -49,6 +49,24 @@ pub struct CaseSummary {
 	pub passed: usize,
 	pub mean_wall_ms: i64,
 	pub total_cost: Cost,
+}
+
+/// Everything between what a case found and its report, done once rather than
+/// in each case.
+///
+/// Winds the Rig down first, so nothing can still spend while the graders run.
+/// A [`Trip`] becomes [`RunReport::tripped`] rather than an early return: a run
+/// that ended on a tripwire still reports what it saw on the way there. Graders
+/// run only if every check passed — there is nothing to judge about a run that
+/// already failed on something countable — and their cost is kept apart from
+/// Spend.
+pub async fn assemble(
+	_case: &super::Case,
+	_rig: &mut super::Rig,
+	_found: Result<Vec<CheckResult>, Trip>,
+	_graders: Vec<Grader>,
+) -> RunReport {
+	unimplemented!()
 }
 
 /// Write `result.json`, `store.sqlite` and `sandman.log` into a directory.

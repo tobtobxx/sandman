@@ -19,11 +19,15 @@
 //! Every case builds its own [`sandman::bench::Rig`] — its own database, its own
 //! log, its own id counters — so running them together in one process is honest.
 //!
-//! Cases live in `tests/cases/`, which this binary and the test harness share.
+//! Cases live in `sandman::bench::cases`, and `tests/cases.rs` runs the same
+//! table. They are in the library because this binary cannot call into an
+//! integration test crate.
 
 /// What the driver was asked to do.
 struct Args {
-	cases: Option<Vec<String>>,
+	/// Resolved against `CASES` while parsing, so an unknown `--case` is an
+	/// error before anything is built or spent.
+	cases: Vec<&'static sandman::bench::Case>,
 	times: usize,
 	serial: bool,
 	/// Where the artifacts go. `bench/runs` by default.
@@ -35,8 +39,11 @@ fn parse(_argv: &[String]) -> Result<Args, String> {
 }
 
 /// Run one case once, write its artifacts, and report.
+///
+/// A case that could not build its Rig still reports; only writing the artifacts
+/// fails here.
 async fn run_once(
-	_name: &str,
+	_case: &sandman::bench::Case,
 	_dir: &std::path::Path,
 ) -> Result<sandman::bench::report::RunReport, String> {
 	unimplemented!()

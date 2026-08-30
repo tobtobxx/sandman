@@ -182,6 +182,7 @@ src/
   harness.rs      Task lifecycle, delivery, and the loops that start work.
   channels/       One connection to a human each; control.rs is the socket for the rest.
   web/            The Watcher UI: sockets, and Events as frames.
-  bench/          A Sandman under test, with four seams to make unreal. bin/ holds sandman
-                  and the bench driver, tests/cases.rs the cases themselves.
+  bench/          A Sandman under test, with four seams to make unreal, and the cases.
+                  bin/ holds sandman and the bench driver; tests/cases.rs wraps each
+                  case as a test.
 ```

@@ -7,7 +7,8 @@ would have done with that choice. Integration is a series of unit benches; there
 whole-swarm case.
 
 Code: `src/bench/` (`rig.rs`, `intercept.rs`, `grader.rs`, `report.rs`). Cases:
-`tests/cases.rs`.
+`src/bench/cases.rs` — in the library, because `bin/bench` cannot reach into a test
+crate. `tests/cases.rs` is one `#[tokio::test]` wrapper per case.
 
 ## Running
 
@@ -80,10 +81,13 @@ sqlite3 bench/runs/*/plan-greet-run1/store.sqlite \
 
 ## Adding a case
 
-A `#[tokio::test]` in `tests/cases.rs`, `#[ignore]` if it spends money. There is no
-registry to add it to. Decide two things first: **which Session is it about** — a
-question that needs two Sessions is two cases — and **what must never happen**, which is
-the tripwire that keeps a failing case cheap.
+An `async fn` in `src/bench/cases.rs`, a line in `CASES`, and an `#[ignore]`d wrapper in
+`tests/cases.rs`. Decide two things first: **which Session is it about** — a question
+that needs two Sessions is two cases — and **what must never happen**, which is the
+tripwire that keeps a failing case cheap.
+
+`report::assemble` does the rest: it winds the Rig down, turns a tripwire into
+`tripped` rather than an early return, and runs the graders only if every check passed.
 
 ## Caveats
 
