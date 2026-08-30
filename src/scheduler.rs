@@ -27,8 +27,8 @@
 use std::sync::Arc;
 
 use crate::domain::{
-	CallId, CallRequest, CallStatus, Completion, NewCall, SessionId,
-	TaskPriority, Timestamp, Usage,
+	CallId, CallRequest, CallStatus, Clock, Completion, NewCall, SessionId,
+	TaskPriority, Usage,
 };
 use crate::model::{Model, ModelError};
 use crate::store::Store;
@@ -82,6 +82,7 @@ impl From<TaskPriority> for Tier {
 pub struct Scheduler {
 	model: Arc<dyn Model>,
 	store: Arc<Store>,
+	clock: Arc<dyn Clock>,
 	inner: tokio::sync::Mutex<Inner>,
 }
 
@@ -125,10 +126,15 @@ pub enum SchedulerError {
 }
 
 impl Scheduler {
-	pub fn new(model: Arc<dyn Model>, store: Arc<Store>) -> Self {
+	pub fn new(
+		model: Arc<dyn Model>,
+		store: Arc<Store>,
+		clock: Arc<dyn Clock>,
+	) -> Self {
 		Scheduler {
 			model,
 			store,
+			clock,
 			inner: tokio::sync::Mutex::new(Inner {
 				in_flight: false,
 				next_arrival: 0,
@@ -144,11 +150,6 @@ impl Scheduler {
 	/// waiting. It is sent when it reaches the front and nothing else is in
 	/// flight.
 	///
-	/// One timestamp stands for the whole exchange — the Scheduler has no
-	/// [`crate::domain::Clock`] of its own, only what the caller hands it — so
-	/// `queued_at`, `sent_at` and `finished_at` all read the same instant. See
-	/// `TASKS.md`.
-	///
 	/// The [`CallId`] comes back on both paths — beside the [`Completion`], and
 	/// inside [`SchedulerError::Call`]. `reflect.rs` anchors a
 	/// [`crate::domain::Reflection`] on it, and that record is not optional when
@@ -158,7 +159,6 @@ impl Scheduler {
 		session: SessionId,
 		request: CallRequest,
 		tier: Tier,
-		now: Timestamp,
 	) -> Result<(CallId, Completion), SchedulerError> {
 		let id = self.store.queue_call(
 			NewCall {
@@ -167,15 +167,17 @@ impl Scheduler {
 				model: self.model.name().to_string(),
 				request: request.clone(),
 			},
-			now,
+			self.clock.now(),
 		)?;
 
 		self.acquire(tier).await;
 
+		let sent_at = self.clock.now();
 		self.store
-			.set_call_status(id, CallStatus::InFlight { sent_at: now })?;
+			.set_call_status(id, CallStatus::InFlight { sent_at })?;
 
 		let outcome = self.model.send(&request).await;
+		let finished_at = self.clock.now();
 
 		self.release().await;
 
@@ -186,8 +188,8 @@ impl Scheduler {
 				self.store.set_call_status(
 					id,
 					CallStatus::Done {
-						sent_at: now,
-						finished_at: now,
+						sent_at,
+						finished_at,
 						reply: completion.reply.clone(),
 						usage,
 					},
@@ -198,8 +200,8 @@ impl Scheduler {
 				self.store.set_call_status(
 					id,
 					CallStatus::Failed {
-						sent_at: now,
-						finished_at: now,
+						sent_at,
+						finished_at,
 						error: error.to_string(),
 					},
 				)?;

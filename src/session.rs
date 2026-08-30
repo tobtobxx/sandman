@@ -137,8 +137,7 @@ pub async fn turn(ctx: &SessionCtx, tier: Tier) -> Turn {
 		// Schedule request
 		let _ = ctx.store.set_status(ctx.id, SessionStatus::Thinking);
 		let request = CallRequest { messages, tools };
-		let now = ctx.clock.now();
-		let outcome = ctx.scheduler.request(ctx.id, request, tier, now).await;
+		let outcome = ctx.scheduler.request(ctx.id, request, tier).await;
 
 		// Process outcome
 		let completion = match outcome {

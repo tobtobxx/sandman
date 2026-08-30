@@ -242,7 +242,8 @@ async fn assemble(
 	}
 
 	let model: Arc<dyn Model> = Arc::new(OpenRouter::from_env());
-	let scheduler = Arc::new(Scheduler::new(model, store.clone()));
+	let scheduler =
+		Arc::new(Scheduler::new(model, store.clone(), clock.clone()));
 	let tools = Arc::new(Registry::all(events.clone()));
 
 	Ok(Harness::new(store, events, scheduler, tools, clock))

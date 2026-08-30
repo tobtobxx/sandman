@@ -130,7 +130,7 @@ async fn metacognise(
 
 	match ctx
 		.scheduler
-		.request(ctx.id, request, Tier::Metacognition, now)
+		.request(ctx.id, request, Tier::Metacognition)
 		.await
 	{
 		Ok((call, completion)) => {
