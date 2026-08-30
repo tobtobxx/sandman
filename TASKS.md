@@ -12,12 +12,7 @@ Ten steps, bottom up. `cargo check` passes today and must pass after each step.
 
 ### 2. `event.rs`, `db/`, `store.rs` — done
 
-### 3. `log.rs`
-
-Watch out:
-- `follow` must survive `RecvError::Lagged` — a dropped Event is a note, not an end.
-- Terse elides bodies to a length and a count; the database holds the content.
-- The log opens by path. Two Harnesses in one process share no file.
+### 3. `log.rs` — done
 
 ### 4. `model.rs`, `scheduler.rs`
 
