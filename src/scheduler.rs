@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use crate::domain::{
-	CallRequest, Completion, SessionId, TaskPriority, Timestamp,
+	CallId, CallRequest, Completion, SessionId, TaskPriority, Timestamp,
 };
 use crate::model::{Model, ModelError};
 use crate::store::Store;
@@ -88,10 +88,20 @@ struct Inner {
 }
 
 /// What can go wrong asking for a model call.
+///
+/// [`SchedulerError::Call`] carries the [`CallId`] of the exchange that failed.
+/// The call record exists from the moment it joined the queue, so a failure has
+/// one to name — which is what lets metacognition record a `FailedOpen`
+/// reflection against the call it could not make. [`SchedulerError::Store`] is
+/// the one case with no id at all: nothing was ever queued.
 #[derive(Debug, thiserror::Error)]
 pub enum SchedulerError {
-	#[error(transparent)]
-	Model(#[from] ModelError),
+	#[error("{source}")]
+	Call {
+		call: CallId,
+		#[source]
+		source: ModelError,
+	},
 	#[error(transparent)]
 	Store(#[from] crate::store::StoreError),
 }
@@ -107,13 +117,18 @@ impl Scheduler {
 	/// The call is recorded the moment it joins the queue, so a Watcher sees it
 	/// waiting. It is sent when it reaches the front and nothing else is in
 	/// flight.
+	///
+	/// The [`CallId`] comes back on both paths — beside the [`Completion`], and
+	/// inside [`SchedulerError::Call`]. `reflect.rs` anchors a
+	/// [`crate::domain::Reflection`] on it, and that record is not optional when
+	/// the call fails. A Turn does not want it and drops it.
 	pub async fn request(
 		&self,
 		_session: SessionId,
 		_request: CallRequest,
 		_tier: Tier,
 		_now: Timestamp,
-	) -> Result<Completion, SchedulerError> {
+	) -> Result<(CallId, Completion), SchedulerError> {
 		unimplemented!()
 	}
 

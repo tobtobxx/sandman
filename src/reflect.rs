@@ -88,6 +88,15 @@ pub async fn interrupt(_ctx: &SessionCtx) -> Nudge {
 /// The call goes through the scheduler at [`crate::scheduler::Tier::Metacognition`]
 /// and is recorded against the Session it judges, so its cost lands where the
 /// work is.
+///
+/// Three ways it ends, and each writes a different record:
+///
+/// - the call answered — a [`crate::domain::ReflectionResult::Ran`] on that call;
+/// - the call failed — a [`crate::domain::ReflectionResult::FailedOpen`] on the
+///   same call, which exists because the scheduler recorded it before sending;
+/// - the Store refused — nothing was queued, so there is no call to anchor a
+///   Reflection on and none is written. Failing open still holds: the Session
+///   carries on either way.
 async fn metacognise(
 	_ctx: &SessionCtx,
 	_kind: crate::domain::ReflectionKind,
