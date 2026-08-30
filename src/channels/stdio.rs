@@ -31,9 +31,13 @@ impl crate::comms::Channel for Stdio {
 	}
 
 	fn send(&self, text: &str) {
-		println!("{text}");
+		println!("{CYAN}{text}{RESET}");
 	}
 }
+
+/// Sandman's own voice, set apart from what the human typed.
+const CYAN: &str = "\x1b[36m";
+const RESET: &str = "\x1b[0m";
 
 /// Open the terminal Channel and start reading lines from it.
 ///
