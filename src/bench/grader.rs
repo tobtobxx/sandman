@@ -21,7 +21,8 @@
 //!
 //! Defines: [`Grader`], [`GraderOutcome`], [`Verdict`], [`run`], [`default_judge`].
 
-use crate::domain::Cost;
+use crate::domain::{CallRequest, Cost, Message, Reply};
+use crate::model::{Model, OpenRouter, API_KEY, ENDPOINT, GRADER_MODEL};
 
 /// What a grader is told it is doing.
 pub const GRADER_SYSTEM: &str = "\
@@ -30,7 +31,8 @@ Be strict and literal: grade what is written, not what was probably meant.
 End your reply with a verdict on its own line: <verdict>pass</verdict> or <verdict>fail</verdict>.";
 
 /// A model's judgement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Verdict {
 	Pass,
 	Fail,
@@ -47,7 +49,7 @@ pub struct Grader {
 }
 
 /// What one grader found.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct GraderOutcome {
 	pub name: String,
 	pub verdict: Verdict,
@@ -62,14 +64,49 @@ pub struct GraderOutcome {
 /// Fails only on transport trouble; a `fail` verdict is a normal outcome, not an
 /// error.
 pub async fn run(
-	_grader: &Grader,
+	grader: &Grader,
 ) -> Result<GraderOutcome, crate::model::ModelError> {
-	unimplemented!()
+	let model = OpenRouter::new(ENDPOINT, API_KEY, GRADER_MODEL, None);
+	let request = CallRequest {
+		messages: vec![
+			Message::System { content: GRADER_SYSTEM.to_string() },
+			Message::User { content: grader.input.clone() },
+		],
+		tools: Vec::new(),
+	};
+	let completion = model.send(&request).await?;
+
+	let text = match &completion.reply {
+		Reply::Text(text) => text.clone(),
+		Reply::Calls { preamble, .. } => preamble.clone().unwrap_or_default(),
+	};
+	let (verdict, detail) = match &grader.judge {
+		Some(judge) => judge(&text),
+		None => default_judge(&text),
+	};
+
+	Ok(GraderOutcome {
+		name: grader.name.clone(),
+		verdict,
+		detail,
+		raw: text,
+		cost: completion.cost,
+	})
 }
 
 /// Look for `<verdict>pass</verdict>` or `<verdict>fail</verdict>`.
 ///
 /// No tag is a FAIL.
-pub fn default_judge(_reply: &str) -> (Verdict, String) {
-	unimplemented!()
+pub fn default_judge(reply: &str) -> (Verdict, String) {
+	let lower = reply.to_lowercase();
+	if lower.contains("<verdict>pass</verdict>") {
+		(Verdict::Pass, reply.to_string())
+	} else if lower.contains("<verdict>fail</verdict>") {
+		(Verdict::Fail, reply.to_string())
+	} else {
+		(
+			Verdict::Fail,
+			format!("no <verdict> tag in the reply: {reply}"),
+		)
+	}
 }

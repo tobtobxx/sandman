@@ -24,15 +24,17 @@ Ten steps, bottom up. `cargo check` passes today and must pass after each step.
 
 ### 8. `channels/`, `control.rs`, `bin/sandman.rs` — first runnable Sandman — done
 
-### 9. `bench/`, `tests/cases.rs`, `bin/bench.rs`
+### 9. `bench/`, `bin/bench.rs` — done
 
-Watch out:
-- `Rig::until` checks the predicate before it waits, and survives `Lagged`.
-- `Interceptor::schemas` passes through unchanged. Changing them changes what is
-  measured.
-- `Drop` aborts the drivers. A panicking case must not leave a Harness spending.
-- A grader reply with no verdict tag is a FAIL, and grader cost is never Spend.
-- Cases keep the real clock unless the case is about the Harness.
+Cases ended up one file per case under `src/bench/cases/`, not `tests/cases.rs`: each
+file's module doc says the scenario in plain language, and its `#[ignore]`d
+`#[cfg(test)]` wrapper lives at the bottom of the same file rather than in a separate
+integration-test crate, so a case and the test that runs it cannot drift apart.
+
+Verified against the real model: `hello` and `plan-greet` pass. `greet-again` currently
+fails — the Comms Session answers "I've set a reminder" and never calls `create_task`,
+so the reminder is not real. That is the bench doing its job, not a bug in it; see
+"To do" below.
 
 ### 10. `web/`
 
@@ -99,6 +101,12 @@ Watch out:
 - Sessions are cutoff when calling view_session
 
 ## To do
+
+- **The Comms Session claims it scheduled a reminder without calling `create_task`.**
+  Found by the `greet-again` bench case: asked to "greet me again in about 3 minutes",
+  the model replies "I've set a reminder" and never reaches for the tool that would make
+  that true. Prompt or mechanics issue in `comms-session.md` / `mechanics.md`, not
+  something the bench itself needs to change.
 
 - **A fourth bench case for `message_human`.** Delivery is the path most likely to fail
   and the one nothing covers: does the Session reach for `message_human`, and does it

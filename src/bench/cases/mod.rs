@@ -1,10 +1,10 @@
 //! The bench cases themselves.
 //!
-//! They live in the library rather than in `tests/` because both consumers have
-//! to reach them: `cargo test` runs each as an ordinary `#[tokio::test]` through
-//! the thin wrappers in `tests/cases.rs`, and `bin/bench` runs the same table
-//! several times over and keeps the artifacts. An integration test is its own
-//! crate, so a binary cannot call into one.
+//! One file per case, each opening with what it tests in plain language.
+//! `cargo test -- --ignored` runs the `#[cfg(test)]` wrapper next to each one,
+//! and `bin/bench` runs the same [`CASES`] table several times over and keeps
+//! the artifacts. Everything lives in the library, because `bin/bench` cannot
+//! reach into an integration test crate.
 //!
 //! Every case is a unit bench: one Session, one real Brief, every tool call
 //! intercepted. It asks what the model reached for — which tool, with what
@@ -34,18 +34,15 @@
 //!
 //! Defines: [`Case`], [`CASES`], [`find`].
 
+mod greet_again;
+mod hello;
+mod plan_greet;
+
 use std::future::Future;
 use std::pin::Pin;
 
 use super::report::RunReport;
-use super::{CheckResult, Rig, Watch};
-
-/// What the human says in the `hello` case.
-const HELLO_MESSAGE: &str = "Hello :)";
-
-/// What the human says in the `greet-again` case.
-const GREET_MESSAGE: &str =
-	"Hey! Could you greet me again in about 3 minutes? :)";
+use super::{CheckResult, Rig, Trip, Watch};
 
 /// One case, run to the end.
 ///
@@ -64,60 +61,100 @@ pub struct Case {
 	pub run: CaseFn,
 }
 
-/// Every case. Adding one is a function above and a line here.
+/// Every case. Adding one is a file below and a line here.
 pub const CASES: &[Case] = &[
 	Case {
 		name: "hello",
 		description: "`\"Hello :)\"` gets a reply and reaches for no Task.",
-		run: || Box::pin(hello()),
+		run: || Box::pin(hello::run()),
 	},
 	Case {
 		name: "greet-again",
 		description:
 			"Asking to be greeted again in ~3 minutes creates one Task.",
-		run: || Box::pin(greet_again()),
+		run: || Box::pin(greet_again::run()),
 	},
 	Case {
 		name: "plan-greet",
 		description: "A planning Worker schedules a greeting ~3 minutes out.",
-		run: || Box::pin(plan_greet()),
+		run: || Box::pin(plan_greet::run()),
 	},
 ];
 
 /// The case of that name, for `--case` and for a test wrapper.
-pub fn find(_name: &str) -> Option<&'static Case> {
-	unimplemented!()
+pub fn find(name: &str) -> Option<&'static Case> {
+	CASES.iter().find(|c| c.name == name)
 }
 
-/// Tripwire: `create_task` is never reached for more than `n` times.
+/// A `RunReport` for a case whose Rig never came up. Not a `RunReport::assemble`
+/// call, because that needs a Rig to wind down and there is none.
+fn build_failed(case: &Case, trip: &Trip) -> RunReport {
+	RunReport {
+		case: case.name.to_string(),
+		description: case.description.to_string(),
+		model: String::new(),
+		reasoning_effort: String::new(),
+		started_at: 0,
+		finished_at: 0,
+		wall_ms: 0,
+		pass: false,
+		tripped: Some(trip.to_string()),
+		checks: Vec::new(),
+		graders: Vec::new(),
+		failed_calls: Vec::new(),
+		spend: crate::domain::Spend::default(),
+		grader_cost: crate::domain::Cost(0),
+	}
+}
+
+/// Tripwire: a Task-creating tool is never reached for more than `n` times.
 ///
 /// Counts calls, not rows: a unit bench answers the creation itself, so a
 /// Session that keeps asking for Tasks leaves nothing in the Store to count.
-fn at_most_creations(
-	_n: usize,
-) -> impl Fn(&Watch) -> CheckResult + Send + Sync {
-	|_watch| unimplemented!()
+fn at_most_creations(n: usize) -> impl Fn(&Watch) -> CheckResult + Send + Sync {
+	use crate::roles::ToolName;
+	move |watch: &Watch| {
+		let count = watch
+			.calls
+			.iter()
+			.filter(|c| {
+				matches!(
+					c.name,
+					ToolName::CreateTask
+						| ToolName::CreateTaskFull
+						| ToolName::CreateResearchTask
+				)
+			})
+			.count();
+		if count <= n {
+			CheckResult::ok(
+				"at_most_creations",
+				format!("{count} creation call(s) so far"),
+			)
+		} else {
+			CheckResult::no(
+				"at_most_creations",
+				format!("{count} creation call(s), more than the {n} allowed"),
+			)
+		}
+	}
 }
 
-/// One Comms Session, nothing driving the queue. Reaching for `create_task` is
-/// the failure, so the case denies it and asserts it was never called.
-async fn hello() -> (Option<Rig>, RunReport) {
-	unimplemented!()
-}
-
-/// The Brief handed over is judged by a grader — whether it is a faithful
-/// hand-off of what the human wanted — because no count answers that. The grader
-/// passes a Brief that only describes the delay in words: the Comms Session has
-/// no scheduling tool, so turning words into a timed Task is the next Worker's
-/// job.
-async fn greet_again() -> (Option<Rig>, RunReport) {
-	unimplemented!()
-}
-
-/// A planning Task seeded from outside. The planner should reach for
-/// `create_task` exactly once, with a Schedule ~3 minutes out, and complete. The
-/// creation is answered by the case, so no child Worker runs and no scheduled
-/// Task is left to cancel — the whole case is one Session's decisions.
-async fn plan_greet() -> (Option<Rig>, RunReport) {
-	unimplemented!()
+/// True once a Comms Session has taken a Turn and gone back to waiting for mail:
+/// idle, nothing unread, and at least one model call more than `baseline`.
+///
+/// `baseline` must be the call count taken *before* the message was sent, or
+/// this reads true before the Session has done anything — a fresh Comms
+/// Session is minted already `Idle` with an empty mailbox.
+fn comms_finished(
+	store: &crate::store::Store,
+	session: crate::domain::SessionId,
+	baseline: usize,
+) -> bool {
+	let Ok(Some(row)) = store.session(session) else {
+		return false;
+	};
+	let idle = matches!(row.status, crate::domain::SessionStatus::Idle);
+	let has_mail = matches!(store.has_mail(session), Ok(true));
+	idle && !has_mail && row.calls.len() > baseline
 }

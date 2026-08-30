@@ -65,7 +65,7 @@ pub enum Trip {
 }
 
 /// What one check found.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CheckResult {
 	pub name: String,
 	pub ok: bool,
@@ -74,11 +74,19 @@ pub struct CheckResult {
 }
 
 impl CheckResult {
-	pub fn ok(_name: &str, _detail: impl Into<String>) -> Self {
-		unimplemented!()
+	pub fn ok(name: &str, detail: impl Into<String>) -> Self {
+		CheckResult {
+			name: name.to_string(),
+			ok: true,
+			detail: detail.into(),
+		}
 	}
 
-	pub fn no(_name: &str, _detail: impl Into<String>) -> Self {
-		unimplemented!()
+	pub fn no(name: &str, detail: impl Into<String>) -> Self {
+		CheckResult {
+			name: name.to_string(),
+			ok: false,
+			detail: detail.into(),
+		}
 	}
 }

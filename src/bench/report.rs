@@ -14,12 +14,13 @@
 //!
 //! Defines: [`RunReport`], [`CaseSummary`], [`write_artifacts`], [`print_summary`].
 
-use crate::domain::{Cost, Spend};
+use crate::domain::{CallStatus, Cost, Spend};
 
+use super::grader::Verdict;
 use super::{CheckResult, Grader, GraderOutcome, Trip};
 
 /// Everything one run of one case found.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RunReport {
 	pub case: String,
 	pub description: String,
@@ -61,39 +62,143 @@ pub struct CaseSummary {
 /// already failed on something countable — and their cost is kept apart from
 /// Spend.
 pub async fn assemble(
-	_case: &super::Case,
-	_rig: &mut super::Rig,
-	_found: Result<Vec<CheckResult>, Trip>,
-	_graders: Vec<Grader>,
+	case: &super::Case,
+	rig: &mut super::Rig,
+	found: Result<Vec<CheckResult>, Trip>,
+	graders: Vec<Grader>,
 ) -> RunReport {
-	unimplemented!()
+	let started_at = rig.started_at();
+	let finished_at = rig.harness.now();
+
+	let (checks, tripped) = match found {
+		Ok(checks) => (checks, None),
+		Err(trip) => (Vec::new(), Some(trip.to_string())),
+	};
+	let checks_passed = tripped.is_none() && checks.iter().all(|c| c.ok);
+
+	let mut grader_outcomes = Vec::new();
+	let mut grader_cost = Cost(0);
+	if checks_passed {
+		for grader in &graders {
+			match super::grader::run(grader).await {
+				Ok(outcome) => {
+					grader_cost = grader_cost + outcome.cost;
+					grader_outcomes.push(outcome);
+				},
+				Err(e) => grader_outcomes.push(GraderOutcome {
+					name: grader.name.clone(),
+					verdict: Verdict::Fail,
+					detail: format!("the grader could not be reached: {e}"),
+					raw: String::new(),
+					cost: Cost(0),
+				}),
+			}
+		}
+	}
+
+	rig.wind_down().await;
+
+	let snapshot = rig.store.snapshot().ok();
+	let model = snapshot
+		.as_ref()
+		.map(|s| s.run.model.clone())
+		.unwrap_or_default();
+	let failed_calls = snapshot
+		.map(|s| s.calls)
+		.unwrap_or_default()
+		.into_iter()
+		.filter_map(|call| match call.status {
+			CallStatus::Failed { error, .. } => {
+				Some(format!("{} ({}): {error}", call.id, call.session))
+			},
+			_ => None,
+		})
+		.collect();
+	let spend = rig.spend().unwrap_or_default();
+
+	let pass = checks_passed
+		&& grader_outcomes.iter().all(|g| g.verdict == Verdict::Pass);
+
+	RunReport {
+		case: case.name.to_string(),
+		description: case.description.to_string(),
+		model,
+		// Nothing between here and the Model seam records what reasoning
+		// effort a real call asked for; `OpenRouter::from_env` always asks
+		// for none. Honest until a case needs to vary it.
+		reasoning_effort: "none".to_string(),
+		started_at: started_at.0,
+		finished_at: finished_at.0,
+		wall_ms: (finished_at.0 - started_at.0).max(0),
+		pass,
+		tripped,
+		checks,
+		graders: grader_outcomes,
+		failed_calls,
+		spend,
+		grader_cost,
+	}
 }
 
 /// Write `result.json`, `store.sqlite` and `sandman.log` into a directory.
 pub fn write_artifacts(
-	_report: &RunReport,
-	_rig: &super::Rig,
-	_dir: &std::path::Path,
+	report: &RunReport,
+	rig: &super::Rig,
+	dir: &std::path::Path,
 ) -> std::io::Result<()> {
-	unimplemented!()
+	rig.save_to(dir)?;
+	let json = serde_json::to_string_pretty(report).map_err(|e| {
+		std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+	})?;
+	std::fs::write(dir.join("result.json"), json)?;
+	Ok(())
 }
 
 /// One line per run, then a line per failed check.
-pub fn print_run(_report: &RunReport) {
-	unimplemented!()
+pub fn print_run(report: &RunReport) {
+	let verdict = if report.pass { "PASS" } else { "FAIL" };
+	println!(
+		"[{verdict}] {} ({}ms, {}) — {}",
+		report.case, report.wall_ms, report.spend.cost, report.description
+	);
+	if let Some(trip) = &report.tripped {
+		println!("  tripped: {trip}");
+	}
+	for check in &report.checks {
+		if !check.ok {
+			println!("  check `{}` failed: {}", check.name, check.detail);
+		}
+	}
+	for grader in &report.graders {
+		if grader.verdict != Verdict::Pass {
+			println!("  grader `{}` failed: {}", grader.name, grader.detail);
+		}
+	}
+	for failed in &report.failed_calls {
+		println!("  call failed: {failed}");
+	}
 }
 
 /// Pass rate, mean wall time and total cost per case.
-pub fn print_summary(_summaries: &[CaseSummary]) {
-	unimplemented!()
+pub fn print_summary(summaries: &[CaseSummary]) {
+	for summary in summaries {
+		println!(
+			"{}: {}/{} passed, mean {}ms, total {}",
+			summary.case,
+			summary.passed,
+			summary.runs,
+			summary.mean_wall_ms,
+			summary.total_cost
+		);
+	}
 }
 
 /// Where a run's artifacts go: `bench/runs/<stamp>/<case>-run<k>/`.
 pub fn run_dir(
-	_root: &std::path::Path,
-	_stamp: &str,
-	_case: &str,
-	_k: usize,
+	root: &std::path::Path,
+	stamp: &str,
+	case: &str,
+	k: usize,
 ) -> std::path::PathBuf {
-	unimplemented!()
+	root.join(stamp).join(format!("{case}-run{k}"))
 }

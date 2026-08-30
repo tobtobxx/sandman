@@ -6,9 +6,12 @@ is one **Session** against one real **Brief**, and says nothing about what the s
 would have done with that choice. Integration is a series of unit benches; there is no
 whole-swarm case.
 
-Code: `src/bench/` (`rig.rs`, `intercept.rs`, `grader.rs`, `report.rs`). Cases:
-`src/bench/cases.rs` — in the library, because `bin/bench` cannot reach into a test
-crate. `tests/cases.rs` is one `#[tokio::test]` wrapper per case.
+Code: `src/bench/` (`rig.rs`, `intercept.rs`, `grader.rs`, `report.rs`). Cases: one file
+per case under `src/bench/cases/`, each opening with the scenario in plain language.
+Cases live in the library, because `bin/bench` cannot reach into a test crate; the
+`#[tokio::test]` wrapper for each lives in a `#[cfg(test)]` module at the bottom of its
+own case file rather than in `tests/`, so the case and the test that runs it never drift
+apart.
 
 ## Running
 
@@ -81,10 +84,11 @@ sqlite3 bench/runs/*/plan-greet-run1/store.sqlite \
 
 ## Adding a case
 
-An `async fn` in `src/bench/cases.rs`, a line in `CASES`, and an `#[ignore]`d wrapper in
-`tests/cases.rs`. Decide two things first: **which Session is it about** — a question
-that needs two Sessions is two cases — and **what must never happen**, which is the
-tripwire that keeps a failing case cheap.
+A new file under `src/bench/cases/` — its module doc comment says the scenario in plain
+language — a line in `CASES` in `cases/mod.rs`, and an `#[ignore]`d `#[cfg(test)]` wrapper
+at the bottom of the same file. Decide two things first: **which Session is it about** —
+a question that needs two Sessions is two cases — and **what must never happen**, which
+is the tripwire that keeps a failing case cheap.
 
 `report::assemble` does the rest: it winds the Rig down, turns a tripwire into
 `tripped` rather than an early return, and runs the graders only if every check passed.

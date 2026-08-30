@@ -28,31 +28,54 @@ impl ScriptedModel {
 	///
 	/// Running out is a failure of the test, not of the code under test, and it
 	/// says so.
-	pub fn new(_replies: Vec<Completion>) -> Self {
-		unimplemented!()
+	pub fn new(replies: Vec<Completion>) -> Self {
+		ScriptedModel {
+			replies: std::sync::Mutex::new(
+				replies.into_iter().map(Ok).collect(),
+			),
+			seen: std::sync::Mutex::new(Vec::new()),
+		}
 	}
 
 	/// Reply with plain text, once. The commonest fixture.
-	pub fn saying(_text: &str) -> Completion {
-		unimplemented!()
+	pub fn saying(text: &str) -> Completion {
+		Completion {
+			reply: crate::domain::Reply::Text(text.to_string()),
+			reasoning: None,
+			tokens: 0,
+			cost: crate::domain::Cost(0),
+		}
 	}
 
 	/// Reply by calling one tool, once.
-	pub fn calling(_name: &str, _arguments: serde_json::Value) -> Completion {
-		unimplemented!()
+	pub fn calling(name: &str, arguments: serde_json::Value) -> Completion {
+		let call = crate::domain::ToolCall {
+			id: "call-0".to_string(),
+			name: name.to_string(),
+			arguments: arguments.to_string(),
+		};
+		Completion {
+			reply: crate::domain::Reply::Calls {
+				preamble: None,
+				calls: crate::domain::NonEmpty::new(call, Vec::new()),
+			},
+			reasoning: None,
+			tokens: 0,
+			cost: crate::domain::Cost(0),
+		}
 	}
 
 	/// A call that fails on the wire, for testing what an unreachable model does
 	/// to a Worker, a Comms Session and a review.
-	pub fn unreachable(_why: &str) -> Result<Completion, String> {
-		unimplemented!()
+	pub fn unreachable(why: &str) -> Result<Completion, String> {
+		Err(why.to_string())
 	}
 
 	/// Every request this model was sent, in order — so a test can assert on
 	/// what a Session actually put in front of the model, including the system
 	/// prompt it was given and the tools it was offered.
 	pub fn requests(&self) -> Vec<CallRequest> {
-		unimplemented!()
+		self.seen.lock().expect("not poisoned").clone()
 	}
 }
 
@@ -64,8 +87,20 @@ impl Model for ScriptedModel {
 
 	async fn send(
 		&self,
-		_request: &CallRequest,
+		request: &CallRequest,
 	) -> Result<Completion, ModelError> {
-		unimplemented!()
+		self.seen
+			.lock()
+			.expect("not poisoned")
+			.push(request.clone());
+		let next = self
+			.replies
+			.lock()
+			.expect("not poisoned")
+			.pop_front()
+			.unwrap_or_else(|| {
+				Err("ScriptedModel ran out of replies".to_string())
+			});
+		next.map_err(ModelError::Transport)
 	}
 }
