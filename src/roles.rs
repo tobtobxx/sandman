@@ -15,7 +15,7 @@
 //! contradiction for a whole run.
 //!
 //! Defines: [`RoleName`], [`ToolName`], [`system_prompt`], [`tools_for`],
-//! [`role_catalogue`], [`COMMS_SESSION_TOOLS`].
+//! [`COMMS_SESSION_TOOLS`].
 
 use crate::domain::ToolSchema;
 
@@ -56,7 +56,6 @@ pub enum ToolName {
 	SearchLessons,
 	SearchTasks,
 	ViewSession,
-	CurrentTime,
 	ListTasks,
 	CancelTask,
 }
@@ -80,54 +79,120 @@ pub const COMMS_SESSION_TOOLS: [ToolName; 1] = [ToolName::CreateTask];
 /// repetition — the Role catalogue is written out in several prompt files — and
 /// it is paid on purpose: a prompt that has to be assembled in the reader's head
 /// is a prompt whose contradictions are invisible.
-pub fn system_prompt(_role: RoleName) -> String {
-	unimplemented!()
+pub fn system_prompt(role: RoleName) -> String {
+	crate::prompts::system_prompt(role)
 }
 
 /// Which tools a Role holds.
 ///
-/// The three create-task tools are split so a Role that should not choose Roles
-/// only ever sees the narrow one.
-pub fn tools_for(_role: RoleName) -> &'static [ToolName] {
-	unimplemented!()
-}
-
-/// The catalogue on its own, for the error a bad `role` argument gets back.
-/// This is an error message, not a prompt: no system prompt is built from it.
-pub fn role_catalogue() -> &'static str {
-	unimplemented!()
+/// The three create-task tools are split so a Role that should not choose
+/// Roles only ever sees the narrow one: research can hand a detail to
+/// planning or to another researcher, but not pick an arbitrary Role, so it
+/// gets `create_task` and `create_research_task` only. Planning may target
+/// any Role, so it alone also gets `create_task_full`. The manager fills the
+/// queue as well as changing it, so it gets `create_task_full` too, to
+/// schedule and repeat work by Role. Memory only ever hands a follow-up to
+/// planning, so it gets the plain `create_task`.
+pub fn tools_for(role: RoleName) -> &'static [ToolName] {
+	match role {
+		RoleName::Research => &[
+			ToolName::CreateTask,
+			ToolName::CreateResearchTask,
+			ToolName::AwaitResult,
+			ToolName::WebSearch,
+			ToolName::WebFetch,
+		],
+		RoleName::Planning => &[
+			ToolName::CreateTask,
+			ToolName::CreateTaskFull,
+			ToolName::AwaitResult,
+			ToolName::MessageHuman,
+		],
+		RoleName::Memory => &[
+			ToolName::CreateTask,
+			ToolName::AwaitResult,
+			ToolName::SearchLessons,
+			ToolName::SearchTasks,
+			ToolName::ViewSession,
+		],
+		RoleName::TaskManager => &[
+			ToolName::CreateTaskFull,
+			ToolName::AwaitResult,
+			ToolName::ListTasks,
+			ToolName::SearchTasks,
+			ToolName::CancelTask,
+		],
+	}
 }
 
 impl RoleName {
 	/// The name this Role goes by on the wire, in a Brief and in the database.
 	pub fn as_str(&self) -> &'static str {
-		unimplemented!()
+		match self {
+			RoleName::Research => "research",
+			RoleName::Planning => "planning",
+			RoleName::Memory => "memory",
+			RoleName::TaskManager => "task_manager",
+		}
 	}
 
-	pub fn parse(_name: &str) -> Option<RoleName> {
-		unimplemented!()
+	pub fn parse(name: &str) -> Option<RoleName> {
+		match name {
+			"research" => Some(RoleName::Research),
+			"planning" => Some(RoleName::Planning),
+			"memory" => Some(RoleName::Memory),
+			"task_manager" => Some(RoleName::TaskManager),
+			_ => None,
+		}
 	}
 }
 
 impl ToolName {
 	pub fn as_str(&self) -> &'static str {
-		unimplemented!()
+		match self {
+			ToolName::CreateTask => "create_task",
+			ToolName::CreateTaskFull => "create_task_full",
+			ToolName::CreateResearchTask => "create_research_task",
+			ToolName::AwaitResult => "await_result",
+			ToolName::MessageHuman => "message_human",
+			ToolName::WebSearch => "web_search",
+			ToolName::WebFetch => "web_fetch",
+			ToolName::SearchLessons => "search_lessons",
+			ToolName::SearchTasks => "search_tasks",
+			ToolName::ViewSession => "view_session",
+			ToolName::ListTasks => "list_tasks",
+			ToolName::CancelTask => "cancel_task",
+		}
 	}
 
-	pub fn parse(_name: &str) -> Option<ToolName> {
-		unimplemented!()
+	pub fn parse(name: &str) -> Option<ToolName> {
+		match name {
+			"create_task" => Some(ToolName::CreateTask),
+			"create_task_full" => Some(ToolName::CreateTaskFull),
+			"create_research_task" => Some(ToolName::CreateResearchTask),
+			"await_result" => Some(ToolName::AwaitResult),
+			"message_human" => Some(ToolName::MessageHuman),
+			"web_search" => Some(ToolName::WebSearch),
+			"web_fetch" => Some(ToolName::WebFetch),
+			"search_lessons" => Some(ToolName::SearchLessons),
+			"search_tasks" => Some(ToolName::SearchTasks),
+			"view_session" => Some(ToolName::ViewSession),
+			"list_tasks" => Some(ToolName::ListTasks),
+			"cancel_task" => Some(ToolName::CancelTask),
+			_ => None,
+		}
 	}
 }
 
 impl std::fmt::Display for RoleName {
-	fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		unimplemented!()
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(self.as_str())
 	}
 }
 
 impl std::fmt::Display for ToolName {
-	fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		unimplemented!()
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(self.as_str())
 	}
 }
 
@@ -137,36 +202,36 @@ impl std::fmt::Display for ToolName {
 // its own, and nothing would catch the day that name and `as_str` disagreed.
 
 impl serde::Serialize for RoleName {
-	fn serialize<S: serde::Serializer>(
-		&self,
-		_s: S,
-	) -> Result<S::Ok, S::Error> {
-		unimplemented!()
+	fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+		s.collect_str(self.as_str())
 	}
 }
 
 impl<'de> serde::Deserialize<'de> for RoleName {
 	fn deserialize<D: serde::Deserializer<'de>>(
-		_d: D,
+		d: D,
 	) -> Result<Self, D::Error> {
-		unimplemented!()
+		let s = <String as serde::Deserialize>::deserialize(d)?;
+		RoleName::parse(&s).ok_or_else(|| {
+			serde::de::Error::custom(format!("`{s}` is not a Role"))
+		})
 	}
 }
 
 impl serde::Serialize for ToolName {
-	fn serialize<S: serde::Serializer>(
-		&self,
-		_s: S,
-	) -> Result<S::Ok, S::Error> {
-		unimplemented!()
+	fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+		s.collect_str(self.as_str())
 	}
 }
 
 impl<'de> serde::Deserialize<'de> for ToolName {
 	fn deserialize<D: serde::Deserializer<'de>>(
-		_d: D,
+		d: D,
 	) -> Result<Self, D::Error> {
-		unimplemented!()
+		let s = <String as serde::Deserialize>::deserialize(d)?;
+		ToolName::parse(&s).ok_or_else(|| {
+			serde::de::Error::custom(format!("`{s}` is not a tool"))
+		})
 	}
 }
 
@@ -182,6 +247,32 @@ pub struct SchemaCtx {
 }
 
 /// The schemas for a set of tools, as they go to the model.
-pub fn schemas_for(_names: &[ToolName], _ctx: &SchemaCtx) -> Vec<ToolSchema> {
-	unimplemented!()
+///
+/// The single implementation: [`crate::tools::Registry::schemas`] calls this
+/// rather than building its own, so the model is never offered two competing
+/// descriptions of the same tool.
+pub fn schemas_for(names: &[ToolName], ctx: &SchemaCtx) -> Vec<ToolSchema> {
+	use crate::tools::{
+		await_result, create_task, message_human, queue, recall, web, Tool,
+	};
+
+	names
+		.iter()
+		.map(|name| match name {
+			ToolName::CreateTask => create_task::CreateTask.schema(ctx),
+			ToolName::CreateTaskFull => create_task::CreateTaskFull.schema(ctx),
+			ToolName::CreateResearchTask => {
+				create_task::CreateResearchTask.schema(ctx)
+			},
+			ToolName::AwaitResult => await_result::AwaitResult.schema(ctx),
+			ToolName::MessageHuman => message_human::MessageHuman.schema(ctx),
+			ToolName::WebSearch => web::WebSearch.schema(ctx),
+			ToolName::WebFetch => web::WebFetch.schema(ctx),
+			ToolName::SearchLessons => recall::SearchLessons.schema(ctx),
+			ToolName::SearchTasks => recall::SearchTasks.schema(ctx),
+			ToolName::ViewSession => recall::ViewSession.schema(ctx),
+			ToolName::ListTasks => queue::ListTasks.schema(ctx),
+			ToolName::CancelTask => queue::CancelTask.schema(ctx),
+		})
+		.collect()
 }

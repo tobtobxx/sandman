@@ -129,7 +129,6 @@ pub struct Snapshot {
 #[derive(Debug, Clone, Default)]
 pub struct ListFilter {
 	pub state: Option<&'static str>,
-	pub recurring: bool,
 	pub count: Option<usize>,
 }
 
@@ -511,9 +510,6 @@ impl Store {
 			sql.push_str(" AND state = ?");
 			params.push(Box::new(state));
 		}
-		if filter.recurring {
-			sql.push_str(" AND schedule = 'repeating'");
-		}
 		sql.push_str(" ORDER BY id DESC");
 		if let Some(count) = filter.count {
 			sql.push_str(" LIMIT ?");
@@ -836,6 +832,27 @@ impl Store {
 		let session = crate::db::rows::load_session(&tx, id)?;
 		tx.commit().store()?;
 		Ok(session)
+	}
+
+	/// The Session that did a Task, if one ever ran it.
+	///
+	/// A Task carries no Session id once it is done — [`TaskState::Completed`]
+	/// has none — so this is the only way back from a `search_tasks` hit to the
+	/// conversation behind it.
+	pub fn session_for_task(
+		&self,
+		task: TaskId,
+	) -> Result<Option<SessionId>, StoreError> {
+		let conn = self.conn.lock().unwrap();
+		let session: Option<i64> = conn
+			.query_row(
+				"SELECT id FROM sessions WHERE task = ?1",
+				[task.0],
+				|row| row.get(0),
+			)
+			.optional()
+			.store()?;
+		Ok(session.map(|v| SessionId(v as u32)))
 	}
 
 	/// Put something in a Comms Session's mailbox.

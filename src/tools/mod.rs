@@ -81,19 +81,31 @@ pub struct Registry {
 
 impl Registry {
 	/// Every tool Sandman has.
-	pub fn all(_events: Arc<crate::event::Events>) -> Self {
-		unimplemented!()
+	pub fn all(events: Arc<crate::event::Events>) -> Self {
+		let tools: Vec<Arc<dyn Tool>> = vec![
+			Arc::new(create_task::CreateTask),
+			Arc::new(create_task::CreateTaskFull),
+			Arc::new(create_task::CreateResearchTask),
+			Arc::new(await_result::AwaitResult),
+			Arc::new(message_human::MessageHuman),
+			Arc::new(web::WebSearch),
+			Arc::new(web::WebFetch),
+			Arc::new(recall::SearchLessons),
+			Arc::new(recall::SearchTasks),
+			Arc::new(recall::ViewSession),
+			Arc::new(queue::ListTasks),
+			Arc::new(queue::CancelTask),
+		];
+		Registry { tools, events }
 	}
 }
 
 #[async_trait]
 impl ToolRunner for Registry {
-	fn schemas(
-		&self,
-		_names: &[ToolName],
-		_ctx: &SchemaCtx,
-	) -> Vec<ToolSchema> {
-		unimplemented!()
+	/// Delegates to [`crate::roles::schemas_for`] — the single implementation,
+	/// so the model is never offered two competing descriptions of a tool.
+	fn schemas(&self, names: &[ToolName], ctx: &SchemaCtx) -> Vec<ToolSchema> {
+		crate::roles::schemas_for(names, ctx)
 	}
 
 	/// Parse the arguments, emit [`crate::event::Event::ToolCalled`], dispatch,
@@ -102,8 +114,33 @@ impl ToolRunner for Registry {
 	/// A name that matches no tool, and arguments that are not JSON, both come
 	/// back as a sentence the model can act on rather than as anything that
 	/// stops the turn.
-	async fn run(&self, _ctx: &SessionCtx, _call: &ToolCall) -> String {
-		unimplemented!()
+	async fn run(&self, ctx: &SessionCtx, call: &ToolCall) -> String {
+		let Some(name) = ToolName::parse(&call.name) else {
+			return ToolError::NoSuchTool(call.name.clone()).to_string();
+		};
+
+		let parsed =
+			serde_json::from_str::<serde_json::Value>(&call.arguments).ok();
+		self.events.emit(crate::event::Event::ToolCalled {
+			session: ctx.id,
+			name,
+			args: parsed.clone().unwrap_or(serde_json::Value::Null),
+		});
+
+		let output = match parsed {
+			None => ToolError::BadJson.to_string(),
+			Some(args) => match self.tools.iter().find(|t| t.name() == name) {
+				Some(tool) => tool.call(ctx, args).await,
+				None => ToolError::NoSuchTool(call.name.clone()).to_string(),
+			},
+		};
+
+		self.events.emit(crate::event::Event::ToolReturned {
+			session: ctx.id,
+			name,
+			output: output.clone(),
+		});
+		output
 	}
 }
 
@@ -123,6 +160,13 @@ pub enum ToolError {
 	NoSuchTool(String),
 	#[error("Error: there is no Task {0}.")]
 	NoSuchTask(String),
-	#[error("Error: `{given}` is not a Role. The Roles are:\n{catalogue}")]
-	NoSuchRole { given: String, catalogue: String },
+	#[error(
+		"Error: `{given}` is not a Role. Not one of: {}",
+		crate::roles::ROLE_NAMES
+			.iter()
+			.map(|r| r.as_str())
+			.collect::<Vec<_>>()
+			.join(", ")
+	)]
+	NoSuchRole { given: String },
 }

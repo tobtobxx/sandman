@@ -16,21 +16,7 @@ Ten steps, bottom up. `cargo check` passes today and must pass after each step.
 
 ### 4. `model.rs`, `scheduler.rs` — done
 
-### 5. `roles.rs`, `prompts.rs`, `waiters.rs`, `memory.rs`, `tools/`
-
-Watch out:
-- `roles::schemas_for` and `Registry::schemas` must not build two schema sets. One
-  calls the other.
-- `await_result` registers the wait *before* it reads the Task state. The other order
-  hangs a Worker on a Task that completed in between.
-- A tool that creates or cancels a Task calls the Harness, not the Store. The Store
-  does not deliver, release waiters or re-arm.
-- Every tool answers in words, failures included. `ToolError` becomes a string before
-  the model sees it.
-- `message_human` builds its `channel` enum from the Channels open now.
-- `memory::rank` embeds only what has no cached vector, with the query in the same
-  batch, keyed on the embedding model. Truncate at `MAX_INPUT_CHARS` rather than
-  failing the batch.
+### 5. `roles.rs`, `prompts.rs`, `waiters.rs`, `memory.rs`, `tools/` — done
 
 ### 6. `session.rs`, `reflect.rs`, `worker.rs`, `comms.rs`
 
@@ -149,18 +135,15 @@ Watch out:
   tool call it holds on, or lands in a Comms Session's Mailbox and is read on the next
   respond. The interrupt already feeds back the same way.
 
-- **The Role catalogue is written out more than once.** It appears in `planning.md`
-  (the one Role prompt that chooses a Role), in `role_catalogue()` (an error message,
-  not a prompt), and loosely in `comms-session.md`. The hard fact is the `RoleName`
-  enum, and the compiler now catches a Role added without a prompt or a tool set — but
-  rewording what a Role is *for* still means editing several places, and nothing
-  catches a copy left behind. Taken deliberately: this prompt set has twice shipped a
-  self-contradiction, and both times it hid in text no single place held whole.
-
 - **Nothing prunes the database.** Every Session, message and model call is kept
   forever. That is what makes the `memory` Role work across runs, and it means the
   file grows without bound. No answer needed yet; the shape when it bites is probably
   to keep Tasks and Lessons and drop the conversations behind old finished Sessions.
+
+- Use sqlite vec instead of manual cosine
+- Simplify which channels message_human lists?
+- Memory search results cutoff by similarity
+- Sessions are cutoff when calling view_session
 
 ## To do
 

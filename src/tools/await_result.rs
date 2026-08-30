@@ -11,13 +11,15 @@
 //!
 //! Defines: [`AwaitResult`].
 
+use std::str::FromStr;
+
 use async_trait::async_trait;
 
-use crate::domain::ToolSchema;
+use crate::domain::{TaskId, ToolSchema};
 use crate::roles::{SchemaCtx, ToolName};
 use crate::session::SessionCtx;
 
-use super::Tool;
+use super::{Tool, ToolError};
 
 /// Block this turn until a Task completes, then return its answer.
 pub struct AwaitResult;
@@ -29,17 +31,40 @@ impl Tool for AwaitResult {
 	}
 
 	fn schema(&self, _ctx: &SchemaCtx) -> ToolSchema {
-		unimplemented!()
+		ToolSchema {
+			name: self.name().to_string(),
+			description: "Block until a Task completes, then return its \
+			              answer. Use the id you got back from creating it."
+				.to_string(),
+			parameters: serde_json::json!({
+				"type": "object",
+				"properties": {
+					"task_id": {
+						"type": "string",
+						"description": "The Task's id, e.g. \"t-03\".",
+					},
+				},
+				"required": ["task_id"],
+			}),
+		}
 	}
 
 	/// Reads the Task id, then hands off to [`crate::waiters::Waiters::wait`].
 	///
 	/// Any Task may be awaited by id, not only one this Session created.
-	async fn call(
-		&self,
-		_ctx: &SessionCtx,
-		_args: serde_json::Value,
-	) -> String {
-		unimplemented!()
+	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String {
+		let task = match args.get("task_id").and_then(|v| v.as_str()) {
+			None => return ToolError::Missing { field: "task_id" }.to_string(),
+			Some(s) => match TaskId::from_str(s) {
+				Ok(id) => id,
+				Err(_) => {
+					return ToolError::NoSuchTask(s.to_string()).to_string()
+				},
+			},
+		};
+		if ctx.harness.store.task(task).ok().flatten().is_none() {
+			return ToolError::NoSuchTask(task.to_string()).to_string();
+		}
+		ctx.harness.waiters.wait(ctx.id, task).await
 	}
 }

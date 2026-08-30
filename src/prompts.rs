@@ -5,14 +5,15 @@
 //! a missing file is a build failure rather than a run that starts and then
 //! cannot answer, and there is no startup read to go wrong.
 //!
-//! `system_prompt` in `roles.rs` joins exactly two of these: the shared
-//! mechanics, then the Role's own file. That join is the whole assembly. The
-//! cost is repetition — the Role catalogue is written out in each prompt that
-//! needs it — and it is paid deliberately: this prompt set has twice shipped a
+//! [`system_prompt`] joins exactly two of these: the shared mechanics, then the
+//! Role's own file. That join is the whole assembly, done once here so every
+//! consumer reads a finished prompt rather than reassembling it. The cost is
+//! repetition — the Role catalogue is written out in each prompt that needs it
+//! — and it is paid deliberately: this prompt set has twice shipped a
 //! self-contradiction, and both times it hid in text that no single place held
 //! whole.
 //!
-//! Defines: the prompt constants.
+//! Defines: the prompt constants, [`system_prompt`].
 
 /// What every Worker Session is told about how Sandman works, before its Role's
 /// own text.
@@ -36,3 +37,16 @@ pub const REVIEW: &str = include_str!("prompts/review-prompt.md");
 
 /// The question an interrupt is asked: is this run still going somewhere?
 pub const INTERRUPT: &str = include_str!("prompts/interrupt-prompt.md");
+
+/// The whole system prompt a Worker Session of this Role starts with:
+/// [`MECHANICS`], then the Role's own file, joined and nothing else.
+pub fn system_prompt(role: crate::roles::RoleName) -> String {
+	use crate::roles::RoleName;
+	let role_text = match role {
+		RoleName::Research => RESEARCH,
+		RoleName::Planning => PLANNING,
+		RoleName::Memory => MEMORY,
+		RoleName::TaskManager => TASK_MANAGER,
+	};
+	format!("{MECHANICS}\n\n{role_text}")
+}

@@ -74,28 +74,99 @@ pub enum EmbedError {
 }
 
 impl OpenRouterEmbedder {
+	/// Read the endpoint, key and model off the constants above and
+	/// [`crate::model::API_KEY`]. The same prototype key `OpenRouter` uses —
+	/// configurability comes later.
 	pub fn from_env() -> Self {
-		unimplemented!()
+		Self::new(EMBED_ENDPOINT, crate::model::API_KEY, EMBED_MODEL)
+	}
+
+	pub fn new(endpoint: &str, api_key: &str, model: &str) -> Self {
+		OpenRouterEmbedder {
+			client: reqwest::Client::new(),
+			endpoint: endpoint.to_string(),
+			api_key: api_key.to_string(),
+			model: model.to_string(),
+		}
 	}
 }
 
 #[async_trait]
 impl Embedder for OpenRouterEmbedder {
 	fn model(&self) -> &str {
-		unimplemented!()
+		&self.model
 	}
 
 	async fn embed(
 		&self,
-		_texts: &[String],
+		texts: &[String],
 	) -> Result<Vec<Vec<f32>>, EmbedError> {
-		unimplemented!()
+		let body = EmbedRequest { model: &self.model, input: texts };
+
+		let response = self
+			.client
+			.post(&self.endpoint)
+			.bearer_auth(&self.api_key)
+			.json(&body)
+			.send()
+			.await
+			.map_err(|e| EmbedError::Transport(e.to_string()))?;
+
+		let status = response.status();
+		let text = response
+			.text()
+			.await
+			.map_err(|e| EmbedError::Transport(e.to_string()))?;
+
+		if !status.is_success() {
+			return Err(EmbedError::Status {
+				status: status.as_u16(),
+				body: text,
+			});
+		}
+
+		let mut parsed: EmbedResponse = serde_json::from_str(&text)
+			.map_err(|e| EmbedError::Malformed(e.to_string()))?;
+		parsed.data.sort_by_key(|d| d.index);
+		Ok(parsed.data.into_iter().map(|d| d.embedding).collect())
 	}
 }
 
+// --- The wire shape ---------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct EmbedRequest<'a> {
+	model: &'a str,
+	input: &'a [String],
+}
+
+#[derive(serde::Deserialize)]
+struct EmbedResponse {
+	data: Vec<EmbedDatum>,
+}
+
+#[derive(serde::Deserialize)]
+struct EmbedDatum {
+	embedding: Vec<f32>,
+	index: usize,
+}
+
 /// Closeness of two vectors, from -1 to 1.
-pub fn cosine(_a: &[f32], _b: &[f32]) -> f32 {
-	unimplemented!()
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+	let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+	let norm_a = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+	let norm_b = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+	if norm_a == 0.0 || norm_b == 0.0 {
+		0.0
+	} else {
+		dot / (norm_a * norm_b)
+	}
+}
+
+/// Cut text down to [`MAX_INPUT_CHARS`], so one runaway Brief cannot fail a
+/// whole batch.
+fn truncated(text: &str) -> String {
+	text.chars().take(MAX_INPUT_CHARS).collect()
 }
 
 /// Rank a corpus against a query, best first.
@@ -104,19 +175,72 @@ pub fn cosine(_a: &[f32], _b: &[f32]) -> f32 {
 /// scores everything by cosine. The query rides in the same batch, so one search
 /// is one call.
 pub async fn rank<T: Clone>(
-	_store: &crate::store::Store,
-	_embedder: &dyn Embedder,
-	_query: &str,
-	_corpus: &[(String, String, T)],
-	_count: usize,
+	store: &crate::store::Store,
+	embedder: &dyn Embedder,
+	query: &str,
+	corpus: &[(String, String, T)],
+	count: usize,
 ) -> Result<Vec<crate::domain::Hit<T>>, EmbedError> {
-	unimplemented!()
+	let model = embedder.model();
+	let vector_of = |key: &str| -> Result<Option<Vec<f32>>, EmbedError> {
+		store
+			.vector(key, model)
+			.map_err(|e| EmbedError::Malformed(format!("database: {e}")))
+	};
+
+	let mut vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(corpus.len());
+	let mut missing_idx = Vec::new();
+	let mut batch = Vec::new();
+	for (i, (key, text, _)) in corpus.iter().enumerate() {
+		match vector_of(key)? {
+			Some(v) => vectors.push(Some(v)),
+			None => {
+				vectors.push(None);
+				missing_idx.push(i);
+				batch.push(truncated(text));
+			},
+		}
+	}
+	batch.push(truncated(query));
+
+	let mut embedded = embedder.embed(&batch).await?;
+	let query_vector = embedded.pop().expect("the query was just appended");
+
+	for (idx, vector) in missing_idx.into_iter().zip(embedded) {
+		let key = &corpus[idx].0;
+		store
+			.put_vector(key, model, &vector)
+			.map_err(|e| EmbedError::Malformed(format!("database: {e}")))?;
+		vectors[idx] = Some(vector);
+	}
+
+	let mut hits: Vec<crate::domain::Hit<T>> = corpus
+		.iter()
+		.zip(vectors)
+		.map(|((_, _, item), vector)| crate::domain::Hit {
+			item: item.clone(),
+			score: cosine(
+				&query_vector,
+				vector
+					.as_deref()
+					.expect("every corpus item has a vector by now"),
+			),
+		})
+		.collect();
+
+	hits.sort_by(|a, b| {
+		b.score
+			.partial_cmp(&a.score)
+			.unwrap_or(std::cmp::Ordering::Equal)
+	});
+	hits.truncate(count);
+	Ok(hits)
 }
 
 /// What a tool says when a search could not be made.
 ///
 /// A sentence the model can act on, not a stack trace: the tool that called this
 /// has to answer its Session either way.
-pub fn search_failed(_what: &str, _err: &EmbedError) -> String {
-	unimplemented!()
+pub fn search_failed(what: &str, err: &EmbedError) -> String {
+	format!("Could not search {what}: {err}")
 }
