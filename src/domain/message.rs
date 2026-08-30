@@ -60,9 +60,6 @@ pub enum Reply {
 		preamble: Option<String>,
 		calls: NonEmpty<ToolCall>,
 	},
-	/// The model replied with nothing at all. A Worker is sent back to work; a
-	/// Comms Session simply says nothing.
-	Empty,
 }
 
 /// One tool call, as the model asked for it. Arguments arrive as a JSON string

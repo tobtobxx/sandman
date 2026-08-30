@@ -14,7 +14,7 @@ Ten steps, bottom up. `cargo check` passes today and must pass after each step.
 
 ### 3. `log.rs` — done
 
-### 4. `model.rs`, `scheduler.rs`
+### 4. `model.rs`, `scheduler.rs` — done
 
 Watch out:
 - Do not build the queue by holding the `tokio::sync::Mutex` across `send`. Mutex
@@ -106,6 +106,13 @@ Watch out:
   in the server, with the embedder the `memory` Role uses.
 
 ## Known debt
+
+- **A call's three timestamps are one timestamp.** `Scheduler::request` takes a
+  single `now` and has no `Clock` of its own, so `queued_at`, `sent_at` and
+  `finished_at` all record the instant the caller decided to make the call, not
+  when it actually left the queue or came back. Fine for ordering and display;
+  wrong for measuring how long a call actually waited or took. Giving the
+  Scheduler a `Clock` would fix it and was left out deliberately for now.
 
 - **A Worker cannot report failure as failure.** A Result is written from the review's
   `<summary>`, which always records success. Only the Harness writes a failure, and

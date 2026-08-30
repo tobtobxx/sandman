@@ -27,7 +27,8 @@
 use std::sync::Arc;
 
 use crate::domain::{
-	CallId, CallRequest, Completion, SessionId, TaskPriority, Timestamp,
+	CallId, CallRequest, CallStatus, Completion, NewCall, SessionId,
+	TaskPriority, Timestamp, Usage,
 };
 use crate::model::{Model, ModelError};
 use crate::store::Store;
@@ -62,8 +63,12 @@ pub enum Tier {
 }
 
 impl From<TaskPriority> for Tier {
-	fn from(_p: TaskPriority) -> Tier {
-		unimplemented!()
+	fn from(p: TaskPriority) -> Tier {
+		match p {
+			TaskPriority::High => Tier::TaskHigh,
+			TaskPriority::Normal => Tier::TaskNormal,
+			TaskPriority::Low => Tier::TaskLow,
+		}
 	}
 }
 
@@ -90,7 +95,21 @@ pub struct Scheduler {
 /// The waiting calls and the one in flight. Private: nothing outside decides
 /// what runs next.
 struct Inner {
-	_private: (),
+	/// Whether the one slot is taken. A waiter that is granted the slot sees
+	/// this already `true` — it never flips it itself.
+	in_flight: bool,
+	/// Counts up, never down: arrival order within a [`Tier`].
+	next_arrival: u64,
+	waiting: Vec<Waiting>,
+}
+
+/// One call, registered and waiting for the slot. `notify` is single-use: at
+/// most one `notify_one` is ever sent on it, by whichever call releases the
+/// slot next.
+struct Waiting {
+	tier: Tier,
+	arrival: u64,
+	notify: Arc<tokio::sync::Notify>,
 }
 
 /// What can go wrong asking for a model call.
@@ -113,8 +132,16 @@ pub enum SchedulerError {
 }
 
 impl Scheduler {
-	pub fn new(_model: Arc<dyn Model>, _store: Arc<Store>) -> Self {
-		unimplemented!()
+	pub fn new(model: Arc<dyn Model>, store: Arc<Store>) -> Self {
+		Scheduler {
+			model,
+			store,
+			inner: tokio::sync::Mutex::new(Inner {
+				in_flight: false,
+				next_arrival: 0,
+				waiting: Vec::new(),
+			}),
+		}
 	}
 
 	/// Ask the model, and leave a full record of the exchange in the Store
@@ -124,23 +151,115 @@ impl Scheduler {
 	/// waiting. It is sent when it reaches the front and nothing else is in
 	/// flight.
 	///
+	/// One timestamp stands for the whole exchange — the Scheduler has no
+	/// [`crate::domain::Clock`] of its own, only what the caller hands it — so
+	/// `queued_at`, `sent_at` and `finished_at` all read the same instant. See
+	/// `TASKS.md`.
+	///
 	/// The [`CallId`] comes back on both paths — beside the [`Completion`], and
 	/// inside [`SchedulerError::Call`]. `reflect.rs` anchors a
 	/// [`crate::domain::Reflection`] on it, and that record is not optional when
 	/// the call fails. A Turn does not want it and drops it.
 	pub async fn request(
 		&self,
-		_session: SessionId,
-		_request: CallRequest,
-		_tier: Tier,
-		_now: Timestamp,
+		session: SessionId,
+		request: CallRequest,
+		tier: Tier,
+		now: Timestamp,
 	) -> Result<(CallId, Completion), SchedulerError> {
-		unimplemented!()
+		let id = self.store.queue_call(
+			NewCall {
+				session,
+				tier,
+				model: self.model.name().to_string(),
+				request: request.clone(),
+			},
+			now,
+		)?;
+
+		self.acquire(tier).await;
+
+		self.store
+			.set_call_status(id, CallStatus::InFlight { sent_at: now })?;
+
+		let outcome = self.model.send(&request).await;
+
+		self.release().await;
+
+		match outcome {
+			Ok(completion) => {
+				let usage =
+					Usage { tokens: completion.tokens, cost: completion.cost };
+				self.store.set_call_status(
+					id,
+					CallStatus::Done {
+						sent_at: now,
+						finished_at: now,
+						reply: completion.reply.clone(),
+						usage,
+					},
+				)?;
+				Ok((id, completion))
+			},
+			Err(error) => {
+				self.store.set_call_status(
+					id,
+					CallStatus::Failed {
+						sent_at: now,
+						finished_at: now,
+						error: error.to_string(),
+					},
+				)?;
+				Err(SchedulerError::Call { call: id, source: error })
+			},
+		}
 	}
 
 	/// How many calls are waiting. For a wind-down that wants to know whether
 	/// anything can still spend.
 	pub async fn waiting(&self) -> usize {
-		unimplemented!()
+		self.inner.lock().await.waiting.len()
+	}
+
+	/// Register `(tier, arrival)` and block until this call holds the slot.
+	async fn acquire(&self, tier: Tier) {
+		let notify = Arc::new(tokio::sync::Notify::new());
+		let mut inner = self.inner.lock().await;
+		let arrival = inner.next_arrival;
+		inner.next_arrival += 1;
+		inner
+			.waiting
+			.push(Waiting { tier, arrival, notify: notify.clone() });
+		Self::try_grant(&mut inner);
+		drop(inner);
+		notify.notified().await;
+	}
+
+	/// Free the slot, and hand it straight to whichever waiter now sorts lowest.
+	async fn release(&self) {
+		let mut inner = self.inner.lock().await;
+		inner.in_flight = false;
+		Self::try_grant(&mut inner);
+	}
+
+	/// If the slot is free and someone is waiting, give it to the lowest
+	/// `(tier, arrival)` — a higher tier jumps every call still waiting, never
+	/// the one already in flight.
+	fn try_grant(inner: &mut Inner) {
+		if inner.in_flight {
+			return;
+		}
+		let Some(next) = inner
+			.waiting
+			.iter()
+			.enumerate()
+			.min_by_key(|(_, w)| (w.tier, w.arrival))
+			.map(|(i, _)| i)
+		else {
+			return;
+		};
+		let winner = inner.waiting.remove(next);
+		inner.in_flight = true;
+		winner.notify.notify_one();
 	}
 }

@@ -76,6 +76,6 @@ cargo run --bin bench -- --times 5   # with a report and artifacts
 
 ## Configuration
 
-Almost none, on purpose. Model and API key in `src/model.rs`, port in `src/web/mod.rs`.
-`OPENROUTER_API_KEY` and `SANDMAN_REASONING_EFFORT` override at run time. The key
-committed here is limited and a leak costs nothing.
+Almost none, on purpose. Model, API key and reasoning effort are constants in
+`src/model.rs`; port is in `src/web/mod.rs`. The key committed here is limited
+and a leak costs nothing.
