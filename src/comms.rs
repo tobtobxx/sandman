@@ -35,9 +35,9 @@ pub const NO_RESPONSE: &str = "<no-response />";
 /// Channel's transcript, and the transcript is in the Store, so the same push
 /// that carries everything else carries that too.
 pub trait Channel: Send + Sync {
-    fn id(&self) -> ChannelId;
-    fn kind(&self) -> ChannelKind;
-    fn send(&self, text: &str);
+	fn id(&self) -> ChannelId;
+	fn kind(&self) -> ChannelKind;
+	fn send(&self, text: &str);
 }
 
 /// Open a Channel and stand a Comms Session on it.
@@ -46,10 +46,10 @@ pub trait Channel: Send + Sync {
 /// be open at once and they share nothing, so as far as the swarm is concerned
 /// there are several humans.
 pub async fn open(
-    _ctx: &SessionCtx,
-    _kind: ChannelKind,
+	_ctx: &SessionCtx,
+	_kind: ChannelKind,
 ) -> Result<(ChannelId, SessionId), crate::store::StoreError> {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// Put something in this Session's mailbox.
@@ -58,7 +58,7 @@ pub async fn open(
 /// sends does not, because the human has not seen it yet — the Session decides
 /// whether and how to pass it on.
 pub async fn receive(_ctx: &SessionCtx, _text: &str, _from: IncomingFrom) {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// Read the mailbox, take one turn, and say whatever came of it.
@@ -72,10 +72,10 @@ pub async fn receive(_ctx: &SessionCtx, _text: &str, _from: IncomingFrom) {
 /// jump the queue in front of every Task, which is how a human is never left
 /// waiting behind the swarm's work.
 pub async fn respond(_ctx: &SessionCtx) {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// Say something to the human: into the transcript, then out on the transport.
 async fn say(_ctx: &SessionCtx, _text: &str) {
-    unimplemented!()
+	unimplemented!()
 }

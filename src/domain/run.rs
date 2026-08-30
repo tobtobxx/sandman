@@ -20,13 +20,13 @@ use super::time::Timestamp;
 /// One lifetime of Sandman.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
-    pub id: RunId,
-    pub started_at: Timestamp,
-    /// Set on a clean shutdown. Absent on a Run still going, and on one whose
-    /// process was killed — the two are indistinguishable afterwards, which is
-    /// accepted.
-    pub ended_at: Option<Timestamp>,
-    /// The model this Run talked to, so a comparison across Runs knows what it
-    /// is comparing.
-    pub model: String,
+	pub id: RunId,
+	pub started_at: Timestamp,
+	/// Set on a clean shutdown. Absent on a Run still going, and on one whose
+	/// process was killed — the two are indistinguishable afterwards, which is
+	/// accepted.
+	pub ended_at: Option<Timestamp>,
+	/// The model this Run talked to, so a comparison across Runs knows what it
+	/// is comparing.
+	pub model: String,
 }

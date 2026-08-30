@@ -28,65 +28,70 @@
 
 /// Which way in this invocation is.
 enum Command {
-    Interactive,
-    /// A one-shot Task in its own Harness.
-    Run(TaskArgs),
-    /// A Task into a Sandman already running.
-    Task(TaskArgs),
+	Interactive,
+	/// A one-shot Task in its own Harness.
+	Run(TaskArgs),
+	/// A Task into a Sandman already running.
+	Task(TaskArgs),
 }
 
 /// What both Task-creating commands take.
 struct TaskArgs {
-    role: String,
-    title: Option<String>,
-    brief: String,
-    at_seconds: Option<i64>,
-    every_seconds: Option<i64>,
-    priority: Option<String>,
+	role: String,
+	title: Option<String>,
+	brief: String,
+	at_seconds: Option<i64>,
+	every_seconds: Option<i64>,
+	priority: Option<String>,
 }
 
 /// Where the state, the trace and the socket live.
 struct Paths {
-    db: std::path::PathBuf,
-    log: std::path::PathBuf,
-    socket: std::path::PathBuf,
+	db: std::path::PathBuf,
+	log: std::path::PathBuf,
+	socket: std::path::PathBuf,
 }
 
-fn parse(_argv: &[String]) -> Result<(Command, Paths, sandman::log::Verbosity), String> {
-    unimplemented!()
+fn parse(
+	_argv: &[String],
+) -> Result<(Command, Paths, sandman::log::Verbosity), String> {
+	unimplemented!()
 }
 
 /// Build a whole Sandman: database, Event stream, logger, model, tools,
 /// scheduler, Harness.
 async fn assemble(
-    _paths: &Paths,
-    _verbosity: sandman::log::Verbosity,
+	_paths: &Paths,
+	_verbosity: sandman::log::Verbosity,
 ) -> Result<std::sync::Arc<sandman::harness::Harness>, String> {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// Two Channels, a Watcher, and a control socket, running until the human
 /// leaves.
-async fn interactive(_paths: Paths, _verbosity: sandman::log::Verbosity) -> Result<(), String> {
-    unimplemented!()
+async fn interactive(
+	_paths: Paths,
+	_verbosity: sandman::log::Verbosity,
+) -> Result<(), String> {
+	unimplemented!()
 }
 
 /// One Task in its own Harness, until nothing is left. Prints every Task's
 /// Result and what the run spent.
 async fn one_shot(
-    _args: TaskArgs,
-    _paths: Paths,
-    _verbosity: sandman::log::Verbosity,
+	_args: TaskArgs,
+	_paths: Paths,
+	_verbosity: sandman::log::Verbosity,
 ) -> Result<(), String> {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// One Task into a running Sandman, over the control socket.
 async fn into_running(_args: TaskArgs, _paths: Paths) -> Result<(), String> {
-    unimplemented!()
+	unimplemented!()
 }
 
 #[tokio::main]
 async fn main() {
-    unimplemented!()
+	unimplemented!()
 }

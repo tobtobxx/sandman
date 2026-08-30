@@ -17,44 +17,44 @@ use super::time::Timestamp;
 /// One open connection to a human, as the Store holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelRecord {
-    pub id: ChannelId,
-    /// How this Channel reaches its human, for a person reading the UI.
-    pub kind: ChannelKind,
-    /// The Comms Session standing on it. Exactly one, for the Channel's life.
-    pub session: SessionId,
-    /// What the human has seen, and what they said.
-    pub transcript: Vec<Utterance>,
+	pub id: ChannelId,
+	/// How this Channel reaches its human, for a person reading the UI.
+	pub kind: ChannelKind,
+	/// The Comms Session standing on it. Exactly one, for the Channel's life.
+	pub session: SessionId,
+	/// What the human has seen, and what they said.
+	pub transcript: Vec<Utterance>,
 }
 
 /// What kind of transport a Channel sits on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelKind {
-    /// The terminal Sandman was started in.
-    Stdio,
-    /// A browser on the Watcher UI.
-    Web,
-    /// A bench case's script. Named honestly, so an artifact does not claim a
-    /// terminal that was never there.
-    Scripted,
+	/// The terminal Sandman was started in.
+	Stdio,
+	/// A browser on the Watcher UI.
+	Web,
+	/// A bench case's script. Named honestly, so an artifact does not claim a
+	/// terminal that was never there.
+	Scripted,
 }
 
 /// One thing said on a Channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Utterance {
-    pub who: Who,
-    pub text: String,
-    pub at: Timestamp,
+	pub who: Who,
+	pub text: String,
+	pub at: Timestamp,
 }
 
 /// Which side of a Channel spoke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Who {
-    Human,
-    Sandman,
+	Human,
+	Sandman,
 }
 
 impl ChannelKind {
-    pub fn discriminant(&self) -> &'static str {
-        unimplemented!()
-    }
+	pub fn discriminant(&self) -> &'static str {
+		unimplemented!()
+	}
 }

@@ -17,35 +17,43 @@ use crate::store::Snapshot;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Bucket {
-    Tasks,
-    Sessions,
-    Calls,
-    Channels,
-    Lessons,
+	Tasks,
+	Sessions,
+	Calls,
+	Channels,
+	Lessons,
 }
 
 /// One thing sent to a browser.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Frame {
-    /// Everything, on connect.
-    Init { state: serde_json::Value, spend: serde_json::Value },
-    /// One entity that changed.
-    Patch { bucket: Bucket, id: String, entity: serde_json::Value },
-    /// One message appended to a Session, without resending the conversation.
-    Appended { session: String, index: usize, message: serde_json::Value },
-    /// The answer to a Lessons search: ids and scores, in order.
-    Ranked { query: String, hits: Vec<(String, f32)> },
+	/// Everything, on connect.
+	Init { state: serde_json::Value, spend: serde_json::Value },
+	/// One entity that changed.
+	Patch {
+		bucket: Bucket,
+		id: String,
+		entity: serde_json::Value,
+	},
+	/// One message appended to a Session, without resending the conversation.
+	Appended {
+		session: String,
+		index: usize,
+		message: serde_json::Value,
+	},
+	/// The answer to a Lessons search: ids and scores, in order.
+	Ranked { query: String, hits: Vec<(String, f32)> },
 }
 
 /// The first frame a browser gets.
 pub fn init_frame(_snapshot: &Snapshot, _spend: crate::domain::Spend) -> Frame {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// What one Event means to a browser.
 ///
 /// Some Events change nothing a Watcher shows, and produce nothing.
 pub fn patch_for(_event: &Event) -> Option<Frame> {
-    unimplemented!()
+	unimplemented!()
 }

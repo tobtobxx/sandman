@@ -38,13 +38,13 @@ use crate::tools::ToolRunner;
 /// the Harness holds Session *ids*, never Sessions, so nothing is cyclic.
 #[derive(Clone)]
 pub struct SessionCtx {
-    pub id: SessionId,
-    pub store: Arc<Store>,
-    pub events: Arc<Events>,
-    pub scheduler: Arc<Scheduler>,
-    pub tools: Arc<dyn ToolRunner>,
-    pub clock: Arc<dyn Clock>,
-    pub harness: Arc<Harness>,
+	pub id: SessionId,
+	pub store: Arc<Store>,
+	pub events: Arc<Events>,
+	pub scheduler: Arc<Scheduler>,
+	pub tools: Arc<dyn ToolRunner>,
+	pub clock: Arc<dyn Clock>,
+	pub harness: Arc<Harness>,
 }
 
 /// How a turn ended.
@@ -53,15 +53,15 @@ pub struct SessionCtx {
 /// caller's job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Turn {
-    /// The model replied with plain text and called no tool.
-    Text(String),
-    /// The model replied with nothing at all.
-    Silent,
-    /// The model could not be reached.
-    Unreachable(String),
-    /// The Task this Session was working on was cancelled. The turn ends with no
-    /// Result and nothing is reviewed.
-    Cancelled,
+	/// The model replied with plain text and called no tool.
+	Text(String),
+	/// The model replied with nothing at all.
+	Silent,
+	/// The model could not be reached.
+	Unreachable(String),
+	/// The Task this Session was working on was cancelled. The turn ends with no
+	/// Result and nothing is reviewed.
+	Cancelled,
 }
 
 /// One turn.
@@ -70,7 +70,7 @@ pub enum Turn {
 /// passes its Task's tier, a Comms Session passes [`Tier::Comms`]. Metacognition
 /// runs its own calls through the scheduler directly and never has to ask.
 pub async fn turn(_ctx: &SessionCtx, _tier: Tier) -> Turn {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// Put something in the context for the next turn to see.
@@ -78,7 +78,7 @@ pub async fn turn(_ctx: &SessionCtx, _tier: Tier) -> Turn {
 /// The only way anything reaches a Session from outside: mail, a child's answer,
 /// and the feedback metacognition wrote all arrive as one of these.
 pub async fn tell(_ctx: &SessionCtx, _content: &str) {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// The interrupt, fired from the top of the loop.
@@ -87,5 +87,5 @@ pub async fn tell(_ctx: &SessionCtx, _content: &str) {
 /// the normal outcome — and a run where none ever fired and a run where they all
 /// passed would otherwise look identical from outside.
 async fn check_in(_ctx: &SessionCtx) {
-    unimplemented!()
+	unimplemented!()
 }

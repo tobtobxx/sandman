@@ -43,20 +43,20 @@ use crate::session::SessionCtx;
 /// One capability a Session may hold.
 #[async_trait]
 pub trait Tool: Send + Sync {
-    fn name(&self) -> ToolName;
+	fn name(&self) -> ToolName;
 
-    /// How this tool describes itself to the model.
-    ///
-    /// Takes the world it is described against, because at least one tool —
-    /// `message_human` — must name the Channels that actually exist.
-    fn schema(&self, ctx: &SchemaCtx) -> ToolSchema;
+	/// How this tool describes itself to the model.
+	///
+	/// Takes the world it is described against, because at least one tool —
+	/// `message_human` — must name the Channels that actually exist.
+	fn schema(&self, ctx: &SchemaCtx) -> ToolSchema;
 
-    /// Do it, and answer the model in words.
-    ///
-    /// `args` is whatever the model sent, already parsed as JSON. Reading it
-    /// wrongly is not a failure of the system: return a sentence saying what was
-    /// wrong and the model tries again.
-    async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String;
+	/// Do it, and answer the model in words.
+	///
+	/// `args` is whatever the model sent, already parsed as JSON. Reading it
+	/// wrongly is not a failure of the system: return a sentence saying what was
+	/// wrong and the model tries again.
+	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String;
 }
 
 /// How a Session's tool calls get answered.
@@ -65,42 +65,46 @@ pub trait Tool: Send + Sync {
 /// script, or a refusal.
 #[async_trait]
 pub trait ToolRunner: Send + Sync {
-    /// The schemas for a set of tools, as they go to the model.
-    fn schemas(&self, names: &[ToolName], ctx: &SchemaCtx) -> Vec<ToolSchema>;
+	/// The schemas for a set of tools, as they go to the model.
+	fn schemas(&self, names: &[ToolName], ctx: &SchemaCtx) -> Vec<ToolSchema>;
 
-    /// Answer one tool call. Never fails: everything the model needs to know
-    /// comes back as the string it reads.
-    async fn run(&self, ctx: &SessionCtx, call: &ToolCall) -> String;
+	/// Answer one tool call. Never fails: everything the model needs to know
+	/// comes back as the string it reads.
+	async fn run(&self, ctx: &SessionCtx, call: &ToolCall) -> String;
 }
 
 /// The real runner: every tool, by name.
 pub struct Registry {
-    tools: Vec<Arc<dyn Tool>>,
-    events: Arc<crate::event::Events>,
+	tools: Vec<Arc<dyn Tool>>,
+	events: Arc<crate::event::Events>,
 }
 
 impl Registry {
-    /// Every tool Sandman has.
-    pub fn all(_events: Arc<crate::event::Events>) -> Self {
-        unimplemented!()
-    }
+	/// Every tool Sandman has.
+	pub fn all(_events: Arc<crate::event::Events>) -> Self {
+		unimplemented!()
+	}
 }
 
 #[async_trait]
 impl ToolRunner for Registry {
-    fn schemas(&self, _names: &[ToolName], _ctx: &SchemaCtx) -> Vec<ToolSchema> {
-        unimplemented!()
-    }
+	fn schemas(
+		&self,
+		_names: &[ToolName],
+		_ctx: &SchemaCtx,
+	) -> Vec<ToolSchema> {
+		unimplemented!()
+	}
 
-    /// Parse the arguments, emit [`crate::event::Event::ToolCalled`], dispatch,
-    /// emit [`crate::event::Event::ToolReturned`].
-    ///
-    /// A name that matches no tool, and arguments that are not JSON, both come
-    /// back as a sentence the model can act on rather than as anything that
-    /// stops the turn.
-    async fn run(&self, _ctx: &SessionCtx, _call: &ToolCall) -> String {
-        unimplemented!()
-    }
+	/// Parse the arguments, emit [`crate::event::Event::ToolCalled`], dispatch,
+	/// emit [`crate::event::Event::ToolReturned`].
+	///
+	/// A name that matches no tool, and arguments that are not JSON, both come
+	/// back as a sentence the model can act on rather than as anything that
+	/// stops the turn.
+	async fn run(&self, _ctx: &SessionCtx, _call: &ToolCall) -> String {
+		unimplemented!()
+	}
 }
 
 /// Why a tool could not do what it was asked, worded for the model that asked.
@@ -109,16 +113,16 @@ impl ToolRunner for Registry {
 /// reads. It exists as a type so the wording lives in one place.
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
-    #[error("Error: your arguments were not valid JSON. Try again.")]
-    BadJson,
-    #[error("Error: `{field}` is required.")]
-    Missing { field: &'static str },
-    #[error("Error: {0}")]
-    Rejected(String),
-    #[error("Error: there is no tool called {0}.")]
-    NoSuchTool(String),
-    #[error("Error: there is no Task {0}.")]
-    NoSuchTask(String),
-    #[error("Error: `{given}` is not a Role. The Roles are:\n{catalogue}")]
-    NoSuchRole { given: String, catalogue: String },
+	#[error("Error: your arguments were not valid JSON. Try again.")]
+	BadJson,
+	#[error("Error: `{field}` is required.")]
+	Missing { field: &'static str },
+	#[error("Error: {0}")]
+	Rejected(String),
+	#[error("Error: there is no tool called {0}.")]
+	NoSuchTool(String),
+	#[error("Error: there is no Task {0}.")]
+	NoSuchTask(String),
+	#[error("Error: `{given}` is not a Role. The Roles are:\n{catalogue}")]
+	NoSuchRole { given: String, catalogue: String },
 }

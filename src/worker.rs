@@ -23,12 +23,12 @@ use crate::session::SessionCtx;
 /// What one [`work_turn`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Worked {
-    /// The Task has its Result, success or failure.
-    Done(TaskResult),
-    /// Feedback or a nudge went in; the Session takes another turn.
-    Continue,
-    /// The Task was cancelled. No Result exists and nothing was reviewed.
-    Aborted,
+	/// The Task has its Result, success or failure.
+	Done(TaskResult),
+	/// Feedback or a nudge went in; the Session takes another turn.
+	Continue,
+	/// The Task was cancelled. No Result exists and nothing was reviewed.
+	Aborted,
 }
 
 /// A fresh Worker Session for a Task: the Role's system prompt, the Brief, and
@@ -38,10 +38,10 @@ pub enum Worked {
 /// and "earlier" mean something to a Session that runs for a while. Separate
 /// from running it, so a caller can put something in the context first.
 pub async fn new_worker_session(
-    _ctx: &SessionCtx,
-    _task: &Task,
+	_ctx: &SessionCtx,
+	_task: &Task,
 ) -> Result<crate::domain::SessionId, crate::store::StoreError> {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// One turn for a Worker Session, and what follows it.
@@ -57,5 +57,5 @@ pub async fn new_worker_session(
 /// A review that wrote neither a summary nor feedback falls back to what the
 /// Worker itself wrote last; a review of silence sends the Worker back to work.
 pub async fn work_turn(_ctx: &SessionCtx) -> Worked {
-    unimplemented!()
+	unimplemented!()
 }

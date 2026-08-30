@@ -38,14 +38,20 @@ pub use call::{CallRequest, CallStatus, LlmCall, NewCall, Usage};
 pub use channel::{ChannelKind, ChannelRecord, Utterance, Who};
 pub use ids::{CallId, ChannelId, IdError, LessonId, RunId, SessionId, TaskId};
 pub use lesson::{Hit, Lesson, LessonSubject, NewLesson};
-pub use message::{AssistantBody, Completion, Message, NonEmpty, Reply, ToolCall, ToolSchema};
+pub use message::{
+	AssistantBody, Completion, Message, NonEmpty, Reply, ToolCall, ToolSchema,
+};
 pub use run::Run;
 pub use session::{
-    Incoming, IncomingFrom, NewSession, Nudge, Outcome, Reflection, ReflectionKind,
-    ReflectionResult, Session, SessionKind, SessionStatus,
+	Incoming, IncomingFrom, NewSession, Nudge, Outcome, Reflection,
+	ReflectionKind, ReflectionResult, Session, SessionKind, SessionStatus,
 };
 pub use task::{
-    Creator, NewTask, Schedule, Task, TaskPriority, TaskResult, TaskState, TaskSummary,
+	Creator, NewTask, Schedule, Task, TaskPriority, TaskResult, TaskState,
+	TaskSummary,
 };
 pub use text::{Brief, Day, TextError, Title};
-pub use time::{Clock, Cost, Duration, FixedClock, ManualClock, Spend, SystemClock, Timestamp};
+pub use time::{
+	Clock, Cost, Duration, FixedClock, ManualClock, Spend, SystemClock,
+	Timestamp,
+};

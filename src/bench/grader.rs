@@ -32,42 +32,44 @@ End your reply with a verdict on its own line: <verdict>pass</verdict> or <verdi
 /// A model's judgement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    Pass,
-    Fail,
+	Pass,
+	Fail,
 }
 
 /// One question put to a model about a finished run.
 pub struct Grader {
-    pub name: String,
-    /// The whole user message the grader judges. Built by the case that owns it,
-    /// out of the run's state and the calls the Session made.
-    pub input: String,
-    /// How to read the reply. [`default_judge`] looks for the verdict tag.
-    pub judge: Option<Box<dyn Fn(&str) -> (Verdict, String) + Send + Sync>>,
+	pub name: String,
+	/// The whole user message the grader judges. Built by the case that owns it,
+	/// out of the run's state and the calls the Session made.
+	pub input: String,
+	/// How to read the reply. [`default_judge`] looks for the verdict tag.
+	pub judge: Option<Box<dyn Fn(&str) -> (Verdict, String) + Send + Sync>>,
 }
 
 /// What one grader found.
 #[derive(Debug, Clone)]
 pub struct GraderOutcome {
-    pub name: String,
-    pub verdict: Verdict,
-    pub detail: String,
-    /// The grader's whole reply, kept for when a marginal verdict needs reading.
-    pub raw: String,
-    pub cost: Cost,
+	pub name: String,
+	pub verdict: Verdict,
+	pub detail: String,
+	/// The grader's whole reply, kept for when a marginal verdict needs reading.
+	pub raw: String,
+	pub cost: Cost,
 }
 
 /// Run one grader.
 ///
 /// Fails only on transport trouble; a `fail` verdict is a normal outcome, not an
 /// error.
-pub async fn run(_grader: &Grader) -> Result<GraderOutcome, crate::model::ModelError> {
-    unimplemented!()
+pub async fn run(
+	_grader: &Grader,
+) -> Result<GraderOutcome, crate::model::ModelError> {
+	unimplemented!()
 }
 
 /// Look for `<verdict>pass</verdict>` or `<verdict>fail</verdict>`.
 ///
 /// No tag is a FAIL.
 pub fn default_judge(_reply: &str) -> (Verdict, String) {
-    unimplemented!()
+	unimplemented!()
 }

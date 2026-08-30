@@ -24,7 +24,7 @@ use crate::domain::{CallRequest, Completion};
 /// This is a prototype key with a low limit; leaking it costs nothing.
 /// `OPENROUTER_API_KEY` overrides it.
 pub const API_KEY: &str =
-    "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";
+	"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";
 
 /// The model every Session, every review and every interrupt talks to.
 pub const MODEL: &str = "qwen/qwen3.6-35b-a3b";
@@ -45,23 +45,23 @@ pub const ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
 /// and is left at that model's own default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ReasoningEffort {
-    /// No thinking at all.
-    ///
-    /// Sends two fields, because the two endpoints this project talks to want
-    /// different ones and each ignores the other's without complaint:
-    /// `reasoning: {enabled: false}`, which OpenRouter honours, and
-    /// `chat_template_kwargs: {enable_thinking: false}`, which a local llama.cpp
-    /// server honours.
-    ///
-    /// The trap: `openai/gpt-oss-*` on OpenRouter answers the first of those
-    /// with HTTP 400. Pointing [`MODEL`] at a gpt-oss means raising this to
-    /// `Minimal` in the same edit.
-    #[default]
-    None,
-    Minimal,
-    Low,
-    Medium,
-    High,
+	/// No thinking at all.
+	///
+	/// Sends two fields, because the two endpoints this project talks to want
+	/// different ones and each ignores the other's without complaint:
+	/// `reasoning: {enabled: false}`, which OpenRouter honours, and
+	/// `chat_template_kwargs: {enable_thinking: false}`, which a local llama.cpp
+	/// server honours.
+	///
+	/// The trap: `openai/gpt-oss-*` on OpenRouter answers the first of those
+	/// with HTTP 400. Pointing [`MODEL`] at a gpt-oss means raising this to
+	/// `Minimal` in the same edit.
+	#[default]
+	None,
+	Minimal,
+	Low,
+	Medium,
+	High,
 }
 
 /// One exchange with a model.
@@ -70,58 +70,69 @@ pub enum ReasoningEffort {
 /// scripted model in [`crate::bench`].
 #[async_trait]
 pub trait Model: Send + Sync {
-    /// The model's name, as it goes on the call record.
-    fn name(&self) -> &str;
+	/// The model's name, as it goes on the call record.
+	fn name(&self) -> &str;
 
-    /// Send one request and bring back what came of it.
-    ///
-    /// One attempt, no retry. A transport failure is a [`ModelError`]; a model
-    /// that answers with nothing is a successful call carrying
-    /// [`crate::domain::Reply::Empty`].
-    async fn send(&self, request: &CallRequest) -> Result<Completion, ModelError>;
+	/// Send one request and bring back what came of it.
+	///
+	/// One attempt, no retry. A transport failure is a [`ModelError`]; a model
+	/// that answers with nothing is a successful call carrying
+	/// [`crate::domain::Reply::Empty`].
+	async fn send(
+		&self,
+		request: &CallRequest,
+	) -> Result<Completion, ModelError>;
 }
 
 /// Why an exchange did not happen.
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
-    #[error("could not reach the model: {0}")]
-    Transport(String),
-    #[error("HTTP {status}: {body}")]
-    Status { status: u16, body: String },
-    #[error("the model's answer could not be read: {0}")]
-    Malformed(String),
+	#[error("could not reach the model: {0}")]
+	Transport(String),
+	#[error("HTTP {status}: {body}")]
+	Status { status: u16, body: String },
+	#[error("the model's answer could not be read: {0}")]
+	Malformed(String),
 }
 
 /// The real transport.
 pub struct OpenRouter {
-    client: reqwest::Client,
-    endpoint: String,
-    api_key: String,
-    model: String,
-    effort: ReasoningEffort,
+	client: reqwest::Client,
+	endpoint: String,
+	api_key: String,
+	model: String,
+	effort: ReasoningEffort,
 }
 
 impl OpenRouter {
-    /// Read the endpoint, key, model and reasoning effort from the constants
-    /// above, letting the environment override each.
-    pub fn from_env() -> Self {
-        unimplemented!()
-    }
+	/// Read the endpoint, key, model and reasoning effort from the constants
+	/// above, letting the environment override each.
+	pub fn from_env() -> Self {
+		unimplemented!()
+	}
 
-    pub fn new(_endpoint: &str, _api_key: &str, _model: &str, _effort: ReasoningEffort) -> Self {
-        unimplemented!()
-    }
+	pub fn new(
+		_endpoint: &str,
+		_api_key: &str,
+		_model: &str,
+		_effort: ReasoningEffort,
+	) -> Self {
+		unimplemented!()
+	}
 }
 
 #[async_trait]
 impl Model for OpenRouter {
-    fn name(&self) -> &str {
-        unimplemented!()
-    }
+	fn name(&self) -> &str {
+		unimplemented!()
+	}
 
-    async fn send(&self, _request: &CallRequest) -> Result<Completion, ModelError> {
-        unimplemented!()
-    }
+	async fn send(
+		&self,
+		_request: &CallRequest,
+	) -> Result<Completion, ModelError> {
+		unimplemented!()
+	}
 }
 
 // --- The wire shape --------------------------------------------------------
@@ -134,45 +145,45 @@ impl Model for OpenRouter {
 /// the model's own reasoning for inspection, and the conversion below drops it.
 #[derive(serde::Serialize)]
 struct WireMessage {
-    role: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<WireToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
+	role: &'static str,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	content: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	tool_calls: Option<Vec<WireToolCall>>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	tool_call_id: Option<String>,
 }
 
 #[derive(serde::Serialize)]
 struct WireToolCall {
-    id: String,
-    #[serde(rename = "type")]
-    kind: &'static str,
-    function: WireFunctionCall,
+	id: String,
+	#[serde(rename = "type")]
+	kind: &'static str,
+	function: WireFunctionCall,
 }
 
 #[derive(serde::Serialize)]
 struct WireFunctionCall {
-    name: String,
-    arguments: String,
+	name: String,
+	arguments: String,
 }
 
 #[derive(serde::Serialize)]
 struct WireTool {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    function: WireFunction,
+	#[serde(rename = "type")]
+	kind: &'static str,
+	function: WireFunction,
 }
 
 #[derive(serde::Serialize)]
 struct WireFunction {
-    name: String,
-    description: String,
-    parameters: serde_json::Value,
+	name: String,
+	description: String,
+	parameters: serde_json::Value,
 }
 
 impl From<&crate::domain::Message> for WireMessage {
-    fn from(_m: &crate::domain::Message) -> WireMessage {
-        unimplemented!()
-    }
+	fn from(_m: &crate::domain::Message) -> WireMessage {
+		unimplemented!()
+	}
 }

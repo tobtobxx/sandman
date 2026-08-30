@@ -16,26 +16,26 @@ use crate::domain::{ChannelId, ChannelKind};
 
 /// The browser, as a Channel.
 pub struct Web {
-    id: ChannelId,
+	id: ChannelId,
 }
 
 impl crate::comms::Channel for Web {
-    fn id(&self) -> ChannelId {
-        unimplemented!()
-    }
+	fn id(&self) -> ChannelId {
+		unimplemented!()
+	}
 
-    fn kind(&self) -> ChannelKind {
-        ChannelKind::Web
-    }
+	fn kind(&self) -> ChannelKind {
+		ChannelKind::Web
+	}
 
-    /// Nothing to do: the transcript is already in the Store, and the push
-    /// carries it.
-    fn send(&self, _text: &str) {}
+	/// Nothing to do: the transcript is already in the Store, and the push
+	/// carries it.
+	fn send(&self, _text: &str) {}
 }
 
 /// Open the browser Channel.
 pub async fn attach(
-    _harness: Arc<crate::harness::Harness>,
+	_harness: Arc<crate::harness::Harness>,
 ) -> Result<ChannelId, crate::store::StoreError> {
-    unimplemented!()
+	unimplemented!()
 }

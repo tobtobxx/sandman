@@ -46,14 +46,17 @@ use sandman::harness::Drive;
 const HELLO_MESSAGE: &str = "Hello :)";
 
 /// What the human says in the `greet-again` case.
-const GREET_MESSAGE: &str = "Hey! Could you greet me again in about 3 minutes? :)";
+const GREET_MESSAGE: &str =
+	"Hey! Could you greet me again in about 3 minutes? :)";
 
 /// Tripwire: `create_task` is never reached for more than `n` times.
 ///
 /// Counts calls, not rows: a unit bench answers the creation itself, so a
 /// Session that keeps asking for Tasks leaves nothing in the Store to count.
-fn at_most_creations(_n: usize) -> impl Fn(&Watch) -> CheckResult + Send + Sync {
-    |_watch| unimplemented!()
+fn at_most_creations(
+	_n: usize,
+) -> impl Fn(&Watch) -> CheckResult + Send + Sync {
+	|_watch| unimplemented!()
 }
 
 /// `"Hello :)"` gets a reply and reaches for no Task at all.
@@ -63,7 +66,7 @@ fn at_most_creations(_n: usize) -> impl Fn(&Watch) -> CheckResult + Send + Sync 
 #[tokio::test]
 #[ignore = "spends money on a real model; cargo test -- --ignored"]
 async fn hello() -> Result<(), Trip> {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// Asking to be greeted again in ~3 minutes reaches for `create_task` once.
@@ -76,7 +79,7 @@ async fn hello() -> Result<(), Trip> {
 #[tokio::test]
 #[ignore = "spends money on a real model; cargo test -- --ignored"]
 async fn greet_again() -> Result<(), Trip> {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// A planning Task seeded from outside: greet the human in 3 minutes.
@@ -88,5 +91,5 @@ async fn greet_again() -> Result<(), Trip> {
 #[tokio::test]
 #[ignore = "spends money on a real model; cargo test -- --ignored"]
 async fn plan_greet() -> Result<(), Trip> {
-    unimplemented!()
+	unimplemented!()
 }

@@ -20,51 +20,64 @@ use std::str::FromStr;
 /// The `Display` form is what reaches the log, the wire and a human's eye. The
 /// `FromStr` form is what reads it back off a database row or a tool argument.
 macro_rules! id_type {
-    ($name:ident, $prefix:literal, $doc:literal) => {
-        #[doc = $doc]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct $name(pub u32);
+	($name:ident, $prefix:literal, $doc:literal) => {
+		#[doc = $doc]
+		#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+		pub struct $name(pub u32);
 
-        impl $name {
-            /// The counter name this id is minted from, in the `counters` table.
-            pub const COUNTER: &'static str = $prefix;
+		impl $name {
+			/// The counter name this id is minted from, in the `counters` table.
+			pub const COUNTER: &'static str = $prefix;
 
-            /// The textual prefix, as it appears in `t-07`.
-            pub const PREFIX: &'static str = $prefix;
-        }
+			/// The textual prefix, as it appears in `t-07`.
+			pub const PREFIX: &'static str = $prefix;
+		}
 
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}-{:02}", $prefix, self.0)
-            }
-        }
+		impl fmt::Display for $name {
+			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+				write!(f, "{}-{:02}", $prefix, self.0)
+			}
+		}
 
-        impl FromStr for $name {
-            type Err = IdError;
+		impl FromStr for $name {
+			type Err = IdError;
 
-            fn from_str(_s: &str) -> Result<Self, Self::Err> {
-                unimplemented!()
-            }
-        }
+			fn from_str(_s: &str) -> Result<Self, Self::Err> {
+				unimplemented!()
+			}
+		}
 
-        impl serde::Serialize for $name {
-            fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
-                unimplemented!()
-            }
-        }
+		impl serde::Serialize for $name {
+			fn serialize<S: serde::Serializer>(
+				&self,
+				_s: S,
+			) -> Result<S::Ok, S::Error> {
+				unimplemented!()
+			}
+		}
 
-        impl<'de> serde::Deserialize<'de> for $name {
-            fn deserialize<D: serde::Deserializer<'de>>(_d: D) -> Result<Self, D::Error> {
-                unimplemented!()
-            }
-        }
-    };
+		impl<'de> serde::Deserialize<'de> for $name {
+			fn deserialize<D: serde::Deserializer<'de>>(
+				_d: D,
+			) -> Result<Self, D::Error> {
+				unimplemented!()
+			}
+		}
+	};
 }
 
-id_type!(RunId, "run", "One run of Sandman: a process lifetime, in the database.");
+id_type!(
+	RunId,
+	"run",
+	"One run of Sandman: a process lifetime, in the database."
+);
 id_type!(TaskId, "t", "One Task — the single unit of work.");
 id_type!(SessionId, "s", "One Session — a live agent context.");
-id_type!(ChannelId, "ch", "One Channel — a two-way connection to a human.");
+id_type!(
+	ChannelId,
+	"ch",
+	"One Channel — a two-way connection to a human."
+);
 id_type!(CallId, "call", "One model call.");
 id_type!(LessonId, "l", "One lesson kept by metacognition.");
 
@@ -72,6 +85,6 @@ id_type!(LessonId, "l", "One lesson kept by metacognition.");
 #[derive(Debug, thiserror::Error)]
 #[error("`{text}` is not a {expected} id")]
 pub struct IdError {
-    pub text: String,
-    pub expected: &'static str,
+	pub text: String,
+	pub expected: &'static str,
 }

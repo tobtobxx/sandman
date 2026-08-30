@@ -22,9 +22,9 @@ use crate::harness::Harness;
 /// What every request handler reaches.
 #[derive(Clone)]
 pub struct AppState {
-    pub harness: Arc<Harness>,
-    pub embedder: Arc<dyn crate::memory::Embedder>,
-    pub channel: crate::domain::ChannelId,
+	pub harness: Arc<Harness>,
+	pub embedder: Arc<dyn crate::memory::Embedder>,
+	pub channel: crate::domain::ChannelId,
 }
 
 /// Start the Watcher UI on [`super::PORT`].
@@ -32,21 +32,21 @@ pub struct AppState {
 /// Serves `web/` as static files, and upgrades `/ws` to a socket that gets one
 /// `init` and then a patch per Event.
 pub async fn serve(_state: AppState, _port: u16) -> std::io::Result<()> {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// One browser: send the snapshot, then follow the stream.
 async fn watch(_state: AppState, _socket: axum::extract::ws::WebSocket) {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// A message the human typed in the browser.
 async fn on_message(_state: &AppState, _text: &str) {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// Rank the Lessons for the search box, with the same call the `memory` Role's
 /// tools make.
 async fn on_search(_state: &AppState, _query: &str) -> super::wire::Frame {
-    unimplemented!()
+	unimplemented!()
 }

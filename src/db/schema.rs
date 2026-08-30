@@ -30,8 +30,8 @@ pub const SCHEMA_VERSION: u32 = 1;
 ///
 /// A migration is never edited once released; a change is a new entry.
 pub const MIGRATIONS: &[&str] = &[
-    // v1 — the initial schema.
-    r#"
+	// v1 — the initial schema.
+	r#"
     CREATE TABLE runs (
         id          INTEGER PRIMARY KEY,
         started_at  INTEGER NOT NULL,
@@ -171,10 +171,10 @@ pub const MIGRATIONS: &[&str] = &[
 /// Applying from empty and applying twice both end in the same place. A database
 /// at a version this binary does not know is refused, not read.
 pub fn apply(_conn: &Connection) -> Result<(), super::DbError> {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// The version a database is currently at. Zero for an empty one.
 pub fn version_of(_conn: &Connection) -> Result<u32, super::DbError> {
-    unimplemented!()
+	unimplemented!()
 }

@@ -30,17 +30,21 @@ pub struct MessageHuman;
 
 #[async_trait]
 impl Tool for MessageHuman {
-    fn name(&self) -> ToolName {
-        ToolName::MessageHuman
-    }
+	fn name(&self) -> ToolName {
+		ToolName::MessageHuman
+	}
 
-    /// The `channel` argument is an enum of the open Channels, each labelled
-    /// with its kind, so the model names one that exists.
-    fn schema(&self, _ctx: &SchemaCtx) -> ToolSchema {
-        unimplemented!()
-    }
+	/// The `channel` argument is an enum of the open Channels, each labelled
+	/// with its kind, so the model names one that exists.
+	fn schema(&self, _ctx: &SchemaCtx) -> ToolSchema {
+		unimplemented!()
+	}
 
-    async fn call(&self, _ctx: &SessionCtx, _args: serde_json::Value) -> String {
-        unimplemented!()
-    }
+	async fn call(
+		&self,
+		_ctx: &SessionCtx,
+		_args: serde_json::Value,
+	) -> String {
+		unimplemented!()
+	}
 }

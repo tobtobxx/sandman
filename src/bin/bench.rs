@@ -23,26 +23,26 @@
 
 /// What the driver was asked to do.
 struct Args {
-    cases: Option<Vec<String>>,
-    times: usize,
-    serial: bool,
-    /// Where the artifacts go. `bench/runs` by default.
-    out: std::path::PathBuf,
+	cases: Option<Vec<String>>,
+	times: usize,
+	serial: bool,
+	/// Where the artifacts go. `bench/runs` by default.
+	out: std::path::PathBuf,
 }
 
 fn parse(_argv: &[String]) -> Result<Args, String> {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// Run one case once, write its artifacts, and report.
 async fn run_once(
-    _name: &str,
-    _dir: &std::path::Path,
+	_name: &str,
+	_dir: &std::path::Path,
 ) -> Result<sandman::bench::report::RunReport, String> {
-    unimplemented!()
+	unimplemented!()
 }
 
 #[tokio::main]
 async fn main() {
-    unimplemented!()
+	unimplemented!()
 }

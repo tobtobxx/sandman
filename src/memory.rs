@@ -35,12 +35,15 @@ pub const EMBED_ENDPOINT: &str = "https://openrouter.ai/api/v1/embeddings";
 /// Text to vectors.
 #[async_trait]
 pub trait Embedder: Send + Sync {
-    /// The model these vectors come from. Cached vectors are keyed on it, so
-    /// changing the model does not silently mix two vector spaces.
-    fn model(&self) -> &str;
+	/// The model these vectors come from. Cached vectors are keyed on it, so
+	/// changing the model does not silently mix two vector spaces.
+	fn model(&self) -> &str;
 
-    /// Embed a batch, order preserved.
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError>;
+	/// Embed a batch, order preserved.
+	async fn embed(
+		&self,
+		texts: &[String],
+	) -> Result<Vec<Vec<f32>>, EmbedError>;
 }
 
 /// The real embedder.
@@ -54,42 +57,45 @@ pub trait Embedder: Send + Sync {
 /// The cost of that choice is honest: an embedding is not a model call, so what
 /// it spends never reaches Spend. See TASKS.md.
 pub struct OpenRouterEmbedder {
-    client: reqwest::Client,
-    endpoint: String,
-    api_key: String,
-    model: String,
+	client: reqwest::Client,
+	endpoint: String,
+	api_key: String,
+	model: String,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmbedError {
-    #[error("could not reach the embedding service: {0}")]
-    Transport(String),
-    #[error("HTTP {status}: {body}")]
-    Status { status: u16, body: String },
-    #[error("the embedding service answered with something else: {0}")]
-    Malformed(String),
+	#[error("could not reach the embedding service: {0}")]
+	Transport(String),
+	#[error("HTTP {status}: {body}")]
+	Status { status: u16, body: String },
+	#[error("the embedding service answered with something else: {0}")]
+	Malformed(String),
 }
 
 impl OpenRouterEmbedder {
-    pub fn from_env() -> Self {
-        unimplemented!()
-    }
+	pub fn from_env() -> Self {
+		unimplemented!()
+	}
 }
 
 #[async_trait]
 impl Embedder for OpenRouterEmbedder {
-    fn model(&self) -> &str {
-        unimplemented!()
-    }
+	fn model(&self) -> &str {
+		unimplemented!()
+	}
 
-    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
-        unimplemented!()
-    }
+	async fn embed(
+		&self,
+		_texts: &[String],
+	) -> Result<Vec<Vec<f32>>, EmbedError> {
+		unimplemented!()
+	}
 }
 
 /// Closeness of two vectors, from -1 to 1.
 pub fn cosine(_a: &[f32], _b: &[f32]) -> f32 {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// Rank a corpus against a query, best first.
@@ -98,13 +104,13 @@ pub fn cosine(_a: &[f32], _b: &[f32]) -> f32 {
 /// scores everything by cosine. The query rides in the same batch, so one search
 /// is one call.
 pub async fn rank<T: Clone>(
-    _store: &crate::store::Store,
-    _embedder: &dyn Embedder,
-    _query: &str,
-    _corpus: &[(String, String, T)],
-    _count: usize,
+	_store: &crate::store::Store,
+	_embedder: &dyn Embedder,
+	_query: &str,
+	_corpus: &[(String, String, T)],
+	_count: usize,
 ) -> Result<Vec<crate::domain::Hit<T>>, EmbedError> {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// What a tool says when a search could not be made.
@@ -112,5 +118,5 @@ pub async fn rank<T: Clone>(
 /// A sentence the model can act on, not a stack trace: the tool that called this
 /// has to answer its Session either way.
 pub fn search_failed(_what: &str, _err: &EmbedError) -> String {
-    unimplemented!()
+	unimplemented!()
 }

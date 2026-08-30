@@ -26,26 +26,26 @@ use rusqlite::Connection;
 /// Where a database lives.
 #[derive(Debug, Clone)]
 pub enum Backing {
-    /// A file on disk. What a real Sandman run uses.
-    File(std::path::PathBuf),
-    /// Private to this process and gone when it closes. What each bench case
-    /// uses, which is why a case needs no process of its own.
-    Memory,
+	/// A file on disk. What a real Sandman run uses.
+	File(std::path::PathBuf),
+	/// Private to this process and gone when it closes. What each bench case
+	/// uses, which is why a case needs no process of its own.
+	Memory,
 }
 
 /// Anything that can go wrong between the domain and the database.
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
-    #[error("sqlite: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-    #[error("could not read a stored value: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("this database is at schema version {found}; this build writes {expected}")]
-    SchemaVersion { found: u32, expected: u32 },
-    #[error("a stored `{what}` had the unknown variant `{tag}`")]
-    UnknownVariant { what: &'static str, tag: String },
-    #[error("{0}")]
-    Corrupt(String),
+	#[error("sqlite: {0}")]
+	Sqlite(#[from] rusqlite::Error),
+	#[error("could not read a stored value: {0}")]
+	Json(#[from] serde_json::Error),
+	#[error("this database is at schema version {found}; this build writes {expected}")]
+	SchemaVersion { found: u32, expected: u32 },
+	#[error("a stored `{what}` had the unknown variant `{tag}`")]
+	UnknownVariant { what: &'static str, tag: String },
+	#[error("{0}")]
+	Corrupt(String),
 }
 
 /// Open a database and bring it up to the current schema.
@@ -53,7 +53,7 @@ pub enum DbError {
 /// WAL, foreign keys on, and a busy timeout — a Watcher and a `VACUUM INTO` may
 /// read while the swarm writes.
 pub fn open(_backing: Backing) -> Result<Connection, DbError> {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// Copy the whole database to a file, consistently, while it is in use.
@@ -61,8 +61,11 @@ pub fn open(_backing: Backing) -> Result<Connection, DbError> {
 /// This is how a bench case keeps its artifact: one `store.sqlite` holding every
 /// Task, Session, transcript and model call of the run, queryable afterwards
 /// with `sqlite3`.
-pub fn save_copy(_conn: &Connection, _to: &std::path::Path) -> Result<(), DbError> {
-    unimplemented!()
+pub fn save_copy(
+	_conn: &Connection,
+	_to: &std::path::Path,
+) -> Result<(), DbError> {
+	unimplemented!()
 }
 
 /// Id minting.
@@ -71,12 +74,12 @@ pub fn save_copy(_conn: &Connection, _to: &std::path::Path) -> Result<(), DbErro
 /// transaction, so an id is never handed out twice and never handed out for an
 /// insert that then rolls back.
 pub mod counters {
-    use super::DbError;
-    use rusqlite::Transaction;
+	use super::DbError;
+	use rusqlite::Transaction;
 
-    /// Take the next number for a prefix, bumping the counter in the same
-    /// transaction.
-    pub fn take(_tx: &Transaction<'_>, _prefix: &str) -> Result<u32, DbError> {
-        unimplemented!()
-    }
+	/// Take the next number for a prefix, bumping the counter in the same
+	/// transaction.
+	pub fn take(_tx: &Transaction<'_>, _prefix: &str) -> Result<u32, DbError> {
+		unimplemented!()
+	}
 }

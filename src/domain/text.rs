@@ -39,72 +39,72 @@ pub struct Day(String);
 /// Worker calls `create_task` with an empty Brief.
 #[derive(Debug, thiserror::Error)]
 pub enum TextError {
-    #[error("a {what} cannot be empty")]
-    Empty { what: &'static str },
-    #[error("`{text}` is not a date of the form YYYY-MM-DD")]
-    NotADay { text: String },
+	#[error("a {what} cannot be empty")]
+	Empty { what: &'static str },
+	#[error("`{text}` is not a date of the form YYYY-MM-DD")]
+	NotADay { text: String },
 }
 
 impl Title {
-    /// The Title as written. Borrowed, because most readers only print it.
-    pub fn as_str(&self) -> &str {
-        unimplemented!()
-    }
+	/// The Title as written. Borrowed, because most readers only print it.
+	pub fn as_str(&self) -> &str {
+		unimplemented!()
+	}
 }
 
 impl Brief {
-    /// The Brief as written.
-    pub fn as_str(&self) -> &str {
-        unimplemented!()
-    }
+	/// The Brief as written.
+	pub fn as_str(&self) -> &str {
+		unimplemented!()
+	}
 }
 
 impl Day {
-    /// Today, in the local zone.
-    pub fn today(_now: super::time::Timestamp) -> Self {
-        unimplemented!()
-    }
+	/// Today, in the local zone.
+	pub fn today(_now: super::time::Timestamp) -> Self {
+		unimplemented!()
+	}
 
-    pub fn as_str(&self) -> &str {
-        unimplemented!()
-    }
+	pub fn as_str(&self) -> &str {
+		unimplemented!()
+	}
 }
 
 impl TryFrom<String> for Title {
-    type Error = TextError;
-    fn try_from(_s: String) -> Result<Self, Self::Error> {
-        unimplemented!()
-    }
+	type Error = TextError;
+	fn try_from(_s: String) -> Result<Self, Self::Error> {
+		unimplemented!()
+	}
 }
 
 impl TryFrom<String> for Brief {
-    type Error = TextError;
-    fn try_from(_s: String) -> Result<Self, Self::Error> {
-        unimplemented!()
-    }
+	type Error = TextError;
+	fn try_from(_s: String) -> Result<Self, Self::Error> {
+		unimplemented!()
+	}
 }
 
 impl TryFrom<String> for Day {
-    type Error = TextError;
-    fn try_from(_s: String) -> Result<Self, Self::Error> {
-        unimplemented!()
-    }
+	type Error = TextError;
+	fn try_from(_s: String) -> Result<Self, Self::Error> {
+		unimplemented!()
+	}
 }
 
 impl fmt::Display for Title {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!()
-    }
+	fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		unimplemented!()
+	}
 }
 
 impl fmt::Display for Brief {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!()
-    }
+	fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		unimplemented!()
+	}
 }
 
 impl fmt::Display for Day {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!()
-    }
+	fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		unimplemented!()
+	}
 }

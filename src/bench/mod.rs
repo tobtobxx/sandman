@@ -52,31 +52,31 @@ pub use script::ScriptedModel;
 /// exit. The [`Rig`] winds itself down on the way out either way.
 #[derive(Debug, thiserror::Error)]
 pub enum Trip {
-    #[error("tripwire `{name}`: {detail}")]
-    Tripwire { name: String, detail: String },
-    #[error("timed out waiting for {what}")]
-    Timeout { what: String },
-    #[error("the whole case ran past its {seconds}s bound")]
-    CaseTimeout { seconds: u64 },
-    #[error(transparent)]
-    Store(#[from] crate::store::StoreError),
+	#[error("tripwire `{name}`: {detail}")]
+	Tripwire { name: String, detail: String },
+	#[error("timed out waiting for {what}")]
+	Timeout { what: String },
+	#[error("the whole case ran past its {seconds}s bound")]
+	CaseTimeout { seconds: u64 },
+	#[error(transparent)]
+	Store(#[from] crate::store::StoreError),
 }
 
 /// What one check found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckResult {
-    pub name: String,
-    pub ok: bool,
-    /// What was seen, so a failure reads without opening the artifacts.
-    pub detail: String,
+	pub name: String,
+	pub ok: bool,
+	/// What was seen, so a failure reads without opening the artifacts.
+	pub detail: String,
 }
 
 impl CheckResult {
-    pub fn ok(_name: &str, _detail: impl Into<String>) -> Self {
-        unimplemented!()
-    }
+	pub fn ok(_name: &str, _detail: impl Into<String>) -> Self {
+		unimplemented!()
+	}
 
-    pub fn no(_name: &str, _detail: impl Into<String>) -> Self {
-        unimplemented!()
-    }
+	pub fn no(_name: &str, _detail: impl Into<String>) -> Self {
+		unimplemented!()
+	}
 }

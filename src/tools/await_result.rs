@@ -24,18 +24,22 @@ pub struct AwaitResult;
 
 #[async_trait]
 impl Tool for AwaitResult {
-    fn name(&self) -> ToolName {
-        ToolName::AwaitResult
-    }
+	fn name(&self) -> ToolName {
+		ToolName::AwaitResult
+	}
 
-    fn schema(&self, _ctx: &SchemaCtx) -> ToolSchema {
-        unimplemented!()
-    }
+	fn schema(&self, _ctx: &SchemaCtx) -> ToolSchema {
+		unimplemented!()
+	}
 
-    /// Reads the Task id, then hands off to [`crate::waiters::Waiters::wait`].
-    ///
-    /// Any Task may be awaited by id, not only one this Session created.
-    async fn call(&self, _ctx: &SessionCtx, _args: serde_json::Value) -> String {
-        unimplemented!()
-    }
+	/// Reads the Task id, then hands off to [`crate::waiters::Waiters::wait`].
+	///
+	/// Any Task may be awaited by id, not only one this Session created.
+	async fn call(
+		&self,
+		_ctx: &SessionCtx,
+		_args: serde_json::Value,
+	) -> String {
+		unimplemented!()
+	}
 }

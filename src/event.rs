@@ -21,8 +21,9 @@
 //! Defines: [`Event`], [`Events`].
 
 use crate::domain::{
-    CallId, CallStatus, ChannelId, Incoming, Lesson, LlmCall, Message, Reflection, Run, Session,
-    SessionId, SessionStatus, Task, TaskId, TaskState, Utterance,
+	CallId, CallStatus, ChannelId, Incoming, Lesson, LlmCall, Message,
+	Reflection, Run, Session, SessionId, SessionStatus, Task, TaskId,
+	TaskState, Utterance,
 };
 use crate::roles::ToolName;
 use tokio::sync::broadcast;
@@ -35,28 +36,61 @@ use tokio::sync::broadcast;
 /// changed.
 #[derive(Debug, Clone)]
 pub enum Event {
-    RunStarted(Run),
-    RunEnded(Run),
+	RunStarted(Run),
+	RunEnded(Run),
 
-    TaskCreated(Task),
-    TaskStateChanged { task: TaskId, to: TaskState },
+	TaskCreated(Task),
+	TaskStateChanged {
+		task: TaskId,
+		to: TaskState,
+	},
 
-    SessionStarted(Session),
-    SessionStatusChanged { session: SessionId, to: SessionStatus },
-    MessageAppended { session: SessionId, index: usize, message: Message },
-    ReflectionRecorded { session: SessionId, reflection: Reflection },
-    MailReceived { session: SessionId, incoming: Incoming },
+	SessionStarted(Session),
+	SessionStatusChanged {
+		session: SessionId,
+		to: SessionStatus,
+	},
+	MessageAppended {
+		session: SessionId,
+		index: usize,
+		message: Message,
+	},
+	ReflectionRecorded {
+		session: SessionId,
+		reflection: Reflection,
+	},
+	MailReceived {
+		session: SessionId,
+		incoming: Incoming,
+	},
 
-    CallQueued(LlmCall),
-    CallStatusChanged { call: CallId, to: CallStatus },
+	CallQueued(LlmCall),
+	CallStatusChanged {
+		call: CallId,
+		to: CallStatus,
+	},
 
-    ChannelOpened { channel: ChannelId, session: SessionId },
-    Said { channel: ChannelId, utterance: Utterance },
+	ChannelOpened {
+		channel: ChannelId,
+		session: SessionId,
+	},
+	Said {
+		channel: ChannelId,
+		utterance: Utterance,
+	},
 
-    LessonKept(Lesson),
+	LessonKept(Lesson),
 
-    ToolCalled { session: SessionId, name: ToolName, args: serde_json::Value },
-    ToolReturned { session: SessionId, name: ToolName, output: String },
+	ToolCalled {
+		session: SessionId,
+		name: ToolName,
+		args: serde_json::Value,
+	},
+	ToolReturned {
+		session: SessionId,
+		name: ToolName,
+		output: String,
+	},
 }
 
 /// The bus every Event goes onto.
@@ -67,34 +101,34 @@ pub enum Event {
 /// which is the right trade for a trace — the database still holds the state.
 #[derive(Debug)]
 pub struct Events {
-    tx: broadcast::Sender<Event>,
+	tx: broadcast::Sender<Event>,
 }
 
 impl Events {
-    /// A new bus with room for `capacity` events per consumer before the slowest
-    /// one starts losing them.
-    pub fn new(_capacity: usize) -> Self {
-        unimplemented!()
-    }
+	/// A new bus with room for `capacity` events per consumer before the slowest
+	/// one starts losing them.
+	pub fn new(_capacity: usize) -> Self {
+		unimplemented!()
+	}
 
-    /// Put one Event on the bus. Never fails and never blocks: an Event with no
-    /// listeners is simply dropped.
-    pub fn emit(&self, _event: Event) {
-        unimplemented!()
-    }
+	/// Put one Event on the bus. Never fails and never blocks: an Event with no
+	/// listeners is simply dropped.
+	pub fn emit(&self, _event: Event) {
+		unimplemented!()
+	}
 
-    /// Listen from now on. Events emitted before this returns are not replayed —
-    /// a consumer that needs the state so far asks the Store for a snapshot
-    /// first.
-    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
-        unimplemented!()
-    }
+	/// Listen from now on. Events emitted before this returns are not replayed —
+	/// a consumer that needs the state so far asks the Store for a snapshot
+	/// first.
+	pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+		unimplemented!()
+	}
 }
 
 impl Event {
-    /// The category this Event is logged under: `task`, `session`, `llm`,
-    /// `tool`, `meta`, `comms`, `run`.
-    pub fn category(&self) -> &'static str {
-        unimplemented!()
-    }
+	/// The category this Event is logged under: `task`, `session`, `llm`,
+	/// `tool`, `meta`, `comms`, `run`.
+	pub fn category(&self) -> &'static str {
+		unimplemented!()
+	}
 }

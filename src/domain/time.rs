@@ -32,31 +32,31 @@ pub struct Cost(pub i64);
 /// a counter, so it cannot drift from the calls it came from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Spend {
-    pub calls: u32,
-    pub tokens: u64,
-    pub cost: Cost,
+	pub calls: u32,
+	pub tokens: u64,
+	pub cost: Cost,
 }
 
 impl Timestamp {
-    /// This instant plus a span.
-    pub fn plus(self, _d: Duration) -> Timestamp {
-        unimplemented!()
-    }
+	/// This instant plus a span.
+	pub fn plus(self, _d: Duration) -> Timestamp {
+		unimplemented!()
+	}
 
-    /// How long from this instant to a later one. Saturates at zero.
-    pub fn until(self, _later: Timestamp) -> Duration {
-        unimplemented!()
-    }
+	/// How long from this instant to a later one. Saturates at zero.
+	pub fn until(self, _later: Timestamp) -> Duration {
+		unimplemented!()
+	}
 }
 
 impl Duration {
-    pub const fn from_secs(_s: i64) -> Duration {
-        unimplemented!()
-    }
+	pub const fn from_secs(_s: i64) -> Duration {
+		unimplemented!()
+	}
 
-    pub const fn from_millis(_ms: i64) -> Duration {
-        unimplemented!()
-    }
+	pub const fn from_millis(_ms: i64) -> Duration {
+		unimplemented!()
+	}
 }
 
 /// Where wall-clock time comes from.
@@ -65,7 +65,7 @@ impl Duration {
 /// it. Production is [`SystemClock`] and nothing else; a case that swaps it is
 /// testing the Harness rather than the model, and should say so.
 pub trait Clock: Send + Sync {
-    fn now(&self) -> Timestamp;
+	fn now(&self) -> Timestamp;
 }
 
 /// The real clock. What every Sandman run outside a test uses.
@@ -79,37 +79,37 @@ pub struct FixedClock(pub Timestamp);
 /// A clock that only moves when a test moves it.
 #[derive(Debug)]
 pub struct ManualClock {
-    now: std::sync::Mutex<Timestamp>,
+	now: std::sync::Mutex<Timestamp>,
 }
 
 impl Clock for SystemClock {
-    fn now(&self) -> Timestamp {
-        unimplemented!()
-    }
+	fn now(&self) -> Timestamp {
+		unimplemented!()
+	}
 }
 
 impl Clock for FixedClock {
-    fn now(&self) -> Timestamp {
-        unimplemented!()
-    }
+	fn now(&self) -> Timestamp {
+		unimplemented!()
+	}
 }
 
 impl Clock for ManualClock {
-    fn now(&self) -> Timestamp {
-        unimplemented!()
-    }
+	fn now(&self) -> Timestamp {
+		unimplemented!()
+	}
 }
 
 impl ManualClock {
-    pub fn starting_at(_t: Timestamp) -> Self {
-        unimplemented!()
-    }
+	pub fn starting_at(_t: Timestamp) -> Self {
+		unimplemented!()
+	}
 
-    /// Move time forward. Anything waiting on the clock sees the new instant on
-    /// its next read.
-    pub fn advance(&self, _by: Duration) {
-        unimplemented!()
-    }
+	/// Move time forward. Anything waiting on the clock sees the new instant on
+	/// its next read.
+	pub fn advance(&self, _by: Duration) {
+		unimplemented!()
+	}
 }
 
 /// One instant, written for a model to read: weekday, date and time of day.
@@ -118,18 +118,18 @@ impl ManualClock {
 /// of mail — rather than as a tool. A Session that runs for a while needs "just
 /// now" and "earlier" to mean something.
 pub fn stamp(_at: Timestamp) -> String {
-    unimplemented!()
+	unimplemented!()
 }
 
 impl fmt::Display for Cost {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!()
-    }
+	fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		unimplemented!()
+	}
 }
 
 impl std::ops::Add for Cost {
-    type Output = Cost;
-    fn add(self, _rhs: Cost) -> Cost {
-        unimplemented!()
-    }
+	type Output = Cost;
+	fn add(self, _rhs: Cost) -> Cost {
+		unimplemented!()
+	}
 }

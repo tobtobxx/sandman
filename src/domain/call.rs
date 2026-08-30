@@ -18,84 +18,82 @@ use crate::scheduler::Tier;
 /// One exchange with the model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmCall {
-    pub id: CallId,
-    pub run: RunId,
-    /// The Session this call belongs to. Metacognition has no Session of its
-    /// own, so its calls are recorded against the Session it judges — its cost
-    /// lands where the work is.
-    pub session: SessionId,
-    /// Where this call waited. Set when it joins the queue and never changed, so
-    /// a Watcher can see what was prioritised over what.
-    pub tier: Tier,
-    pub model: String,
-    pub request: CallRequest,
-    pub queued_at: Timestamp,
-    pub status: CallStatus,
+	pub id: CallId,
+	pub run: RunId,
+	/// The Session this call belongs to. Metacognition has no Session of its
+	/// own, so its calls are recorded against the Session it judges — its cost
+	/// lands where the work is.
+	pub session: SessionId,
+	/// Where this call waited. Set when it joins the queue and never changed, so
+	/// a Watcher can see what was prioritised over what.
+	pub tier: Tier,
+	pub model: String,
+	pub request: CallRequest,
+	pub queued_at: Timestamp,
+	pub status: CallStatus,
 }
 
 /// What was sent, recorded as it was sent rather than as the Session went on to
 /// accumulate afterwards.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallRequest {
-    pub messages: Vec<Message>,
-    /// Empty for a metacognitive call: neither the review nor the interrupt
-    /// holds any tool.
-    pub tools: Vec<ToolSchema>,
+	pub messages: Vec<Message>,
+	/// Empty for a metacognitive call: neither the review nor the interrupt
+	/// holds any tool.
+	pub tools: Vec<ToolSchema>,
 }
 
 /// Where a call is, and everything that depends on being there.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CallStatus {
-    /// In the scheduler's queue, waiting for the one slot.
-    Queued,
-    /// With the model. At most one call is ever here.
-    InFlight {
-        sent_at: Timestamp,
-    },
-    Done {
-        sent_at: Timestamp,
-        finished_at: Timestamp,
-        reply: Reply,
-        usage: Usage,
-    },
-    /// One attempt, no retry: a failed call already has a full path to a failed
-    /// Result.
-    Failed {
-        sent_at: Timestamp,
-        finished_at: Timestamp,
-        error: String,
-    },
+	/// In the scheduler's queue, waiting for the one slot.
+	Queued,
+	/// With the model. At most one call is ever here.
+	InFlight { sent_at: Timestamp },
+	Done {
+		sent_at: Timestamp,
+		finished_at: Timestamp,
+		reply: Reply,
+		usage: Usage,
+	},
+	/// One attempt, no retry: a failed call already has a full path to a failed
+	/// Result.
+	Failed {
+		sent_at: Timestamp,
+		finished_at: Timestamp,
+		error: String,
+	},
 }
 
 /// What one finished call consumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Usage {
-    pub tokens: u64,
-    pub cost: Cost,
+	pub tokens: u64,
+	pub cost: Cost,
 }
 
 /// Everything needed to record a call as it joins the queue. The Store mints the
 /// id.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewCall {
-    pub session: SessionId,
-    pub tier: Tier,
-    pub model: String,
-    pub request: CallRequest,
+	pub session: SessionId,
+	pub tier: Tier,
+	pub model: String,
+	pub request: CallRequest,
 }
 
 impl CallStatus {
-    pub fn discriminant(&self) -> &'static str {
-        unimplemented!()
-    }
+	pub fn discriminant(&self) -> &'static str {
+		unimplemented!()
+	}
 
-    /// What this call consumed, if it finished successfully. Spend sums these.
-    pub fn usage(&self) -> Option<Usage> {
-        unimplemented!()
-    }
+	/// What this call consumed, if it finished successfully. Spend sums these.
+	pub fn usage(&self) -> Option<Usage> {
+		unimplemented!()
+	}
 
-    /// Whether this call is still expected to produce something.
-    pub fn is_outstanding(&self) -> bool {
-        unimplemented!()
-    }
+	/// Whether this call is still expected to produce something.
+	pub fn is_outstanding(&self) -> bool {
+		unimplemented!()
+	}
 }

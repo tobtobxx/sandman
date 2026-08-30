@@ -53,7 +53,7 @@ pub const SECTIONS: [&str; 3] = ["summary", "feedback", "lessons"];
 
 /// Is this Session due for an interrupt on its next model call?
 pub async fn due_for_interrupt(_ctx: &SessionCtx) -> bool {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// Review one Worker Session's conversation.
@@ -65,7 +65,7 @@ pub async fn due_for_interrupt(_ctx: &SessionCtx) -> bool {
 /// Neither a summary nor feedback means the review had nothing to say, and the
 /// caller falls back to what the Worker itself wrote last.
 pub async fn reflect(_ctx: &SessionCtx) -> Outcome {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// Interrupt a Session mid-turn and ask whether the run is still going somewhere:
@@ -76,7 +76,7 @@ pub async fn reflect(_ctx: &SessionCtx) -> Outcome {
 /// one, and a model that writes it anyway is answering a Task on behalf of a
 /// Session that never offered an answer. An empty answer is the expected one.
 pub async fn interrupt(_ctx: &SessionCtx) -> Nudge {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// One metacognitive call, whichever it is.
@@ -89,12 +89,12 @@ pub async fn interrupt(_ctx: &SessionCtx) -> Nudge {
 /// and is recorded against the Session it judges, so its cost lands where the
 /// work is.
 async fn metacognise(
-    _ctx: &SessionCtx,
-    _kind: crate::domain::ReflectionKind,
-    _system: &str,
-    _question: &str,
+	_ctx: &SessionCtx,
+	_kind: crate::domain::ReflectionKind,
+	_system: &str,
+	_question: &str,
 ) -> Outcome {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// Keep what a metacognition thought was worth keeping.
@@ -104,7 +104,7 @@ async fn metacognise(
 /// conversation it came from — the Session still cannot see what was written
 /// about it.
 async fn keep_lessons(_ctx: &SessionCtx, _session: SessionId, _content: &str) {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// Read one `<name>…</name>` section out of what the metacognition wrote.
@@ -114,5 +114,5 @@ async fn keep_lessons(_ctx: &SessionCtx, _session: SessionId, _content: &str) {
 /// the reply — otherwise an unclosed `<lessons>` swallows the summary written
 /// after it.
 pub fn section(_content: &str, _name: &str) -> Option<String> {
-    unimplemented!()
+	unimplemented!()
 }

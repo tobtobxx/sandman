@@ -27,33 +27,41 @@ pub struct CancelTask;
 
 #[async_trait]
 impl Tool for ListTasks {
-    fn name(&self) -> ToolName {
-        ToolName::ListTasks
-    }
+	fn name(&self) -> ToolName {
+		ToolName::ListTasks
+	}
 
-    fn schema(&self, _ctx: &SchemaCtx) -> ToolSchema {
-        unimplemented!()
-    }
+	fn schema(&self, _ctx: &SchemaCtx) -> ToolSchema {
+		unimplemented!()
+	}
 
-    async fn call(&self, _ctx: &SessionCtx, _args: serde_json::Value) -> String {
-        unimplemented!()
-    }
+	async fn call(
+		&self,
+		_ctx: &SessionCtx,
+		_args: serde_json::Value,
+	) -> String {
+		unimplemented!()
+	}
 }
 
 #[async_trait]
 impl Tool for CancelTask {
-    fn name(&self) -> ToolName {
-        ToolName::CancelTask
-    }
+	fn name(&self) -> ToolName {
+		ToolName::CancelTask
+	}
 
-    fn schema(&self, _ctx: &SchemaCtx) -> ToolSchema {
-        unimplemented!()
-    }
+	fn schema(&self, _ctx: &SchemaCtx) -> ToolSchema {
+		unimplemented!()
+	}
 
-    /// Says what actually happened in words: which Tasks stopped, whether one of
-    /// them was running, and — for a Task already completed or already cancelled
-    /// — that there was nothing to stop.
-    async fn call(&self, _ctx: &SessionCtx, _args: serde_json::Value) -> String {
-        unimplemented!()
-    }
+	/// Says what actually happened in words: which Tasks stopped, whether one of
+	/// them was running, and — for a Task already completed or already cancelled
+	/// — that there was nothing to stop.
+	async fn call(
+		&self,
+		_ctx: &SessionCtx,
+		_args: serde_json::Value,
+	) -> String {
+		unimplemented!()
+	}
 }

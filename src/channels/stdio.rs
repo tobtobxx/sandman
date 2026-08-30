@@ -12,33 +12,33 @@ use crate::domain::{ChannelId, ChannelKind};
 
 /// The terminal, as a Channel.
 pub struct Stdio {
-    id: ChannelId,
+	id: ChannelId,
 }
 
 impl crate::comms::Channel for Stdio {
-    fn id(&self) -> ChannelId {
-        unimplemented!()
-    }
+	fn id(&self) -> ChannelId {
+		unimplemented!()
+	}
 
-    fn kind(&self) -> ChannelKind {
-        ChannelKind::Stdio
-    }
+	fn kind(&self) -> ChannelKind {
+		ChannelKind::Stdio
+	}
 
-    fn send(&self, _text: &str) {
-        unimplemented!()
-    }
+	fn send(&self, _text: &str) {
+		unimplemented!()
+	}
 }
 
 /// Open the terminal Channel and start reading lines from it.
 ///
 /// `/quit` leaves. Everything else is something the human said.
 pub async fn attach(
-    _harness: Arc<crate::harness::Harness>,
+	_harness: Arc<crate::harness::Harness>,
 ) -> Result<ChannelId, crate::store::StoreError> {
-    unimplemented!()
+	unimplemented!()
 }
 
 /// Draw the prompt the human types at.
 pub fn prompt() {
-    unimplemented!()
+	unimplemented!()
 }

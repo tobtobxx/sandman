@@ -26,7 +26,9 @@
 
 use std::sync::Arc;
 
-use crate::domain::{CallRequest, Completion, SessionId, TaskPriority, Timestamp};
+use crate::domain::{
+	CallRequest, Completion, SessionId, TaskPriority, Timestamp,
+};
 use crate::model::{Model, ModelError};
 use crate::store::Store;
 
@@ -34,78 +36,78 @@ use crate::store::Store;
 /// ordering — declaration order is the policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Tier {
-    /// A human is never left behind the swarm.
-    Comms,
-    /// A Worker on a `high` priority Task.
-    TaskHigh,
-    /// A review or an interrupt, so metacognition is not held behind ordinary
-    /// work.
-    Metacognition,
-    /// A Worker on a `normal` priority Task.
-    TaskNormal,
-    /// A Worker on a `low` priority Task.
-    TaskLow,
+	/// A human is never left behind the swarm.
+	Comms,
+	/// A Worker on a `high` priority Task.
+	TaskHigh,
+	/// A review or an interrupt, so metacognition is not held behind ordinary
+	/// work.
+	Metacognition,
+	/// A Worker on a `normal` priority Task.
+	TaskNormal,
+	/// A Worker on a `low` priority Task.
+	TaskLow,
 }
 
 impl From<TaskPriority> for Tier {
-    fn from(_p: TaskPriority) -> Tier {
-        unimplemented!()
-    }
+	fn from(_p: TaskPriority) -> Tier {
+		unimplemented!()
+	}
 }
 
 impl Tier {
-    /// 1 to 5, as the call record and the Watcher show it.
-    pub fn as_number(&self) -> u8 {
-        unimplemented!()
-    }
+	/// 1 to 5, as the call record and the Watcher show it.
+	pub fn as_number(&self) -> u8 {
+		unimplemented!()
+	}
 }
 
 /// The one queue in front of the model.
 pub struct Scheduler {
-    model: Arc<dyn Model>,
-    store: Arc<Store>,
-    inner: tokio::sync::Mutex<Inner>,
+	model: Arc<dyn Model>,
+	store: Arc<Store>,
+	inner: tokio::sync::Mutex<Inner>,
 }
 
 /// The waiting calls and the one in flight. Private: nothing outside decides
 /// what runs next.
 struct Inner {
-    _private: (),
+	_private: (),
 }
 
 /// What can go wrong asking for a model call.
 #[derive(Debug, thiserror::Error)]
 pub enum SchedulerError {
-    #[error(transparent)]
-    Model(#[from] ModelError),
-    #[error(transparent)]
-    Store(#[from] crate::store::StoreError),
+	#[error(transparent)]
+	Model(#[from] ModelError),
+	#[error(transparent)]
+	Store(#[from] crate::store::StoreError),
 }
 
 impl Scheduler {
-    pub fn new(_model: Arc<dyn Model>, _store: Arc<Store>) -> Self {
-        unimplemented!()
-    }
+	pub fn new(_model: Arc<dyn Model>, _store: Arc<Store>) -> Self {
+		unimplemented!()
+	}
 
-    /// Ask the model, and leave a full record of the exchange in the Store
-    /// whatever happens.
-    ///
-    /// The call is recorded the moment it joins the queue, so a Watcher sees it
-    /// waiting. It is sent when it reaches the front and nothing else is in
-    /// flight.
-    pub async fn request(
-        &self,
-        _session: SessionId,
-        _request: CallRequest,
-        _tier: Tier,
-        _now: Timestamp,
-    ) -> Result<Completion, SchedulerError> {
-        unimplemented!()
-    }
+	/// Ask the model, and leave a full record of the exchange in the Store
+	/// whatever happens.
+	///
+	/// The call is recorded the moment it joins the queue, so a Watcher sees it
+	/// waiting. It is sent when it reaches the front and nothing else is in
+	/// flight.
+	pub async fn request(
+		&self,
+		_session: SessionId,
+		_request: CallRequest,
+		_tier: Tier,
+		_now: Timestamp,
+	) -> Result<Completion, SchedulerError> {
+		unimplemented!()
+	}
 
-    /// How many calls are waiting. For a wind-down that wants to know whether
-    /// anything can still spend.
-    pub async fn waiting(&self) -> usize {
-        unimplemented!()
-    }
+	/// How many calls are waiting. For a wind-down that wants to know whether
+	/// anything can still spend.
+	pub async fn waiting(&self) -> usize {
+		unimplemented!()
+	}
 }
