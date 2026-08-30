@@ -24,13 +24,6 @@ Ten steps, bottom up. `cargo check` passes today and must pass after each step.
 
 ### 8. `channels/`, `control.rs`, `bin/sandman.rs` — first runnable Sandman — done
 
-The Web Channel opens (`channels::web::attach`), but `interactive()` does not attach it
-or start a server for it yet — `src/web/` is step 10. `stop()` alone did not wake
-`Harness::run`'s select when the swarm was fully idle (a `/quit` or Ctrl-D could hang
-for up to an hour); fixed with a `tokio::sync::Notify` on the Harness, woken by `stop()`,
-with a matching branch in `run`'s select. Ctrl+C is also wired into `interactive()` now,
-alongside `/quit`.
-
 ### 9. `bench/`, `tests/cases.rs`, `bin/bench.rs`
 
 Watch out:
@@ -52,6 +45,7 @@ Watch out:
 - Nothing in `wire.rs` recomputes. Fields come off the value the Store handed over.
 - Two writes only: a message on the browser's Channel, and a Lessons search — ranked
   in the server, with the embedder the `memory` Role uses.
+- The channel is a stub.
 
 ## Known debt
 
@@ -79,12 +73,6 @@ Watch out:
   would weaken the standalone Brief; neither side of that is obviously right. The pull
   direction does not guess: an answer a Comms Session subscribed to lands in its
   Mailbox with no Worker choosing anything. Push still does.
-
-- **A Worker holding for a repeating Task hears only the first answer.** A Worker that
-  creates a recurring Task and calls `await_result` is released by occurrence one and
-  moves on; later occurrences reach nobody, because a Worker is never a subscriber. A
-  Comms Session subscriber hears every occurrence — that is the shape recurring work
-  should take.
 
 - **Repetition counts intervals, not wall-clock.** `repeat_seconds: 86400` means every
   24 hours from the anchor, not "every morning at nine". Anchored to the schedule so it
