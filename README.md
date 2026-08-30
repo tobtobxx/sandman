@@ -27,6 +27,7 @@ Some additional features:
   precisely.
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — components, seams, invariants, file index.
 - [docs/benchmarking.md](./docs/benchmarking.md) — the bench, and how to add a case.
+- [docs/doc-style.md](./docs/doc-style.md) — how to keep these files short.
 - [TASKS.md](./TASKS.md) — known debt, and what to suspect when it misbehaves.
 - [AGENTS.md](./AGENTS.md) — how to work in this repo.
 
