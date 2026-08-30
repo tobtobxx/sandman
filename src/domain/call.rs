@@ -16,7 +16,7 @@ use super::time::{Cost, Timestamp};
 use crate::scheduler::Tier;
 
 /// One exchange with the model.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LlmCall {
 	pub id: CallId,
 	pub run: RunId,
@@ -35,7 +35,7 @@ pub struct LlmCall {
 
 /// What was sent, recorded as it was sent rather than as the Session went on to
 /// accumulate afterwards.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CallRequest {
 	pub messages: Vec<Message>,
 	/// Empty for a metacognitive call: neither the review nor the interrupt
@@ -44,7 +44,8 @@ pub struct CallRequest {
 }
 
 /// Where a call is, and everything that depends on being there.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CallStatus {
 	/// In the scheduler's queue, waiting for the one slot.
 	Queued,
@@ -66,7 +67,9 @@ pub enum CallStatus {
 }
 
 /// What one finished call consumed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+	Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
 pub struct Usage {
 	pub tokens: u64,
 	pub cost: Cost,
@@ -74,7 +77,7 @@ pub struct Usage {
 
 /// Everything needed to record a call as it joins the queue. The Store mints the
 /// id.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NewCall {
 	pub session: SessionId,
 	pub tier: Tier,

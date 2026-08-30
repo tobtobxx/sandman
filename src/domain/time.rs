@@ -15,22 +15,66 @@
 use std::fmt;
 
 /// An instant, as epoch milliseconds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+	Debug,
+	Clone,
+	Copy,
+	PartialEq,
+	Eq,
+	PartialOrd,
+	Ord,
+	Hash,
+	serde::Serialize,
+	serde::Deserialize,
+)]
 pub struct Timestamp(pub i64);
 
 /// A span of time, in milliseconds. Always positive where the domain uses it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+	Debug,
+	Clone,
+	Copy,
+	PartialEq,
+	Eq,
+	PartialOrd,
+	Ord,
+	Hash,
+	serde::Serialize,
+	serde::Deserialize,
+)]
 pub struct Duration(pub i64);
 
-/// Money, in nano-USD. Sums exactly; prints as six decimal places of a dollar.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+/// Money, in nano-USD. Sums exactly; prints as six decimal places of a dollar —
+/// the last three digits are lost on the way out, so nothing prints a Cost and
+/// reads it back.
+#[derive(
+	Debug,
+	Clone,
+	Copy,
+	Default,
+	PartialEq,
+	Eq,
+	PartialOrd,
+	Ord,
+	serde::Serialize,
+	serde::Deserialize,
+)]
 pub struct Cost(pub i64);
 
 /// What a Run has cost so far.
 ///
 /// Always derived by summing the model calls that finished, never accumulated in
 /// a counter, so it cannot drift from the calls it came from.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(
+	Debug,
+	Clone,
+	Copy,
+	Default,
+	PartialEq,
+	Eq,
+	serde::Serialize,
+	serde::Deserialize,
+)]
 pub struct Spend {
 	pub calls: u32,
 	pub tokens: u64,

@@ -18,7 +18,7 @@ use super::ids::RunId;
 use super::time::Timestamp;
 
 /// One lifetime of Sandman.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Run {
 	pub id: RunId,
 	pub started_at: Timestamp,

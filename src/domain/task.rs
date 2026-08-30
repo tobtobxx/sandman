@@ -20,7 +20,7 @@ use super::time::{Duration, Timestamp};
 use crate::roles::RoleName;
 
 /// One piece of work.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Task {
 	pub id: TaskId,
 	/// The Run this Task belongs to. Spend is scoped to a Run; the Lessons and
@@ -47,7 +47,8 @@ pub struct Task {
 }
 
 /// Where a Task is in its life, and everything that depends on being there.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskState {
 	/// Waiting on the queue. Being picked has exactly one condition: time.
 	Pending,
@@ -67,14 +68,18 @@ pub enum TaskState {
 /// A failure is a Result saying so, not the absence of one. The Harness writes
 /// [`TaskResult::Failed`] when the model could not be reached; every other
 /// Result is chosen by the metacognitive review from what the Worker wrote.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskResult {
 	Succeeded(String),
 	Failed(String),
 }
 
 /// When a Task may run, and whether finishing it arms another.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+	Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Schedule {
 	/// As soon as the queue reaches it.
 	Now,
@@ -90,7 +95,19 @@ pub enum Schedule {
 ///
 /// Distinct from [`crate::scheduler::Tier`], which is where a call waits. This
 /// is the property of the work; the Tier is the position in the queue.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+	Debug,
+	Clone,
+	Copy,
+	Default,
+	PartialEq,
+	Eq,
+	PartialOrd,
+	Ord,
+	serde::Serialize,
+	serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskPriority {
 	High,
 	#[default]
@@ -99,7 +116,10 @@ pub enum TaskPriority {
 }
 
 /// Who put this Task on the queue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+	Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Creator {
 	/// A Session, through one of the create-task tools.
 	Session(SessionId),
@@ -110,7 +130,7 @@ pub enum Creator {
 }
 
 /// Everything needed to put a Task on the queue. The Store mints the id.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewTask {
 	pub title: Title,
 	pub brief: Brief,
@@ -123,7 +143,7 @@ pub struct NewTask {
 
 /// A Task as the control socket and `list_tasks` report it: enough to recognise
 /// one and to cancel it, without its whole Brief and Result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaskSummary {
 	pub id: TaskId,
 	pub title: Title,

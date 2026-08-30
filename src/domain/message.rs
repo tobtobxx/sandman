@@ -19,7 +19,8 @@
 use super::time::Cost;
 
 /// One message in a Session's context.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Message {
 	/// The Role's system prompt. A Session has exactly one, first.
 	System { content: String },
@@ -37,7 +38,8 @@ pub enum Message {
 }
 
 /// What an assistant message carries: an ending, or work in progress.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AssistantBody {
 	/// Plain text and no tool calls. For a Worker this triggers a review; for a
 	/// Comms Session it is something to say to the human.
@@ -50,7 +52,8 @@ pub enum AssistantBody {
 }
 
 /// What one model call gave back.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Reply {
 	Text(String),
 	Calls {
@@ -64,7 +67,7 @@ pub enum Reply {
 
 /// One tool call, as the model asked for it. Arguments arrive as a JSON string
 /// and are parsed by the tool that owns them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
 	pub id: String,
 	pub name: String,
@@ -76,7 +79,7 @@ pub struct ToolCall {
 /// `parameters` is a JSON Schema object. It is written by hand in each tool
 /// rather than derived, because the descriptions in it are prompt text and are
 /// part of what is being tuned.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolSchema {
 	pub name: String,
 	pub description: String,
@@ -84,7 +87,7 @@ pub struct ToolSchema {
 }
 
 /// What the transport brings back from one exchange: the reply, and what it cost.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Completion {
 	pub reply: Reply,
 	pub reasoning: Option<String>,
@@ -128,6 +131,28 @@ impl<T> NonEmpty<T> {
 
 	pub fn iter(&self) -> impl Iterator<Item = &T> {
 		std::iter::once(&self.head).chain(self.tail.iter())
+	}
+}
+
+/// A plain array, both ways. Derived impls would spell it `head` and `tail` in
+/// every stored assistant message and on every wire frame, which is the shape of
+/// the guarantee rather than the shape of the data.
+impl<T: serde::Serialize> serde::Serialize for NonEmpty<T> {
+	fn serialize<S: serde::Serializer>(
+		&self,
+		_s: S,
+	) -> Result<S::Ok, S::Error> {
+		unimplemented!()
+	}
+}
+
+/// Reads an array back, and refuses an empty one — the invariant survives a
+/// round trip through the database rather than being re-checked after it.
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for NonEmpty<T> {
+	fn deserialize<D: serde::Deserializer<'de>>(
+		_d: D,
+	) -> Result<Self, D::Error> {
+		unimplemented!()
 	}
 }
 

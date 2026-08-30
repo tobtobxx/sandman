@@ -22,7 +22,7 @@ use super::time::Timestamp;
 use crate::roles::RoleName;
 
 /// One live agent context.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Session {
 	pub id: SessionId,
 	pub run: RunId,
@@ -42,7 +42,8 @@ pub struct Session {
 }
 
 /// Which shape of Session this is, and what only that shape has.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionKind {
 	/// Created from a Task, ends when that Task completes. It sees the Brief and
 	/// nothing of the work that led to it.
@@ -59,7 +60,8 @@ pub enum SessionKind {
 }
 
 /// What a Session is doing now.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
 	/// A model call is out.
 	Thinking,
@@ -81,7 +83,7 @@ pub enum SessionStatus {
 }
 
 /// Everything needed to start a Session. The Store mints the id.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewSession {
 	pub kind: SessionKind,
 	pub status: SessionStatus,
@@ -91,7 +93,7 @@ pub struct NewSession {
 }
 
 /// One piece of post for a Comms Session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Incoming {
 	pub from: IncomingFrom,
 	pub text: String,
@@ -99,7 +101,10 @@ pub struct Incoming {
 }
 
 /// Who sent a piece of post: the human on the Channel, or the swarm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+	Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum IncomingFrom {
 	Human,
 	Swarm,
@@ -112,7 +117,7 @@ pub enum IncomingFrom {
 /// It is never part of the Session's context. The Session cannot see what was
 /// written about it, and only the feedback it produced ever reaches the
 /// conversation, as a message of its own.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Reflection {
 	pub kind: ReflectionKind,
 	/// The model call that produced it, so its full request can be opened. Not
@@ -132,14 +137,18 @@ pub struct Reflection {
 /// answer. An interrupt runs mid-turn, on a message count, and never can — the
 /// Session it is watching has not offered an answer. That rule is enforced at
 /// the seam by [`Nudge`]; the record itself stays one shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+	Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum ReflectionKind {
 	Review,
 	Interrupt,
 }
 
 /// What came of one metacognitive call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReflectionResult {
 	Ran {
 		/// The metacognition's own reasoning, when the model exposes it.
@@ -154,7 +163,8 @@ pub enum ReflectionResult {
 }
 
 /// Which move a metacognition took.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Outcome {
 	/// The Task's answer, as the review's `<summary>` wrote it.
 	Complete(String),
@@ -168,7 +178,8 @@ pub enum Outcome {
 ///
 /// A separate type from [`Outcome`], not a subset checked at runtime: an
 /// interrupt that cannot return a completion cannot be asked to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Nudge {
 	Feedback(String),
 	Nothing,

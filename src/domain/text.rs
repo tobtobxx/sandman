@@ -7,6 +7,10 @@
 //! edge where a model's argument becomes a domain value, and every reader after
 //! that point is spared it.
 //!
+//! Reading one back off a database row goes through the same check:
+//! `#[serde(try_from = "String")]`, so there is no second way in. Writing one out
+//! is the bare string — a newtype serialises as what it wraps.
+//!
 //! Defines: [`Title`], [`Brief`], [`Day`], [`TextError`].
 
 use std::fmt;
@@ -16,21 +20,54 @@ use std::fmt;
 ///
 /// Non-empty, and newlines are collapsed on the way in — a Title that wraps is
 /// a Title that no longer scans.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+	Debug,
+	Clone,
+	PartialEq,
+	Eq,
+	PartialOrd,
+	Ord,
+	Hash,
+	serde::Serialize,
+	serde::Deserialize,
+)]
+#[serde(try_from = "String")]
 pub struct Title(String);
 
 /// The instructions a Task carries.
 ///
 /// A Session starts fresh and sees nothing of the work that led to it, so this
 /// must stand alone: it is the only thing the Worker gets. Non-empty.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+	Debug,
+	Clone,
+	PartialEq,
+	Eq,
+	PartialOrd,
+	Ord,
+	Hash,
+	serde::Serialize,
+	serde::Deserialize,
+)]
+#[serde(try_from = "String")]
 pub struct Brief(String);
 
 /// A local calendar day, `YYYY-MM-DD`.
 ///
 /// Local rather than UTC, because this is a date a human reads off a search hit
 /// for a lesson.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+	Debug,
+	Clone,
+	PartialEq,
+	Eq,
+	PartialOrd,
+	Ord,
+	Hash,
+	serde::Serialize,
+	serde::Deserialize,
+)]
+#[serde(try_from = "String")]
 pub struct Day(String);
 
 /// Why a piece of text could not become the domain value it was offered as.

@@ -131,6 +131,45 @@ impl std::fmt::Display for ToolName {
 	}
 }
 
+// Both names are written by hand rather than derived, and both go through
+// `as_str` and `parse`. These two names are read by the model, stored in the
+// database and put on the wire at once; a derive would name them a fourth way of
+// its own, and nothing would catch the day that name and `as_str` disagreed.
+
+impl serde::Serialize for RoleName {
+	fn serialize<S: serde::Serializer>(
+		&self,
+		_s: S,
+	) -> Result<S::Ok, S::Error> {
+		unimplemented!()
+	}
+}
+
+impl<'de> serde::Deserialize<'de> for RoleName {
+	fn deserialize<D: serde::Deserializer<'de>>(
+		_d: D,
+	) -> Result<Self, D::Error> {
+		unimplemented!()
+	}
+}
+
+impl serde::Serialize for ToolName {
+	fn serialize<S: serde::Serializer>(
+		&self,
+		_s: S,
+	) -> Result<S::Ok, S::Error> {
+		unimplemented!()
+	}
+}
+
+impl<'de> serde::Deserialize<'de> for ToolName {
+	fn deserialize<D: serde::Deserializer<'de>>(
+		_d: D,
+	) -> Result<Self, D::Error> {
+		unimplemented!()
+	}
+}
+
 /// What a tool needs to know about the world to describe itself.
 ///
 /// Schemas are built for each Session rather than declared once, because

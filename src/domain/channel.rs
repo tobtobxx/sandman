@@ -15,7 +15,7 @@ use super::ids::{ChannelId, SessionId};
 use super::time::Timestamp;
 
 /// One open connection to a human, as the Store holds it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChannelRecord {
 	pub id: ChannelId,
 	/// How this Channel reaches its human, for a person reading the UI.
@@ -27,7 +27,10 @@ pub struct ChannelRecord {
 }
 
 /// What kind of transport a Channel sits on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+	Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum ChannelKind {
 	/// The terminal Sandman was started in.
 	Stdio,
@@ -39,7 +42,7 @@ pub enum ChannelKind {
 }
 
 /// One thing said on a Channel.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Utterance {
 	pub who: Who,
 	pub text: String,
@@ -47,7 +50,10 @@ pub struct Utterance {
 }
 
 /// Which side of a Channel spoke.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+	Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Who {
 	Human,
 	Sandman,

@@ -23,7 +23,7 @@ use super::time::Timestamp;
 use crate::roles::RoleName;
 
 /// One thing metacognition thought was worth keeping.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Lesson {
 	pub id: LessonId,
 	/// The Run it was written in. Recorded, but not a filter: a search reaches
@@ -39,7 +39,8 @@ pub struct Lesson {
 }
 
 /// What a lesson is about, so a search hit can be placed without a second lookup.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LessonSubject {
 	/// From a Worker Session: the work it was doing.
 	Task { task: TaskId, role: RoleName, title: Title },
@@ -49,7 +50,7 @@ pub enum LessonSubject {
 }
 
 /// Everything needed to keep a lesson. The Store mints the id.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewLesson {
 	pub text: String,
 	pub session: SessionId,
@@ -57,7 +58,7 @@ pub struct NewLesson {
 }
 
 /// One result of a search by meaning, and how close it was.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Hit<T> {
 	pub item: T,
 	pub score: f32,

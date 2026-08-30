@@ -34,7 +34,19 @@ use crate::store::Store;
 
 /// Where a call waits. Lower runs first, and the derived ordering is the
 /// ordering — declaration order is the policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+	Debug,
+	Clone,
+	Copy,
+	PartialEq,
+	Eq,
+	PartialOrd,
+	Ord,
+	Hash,
+	serde::Serialize,
+	serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Tier {
 	/// A human is never left behind the swarm.
 	Comms,
