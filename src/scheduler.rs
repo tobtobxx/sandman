@@ -35,6 +35,9 @@ use crate::store::Store;
 
 /// Where a call waits. Lower runs first, and the derived ordering is the
 /// ordering — declaration order is the policy.
+///
+/// The 1..=5 the call record and the Watcher show is the `repr`, so the number
+/// and the order cannot disagree: `u8::from(tier)` counts up as the tier falls.
 #[derive(
 	Debug,
 	Clone,
@@ -46,20 +49,23 @@ use crate::store::Store;
 	Hash,
 	serde::Serialize,
 	serde::Deserialize,
+	num_enum::IntoPrimitive,
+	num_enum::TryFromPrimitive,
 )]
 #[serde(rename_all = "snake_case")]
+#[repr(u8)]
 pub enum Tier {
 	/// A human is never left behind the swarm.
-	Comms,
+	Comms = 1,
 	/// A Worker on a `high` priority Task.
-	TaskHigh,
+	TaskHigh = 2,
 	/// A review or an interrupt, so metacognition is not held behind ordinary
 	/// work.
-	Metacognition,
+	Metacognition = 3,
 	/// A Worker on a `normal` priority Task.
-	TaskNormal,
+	TaskNormal = 4,
 	/// A Worker on a `low` priority Task.
-	TaskLow,
+	TaskLow = 5,
 }
 
 impl From<TaskPriority> for Tier {
@@ -68,19 +74,6 @@ impl From<TaskPriority> for Tier {
 			TaskPriority::High => Tier::TaskHigh,
 			TaskPriority::Normal => Tier::TaskNormal,
 			TaskPriority::Low => Tier::TaskLow,
-		}
-	}
-}
-
-impl Tier {
-	/// 1 to 5, as the call record and the Watcher show it.
-	pub fn as_number(&self) -> u8 {
-		match self {
-			Tier::Comms => 1,
-			Tier::TaskHigh => 2,
-			Tier::Metacognition => 3,
-			Tier::TaskNormal => 4,
-			Tier::TaskLow => 5,
 		}
 	}
 }

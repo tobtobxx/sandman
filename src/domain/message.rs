@@ -19,8 +19,18 @@
 use super::time::Cost;
 
 /// One message in a Session's context.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+	Debug,
+	Clone,
+	PartialEq,
+	Eq,
+	serde::Serialize,
+	serde::Deserialize,
+	strum::Display,
+	strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Message {
 	/// The Role's system prompt. A Session has exactly one, first.
 	System { content: String },

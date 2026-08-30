@@ -28,9 +28,19 @@ pub struct ChannelRecord {
 
 /// What kind of transport a Channel sits on.
 #[derive(
-	Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+	Debug,
+	Clone,
+	Copy,
+	PartialEq,
+	Eq,
+	serde::Serialize,
+	serde::Deserialize,
+	strum::Display,
+	strum::EnumString,
+	strum::IntoStaticStr,
 )]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ChannelKind {
 	/// The terminal Sandman was started in.
 	Stdio,
@@ -51,20 +61,20 @@ pub struct Utterance {
 
 /// Which side of a Channel spoke.
 #[derive(
-	Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+	Debug,
+	Clone,
+	Copy,
+	PartialEq,
+	Eq,
+	serde::Serialize,
+	serde::Deserialize,
+	strum::Display,
+	strum::EnumString,
+	strum::IntoStaticStr,
 )]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Who {
 	Human,
 	Sandman,
-}
-
-impl ChannelKind {
-	pub fn discriminant(&self) -> &'static str {
-		match self {
-			ChannelKind::Stdio => "stdio",
-			ChannelKind::Web => "web",
-			ChannelKind::Scripted => "scripted",
-		}
-	}
 }

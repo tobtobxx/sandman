@@ -14,8 +14,9 @@
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use strum::{IntoDiscriminant, VariantArray};
 
-use crate::domain::{TaskId, TaskSummary, ToolSchema};
+use crate::domain::{TaskId, TaskStateName, TaskSummary, ToolSchema};
 use crate::harness::CancelOutcome;
 use crate::roles::{SchemaCtx, ToolName};
 use crate::session::SessionCtx;
@@ -35,7 +36,11 @@ impl Tool for ListTasks {
 		ToolName::ListTasks
 	}
 
+	/// The `state` enum is built from every [`TaskStateName`], so it cannot name
+	/// a state a Task can never be in.
 	fn schema(&self, _ctx: &SchemaCtx) -> ToolSchema {
+		let states: Vec<&'static str> =
+			TaskStateName::VARIANTS.iter().map(Into::into).collect();
 		ToolSchema {
 			name: self.name().to_string(),
 			description: "Enumerate the queue, newest first.".to_string(),
@@ -44,7 +49,7 @@ impl Tool for ListTasks {
 				"properties": {
 					"state": {
 						"type": "string",
-						"enum": ["pending", "running", "completed", "cancelled"],
+						"enum": states,
 						"description": "Only Tasks in this state. Omit for every state.",
 					},
 					"count": {
@@ -60,15 +65,14 @@ impl Tool for ListTasks {
 	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String {
 		let state = match args.get("state").and_then(|v| v.as_str()) {
 			None => None,
-			Some("pending") => Some("pending"),
-			Some("running") => Some("running"),
-			Some("completed") => Some("completed"),
-			Some("cancelled") => Some("cancelled"),
-			Some(other) => {
-				return ToolError::Rejected(format!(
-					"`{other}` is not a Task state."
-				))
-				.to_string();
+			Some(given) => match given.parse() {
+				Ok(state) => Some(state),
+				Err(_) => {
+					return ToolError::Rejected(format!(
+						"`{given}` is not a Task state."
+					))
+					.to_string();
+				},
 			},
 		};
 		let count = args

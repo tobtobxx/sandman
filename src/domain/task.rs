@@ -47,8 +47,29 @@ pub struct Task {
 }
 
 /// Where a Task is in its life, and everything that depends on being there.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// [`TaskStateName`] is the same set with the payloads taken off: the one word a
+/// state goes into the database and onto the wire under, and the only thing a
+/// filter can name. It is derived from this enum, so a state cannot exist that a
+/// filter cannot ask for.
+#[derive(
+	Debug,
+	Clone,
+	PartialEq,
+	Eq,
+	serde::Serialize,
+	serde::Deserialize,
+	strum::EnumDiscriminants,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum_discriminants(name(TaskStateName))]
+#[strum_discriminants(derive(
+	strum::Display,
+	strum::EnumString,
+	strum::IntoStaticStr,
+	strum::VariantArray
+))]
+#[strum_discriminants(strum(serialize_all = "snake_case"))]
 pub enum TaskState {
 	/// Waiting on the queue. Being picked has exactly one condition: time.
 	Pending,
@@ -77,9 +98,18 @@ pub enum TaskResult {
 
 /// When a Task may run, and whether finishing it arms another.
 #[derive(
-	Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+	Debug,
+	Clone,
+	Copy,
+	PartialEq,
+	Eq,
+	serde::Serialize,
+	serde::Deserialize,
+	strum::Display,
+	strum::IntoStaticStr,
 )]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Schedule {
 	/// As soon as the queue reaches it.
 	Now,
@@ -106,26 +136,17 @@ pub enum Schedule {
 	Ord,
 	serde::Serialize,
 	serde::Deserialize,
+	strum::Display,
+	strum::EnumString,
+	strum::IntoStaticStr,
 )]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum TaskPriority {
 	High,
 	#[default]
 	Normal,
 	Low,
-}
-
-impl TaskPriority {
-	/// The three names it goes by on a tool call, the control socket and the
-	/// command line — one parser, so they cannot drift apart.
-	pub fn parse(name: &str) -> Option<TaskPriority> {
-		match name {
-			"high" => Some(TaskPriority::High),
-			"normal" => Some(TaskPriority::Normal),
-			"low" => Some(TaskPriority::Low),
-			_ => None,
-		}
-	}
 }
 
 /// Who put this Task on the queue.
@@ -167,16 +188,6 @@ pub struct TaskSummary {
 }
 
 impl TaskState {
-	/// The one-word name this state goes into the database and the wire under.
-	pub fn discriminant(&self) -> &'static str {
-		match self {
-			TaskState::Pending => "pending",
-			TaskState::Running { .. } => "running",
-			TaskState::Completed { .. } => "completed",
-			TaskState::Cancelled { .. } => "cancelled",
-		}
-	}
-
 	/// Whether nothing further will happen to a Task in this state.
 	pub fn is_terminal(&self) -> bool {
 		matches!(

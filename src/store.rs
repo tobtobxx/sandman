@@ -28,6 +28,7 @@
 use std::sync::Arc;
 
 use rusqlite::{OptionalExtension, Row};
+use strum::IntoDiscriminant;
 
 use crate::db::{Backing, DbError};
 use crate::domain::{
@@ -35,10 +36,9 @@ use crate::domain::{
 	Duration, Incoming, Lesson, LessonId, LlmCall, Message, NewCall, NewLesson,
 	NewSession, NewTask, Reflection, Run, RunId, Schedule, Session, SessionId,
 	SessionKind, SessionStatus, Spend, Task, TaskId, TaskResult, TaskState,
-	TaskSummary, Timestamp, Title, Utterance,
+	TaskStateName, TaskSummary, Timestamp, Title, Utterance,
 };
 use crate::event::{Event, Events};
-use crate::roles::RoleName;
 
 /// All of Sandman's state.
 pub struct Store {
@@ -61,7 +61,7 @@ pub enum StoreError {
 	/// The belt behind every caller's own check. A cancelled Task must never
 	/// complete, and no Task may complete twice.
 	#[error("task {task} is {state}, not running; it will not be completed")]
-	NotRunning { task: TaskId, state: &'static str },
+	NotRunning { task: TaskId, state: TaskStateName },
 }
 
 /// A `rusqlite::Result` or a `serde_json::Result` on its way to becoming a
@@ -128,7 +128,7 @@ pub struct Snapshot {
 /// What `list_tasks` narrows the queue to.
 #[derive(Debug, Clone, Default)]
 pub struct ListFilter {
-	pub state: Option<&'static str>,
+	pub state: Option<TaskStateName>,
 	pub count: Option<usize>,
 }
 
@@ -239,7 +239,7 @@ impl Store {
 				self.run.0,
 				new.title.as_str(),
 				new.brief.as_str(),
-				new.role.as_str(),
+				new.role.to_string(),
 				state_row.tag,
 				state_row.json,
 				schedule_row.tag,
@@ -470,7 +470,7 @@ impl Store {
 		let created_by = serde_json::to_string(&anchor.created_by).store()?;
 		let mut rows = stmt
 			.query(rusqlite::params![
-				anchor.role.as_str(),
+				anchor.role.to_string(),
 				anchor.title.as_str(),
 				anchor.brief.as_str(),
 				anchor.subscriber.map(|c| c.0),
@@ -508,7 +508,7 @@ impl Store {
 
 		if let Some(state) = filter.state {
 			sql.push_str(" AND state = ?");
-			params.push(Box::new(state));
+			params.push(Box::new(<&str>::from(state)));
 		}
 		sql.push_str(" ORDER BY id DESC");
 		if let Some(count) = filter.count {
@@ -538,8 +538,9 @@ impl Store {
 				id: TaskId(id as u32),
 				title: Title::try_from(title)
 					.map_err(|e| DbError::Corrupt(e.to_string()))?,
-				role: RoleName::parse(&role).ok_or_else(|| {
-					DbError::UnknownVariant { what: "role", tag: role }
+				role: role.parse().map_err(|_| DbError::UnknownVariant {
+					what: "role",
+					tag: role,
 				})?,
 				state: crate::db::rows::task_state_from_row(
 					&state_tag,
@@ -596,12 +597,9 @@ impl Store {
 		let id = SessionId(crate::db::counters::take(&tx, SessionId::COUNTER)?);
 
 		let (kind_tag, task, role, channel) = match &new.kind {
-			SessionKind::Worker { task, role } => (
-				"worker",
-				Some(task.0 as i64),
-				Some(role.as_str().to_string()),
-				None,
-			),
+			SessionKind::Worker { task, role } => {
+				("worker", Some(task.0 as i64), Some(role.to_string()), None)
+			},
 			SessionKind::Comms { channel, .. } => {
 				("comms", None, None, Some(channel.0 as i64))
 			},
@@ -791,7 +789,7 @@ impl Store {
 			rusqlite::params![
 				id.0,
 				index,
-				crate::db::rows::reflection_kind_to_str(r.kind),
+				<&str>::from(r.kind),
 				r.call.0,
 				r.after_message as i64,
 				row.tag,
@@ -876,7 +874,7 @@ impl Store {
 			rusqlite::params![
 				id.0,
 				index,
-				crate::db::rows::incoming_from_to_str(incoming.from),
+				<&str>::from(incoming.from),
 				incoming.text,
 				incoming.at.0,
 			],
@@ -958,7 +956,7 @@ impl Store {
 				id.0,
 				self.run.0,
 				new.session.0,
-				new.tier.as_number(),
+				u8::from(new.tier),
 				new.model,
 				request_json,
 				status_row.tag,
@@ -1119,7 +1117,7 @@ impl Store {
 
 		tx.execute(
 			"INSERT INTO channels (id, kind, session) VALUES (?1,?2,?3)",
-			rusqlite::params![channel_id.0, kind.discriminant(), session_id.0],
+			rusqlite::params![channel_id.0, <&str>::from(kind), session_id.0],
 		)
 		.store()?;
 
@@ -1155,7 +1153,7 @@ impl Store {
 		let id = ChannelId(crate::db::counters::take(&tx, ChannelId::COUNTER)?);
 		tx.execute(
 			"INSERT INTO channels (id, kind, session) VALUES (?1,?2,?3)",
-			rusqlite::params![id.0, kind.discriminant(), session.0],
+			rusqlite::params![id.0, <&str>::from(kind), session.0],
 		)
 		.store()?;
 		tx.commit().store()?;
@@ -1185,7 +1183,7 @@ impl Store {
 			rusqlite::params![
 				channel.0,
 				index,
-				crate::db::rows::who_to_str(utterance.who),
+				<&str>::from(utterance.who),
 				utterance.text,
 				utterance.at.0,
 			],

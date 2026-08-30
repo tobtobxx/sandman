@@ -115,7 +115,7 @@ impl ToolRunner for Registry {
 	/// back as a sentence the model can act on rather than as anything that
 	/// stops the turn.
 	async fn run(&self, ctx: &SessionCtx, call: &ToolCall) -> String {
-		let Some(name) = ToolName::parse(&call.name) else {
+		let Ok(name) = call.name.parse::<ToolName>() else {
 			return ToolError::NoSuchTool(call.name.clone()).to_string();
 		};
 
@@ -162,9 +162,9 @@ pub enum ToolError {
 	NoSuchTask(String),
 	#[error(
 		"Error: `{given}` is not a Role. Not one of: {}",
-		crate::roles::ROLE_NAMES
+		<crate::roles::RoleName as strum::VariantArray>::VARIANTS
 			.iter()
-			.map(|r| r.as_str())
+			.map(|r| r.to_string())
 			.collect::<Vec<_>>()
 			.join(", ")
 	)]

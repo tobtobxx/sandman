@@ -42,8 +42,18 @@ pub struct Session {
 }
 
 /// Which shape of Session this is, and what only that shape has.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+	Debug,
+	Clone,
+	PartialEq,
+	Eq,
+	serde::Serialize,
+	serde::Deserialize,
+	strum::Display,
+	strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum SessionKind {
 	/// Created from a Task, ends when that Task completes. It sees the Brief and
 	/// nothing of the work that led to it.
@@ -60,8 +70,18 @@ pub enum SessionKind {
 }
 
 /// What a Session is doing now.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+	Debug,
+	Clone,
+	PartialEq,
+	Eq,
+	serde::Serialize,
+	serde::Deserialize,
+	strum::Display,
+	strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum SessionStatus {
 	/// A model call is out.
 	Thinking,
@@ -102,9 +122,19 @@ pub struct Incoming {
 
 /// Who sent a piece of post: the human on the Channel, or the swarm.
 #[derive(
-	Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+	Debug,
+	Clone,
+	Copy,
+	PartialEq,
+	Eq,
+	serde::Serialize,
+	serde::Deserialize,
+	strum::Display,
+	strum::EnumString,
+	strum::IntoStaticStr,
 )]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum IncomingFrom {
 	Human,
 	Swarm,
@@ -138,17 +168,37 @@ pub struct Reflection {
 /// Session it is watching has not offered an answer. That rule is enforced at
 /// the seam by [`Nudge`]; the record itself stays one shape.
 #[derive(
-	Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+	Debug,
+	Clone,
+	Copy,
+	PartialEq,
+	Eq,
+	serde::Serialize,
+	serde::Deserialize,
+	strum::Display,
+	strum::EnumString,
+	strum::IntoStaticStr,
 )]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ReflectionKind {
 	Review,
 	Interrupt,
 }
 
 /// What came of one metacognitive call.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+	Debug,
+	Clone,
+	PartialEq,
+	Eq,
+	serde::Serialize,
+	serde::Deserialize,
+	strum::Display,
+	strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ReflectionResult {
 	Ran {
 		/// The metacognition's own reasoning, when the model exposes it.
@@ -218,28 +268,9 @@ impl SessionKind {
 			SessionKind::Comms { .. } => None,
 		}
 	}
-
-	pub fn discriminant(&self) -> &'static str {
-		match self {
-			SessionKind::Worker { .. } => "worker",
-			SessionKind::Comms { .. } => "comms",
-		}
-	}
 }
 
 impl SessionStatus {
-	pub fn discriminant(&self) -> &'static str {
-		match self {
-			SessionStatus::Thinking => "thinking",
-			SessionStatus::Tools => "tools",
-			SessionStatus::Reflecting => "reflecting",
-			SessionStatus::Waiting => "waiting",
-			SessionStatus::Idle => "idle",
-			SessionStatus::Finished => "finished",
-			SessionStatus::Failed { .. } => "failed",
-		}
-	}
-
 	pub fn is_terminal(&self) -> bool {
 		matches!(self, SessionStatus::Finished | SessionStatus::Failed { .. })
 	}

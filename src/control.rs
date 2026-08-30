@@ -21,6 +21,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use strum::IntoDiscriminant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -191,13 +192,10 @@ async fn handle(harness: &Arc<Harness>, request: Request) -> Response {
 			repeat_seconds,
 			priority,
 		} => {
-			let role = match RoleName::parse(&role) {
-				Some(role) => role,
-				None => {
-					return Response::Error {
-						message: format!("`{role}` is not a Role."),
-					};
-				},
+			let Ok(role) = role.parse::<RoleName>() else {
+				return Response::Error {
+					message: format!("`{role}` is not a Role."),
+				};
 			};
 			let title = match Title::try_from(title) {
 				Ok(title) => title,
@@ -209,9 +207,9 @@ async fn handle(harness: &Arc<Harness>, request: Request) -> Response {
 			};
 			let priority = match priority.as_deref() {
 				None => TaskPriority::default(),
-				Some(given) => match TaskPriority::parse(given) {
-					Some(p) => p,
-					None => {
+				Some(given) => match given.parse() {
+					Ok(p) => p,
+					Err(_) => {
 						return Response::Error {
 							message: format!(
 								"`{given}` is not a priority. Use high, \
@@ -242,16 +240,15 @@ async fn handle(harness: &Arc<Harness>, request: Request) -> Response {
 		},
 
 		Request::ListTasks { state, count } => {
-			let state = match state.as_deref() {
+			let state = match &state {
 				None => None,
-				Some("pending") => Some("pending"),
-				Some("running") => Some("running"),
-				Some("completed") => Some("completed"),
-				Some("cancelled") => Some("cancelled"),
-				Some(other) => {
-					return Response::Error {
-						message: format!("`{other}` is not a Task state."),
-					};
+				Some(given) => match given.parse() {
+					Ok(state) => Some(state),
+					Err(_) => {
+						return Response::Error {
+							message: format!("`{given}` is not a Task state."),
+						};
+					},
 				},
 			};
 			match harness.store.list_tasks(ListFilter { state, count }) {
@@ -284,7 +281,7 @@ impl From<TaskSummary> for TaskLine {
 		TaskLine {
 			id: t.id.to_string(),
 			title: t.title.to_string(),
-			role: t.role.as_str().to_string(),
+			role: t.role.to_string(),
 			state: t.state.discriminant().to_string(),
 			not_before: t.schedule.not_before(t.created_at).map(|ts| ts.0),
 			created_at: t.created_at.0,

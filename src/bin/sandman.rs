@@ -294,15 +294,17 @@ async fn one_shot(
 ) -> Result<(), String> {
 	let harness = assemble(&paths, verbosity).await?;
 
-	let role = RoleName::parse(&args.role)
-		.ok_or_else(|| format!("`{}` is not a Role.", args.role))?;
+	let role = args
+		.role
+		.parse::<RoleName>()
+		.map_err(|_| format!("`{}` is not a Role.", args.role))?;
 	let title =
 		Title::try_from(args.title.unwrap_or_else(|| args.brief.clone()))
 			.map_err(|e| e.to_string())?;
 	let brief = Brief::try_from(args.brief).map_err(|e| e.to_string())?;
 	let priority = match args.priority.as_deref() {
 		None => TaskPriority::default(),
-		Some(given) => TaskPriority::parse(given).ok_or_else(|| {
+		Some(given) => given.parse().map_err(|_| {
 			format!("`{given}` is not a priority. Use high, normal or low.")
 		})?,
 	};

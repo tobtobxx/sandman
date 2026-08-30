@@ -14,13 +14,29 @@
 //! catalogue in the prompts still named it, and a Worker could argue with that
 //! contradiction for a whole run.
 //!
+//! Every Role, in catalogue order, is `RoleName::VARIANTS`.
+//!
 //! Defines: [`RoleName`], [`ToolName`], [`system_prompt`], [`tools_for`],
 //! [`COMMS_SESSION_TOOLS`].
 
 use crate::domain::ToolSchema;
 
 /// Which kind of Worker does a Task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+	Debug,
+	Clone,
+	Copy,
+	PartialEq,
+	Eq,
+	PartialOrd,
+	Ord,
+	Hash,
+	strum::Display,
+	strum::EnumString,
+	strum::IntoStaticStr,
+	strum::VariantArray,
+)]
+#[strum(serialize_all = "snake_case")]
 pub enum RoleName {
 	/// Finds things out in the world. Searches and reads the web, and answers
 	/// with the URLs it relied on.
@@ -38,7 +54,20 @@ pub enum RoleName {
 }
 
 /// One tool, by name. The closed set; `tools/` holds what each one does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+	Debug,
+	Clone,
+	Copy,
+	PartialEq,
+	Eq,
+	PartialOrd,
+	Ord,
+	Hash,
+	strum::Display,
+	strum::EnumString,
+	strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "snake_case")]
 pub enum ToolName {
 	/// Enqueue a planning Task. The common case, with no Role or timing to get
 	/// wrong.
@@ -59,14 +88,6 @@ pub enum ToolName {
 	ListTasks,
 	CancelTask,
 }
-
-/// Every Role, in catalogue order.
-pub const ROLE_NAMES: [RoleName; 4] = [
-	RoleName::Research,
-	RoleName::Planning,
-	RoleName::Memory,
-	RoleName::TaskManager,
-];
 
 /// The Comms Session is not a Worker and has no Role, but it still needs tools.
 /// It never ends, so it is never told to produce a Result.
@@ -125,85 +146,15 @@ pub fn tools_for(role: RoleName) -> &'static [ToolName] {
 	}
 }
 
-impl RoleName {
-	/// The name this Role goes by on the wire, in a Brief and in the database.
-	pub fn as_str(&self) -> &'static str {
-		match self {
-			RoleName::Research => "research",
-			RoleName::Planning => "planning",
-			RoleName::Memory => "memory",
-			RoleName::TaskManager => "task_manager",
-		}
-	}
-
-	pub fn parse(name: &str) -> Option<RoleName> {
-		match name {
-			"research" => Some(RoleName::Research),
-			"planning" => Some(RoleName::Planning),
-			"memory" => Some(RoleName::Memory),
-			"task_manager" => Some(RoleName::TaskManager),
-			_ => None,
-		}
-	}
-}
-
-impl ToolName {
-	pub fn as_str(&self) -> &'static str {
-		match self {
-			ToolName::CreateTask => "create_task",
-			ToolName::CreateTaskFull => "create_task_full",
-			ToolName::CreateResearchTask => "create_research_task",
-			ToolName::AwaitResult => "await_result",
-			ToolName::MessageHuman => "message_human",
-			ToolName::WebSearch => "web_search",
-			ToolName::WebFetch => "web_fetch",
-			ToolName::SearchLessons => "search_lessons",
-			ToolName::SearchTasks => "search_tasks",
-			ToolName::ViewSession => "view_session",
-			ToolName::ListTasks => "list_tasks",
-			ToolName::CancelTask => "cancel_task",
-		}
-	}
-
-	pub fn parse(name: &str) -> Option<ToolName> {
-		match name {
-			"create_task" => Some(ToolName::CreateTask),
-			"create_task_full" => Some(ToolName::CreateTaskFull),
-			"create_research_task" => Some(ToolName::CreateResearchTask),
-			"await_result" => Some(ToolName::AwaitResult),
-			"message_human" => Some(ToolName::MessageHuman),
-			"web_search" => Some(ToolName::WebSearch),
-			"web_fetch" => Some(ToolName::WebFetch),
-			"search_lessons" => Some(ToolName::SearchLessons),
-			"search_tasks" => Some(ToolName::SearchTasks),
-			"view_session" => Some(ToolName::ViewSession),
-			"list_tasks" => Some(ToolName::ListTasks),
-			"cancel_task" => Some(ToolName::CancelTask),
-			_ => None,
-		}
-	}
-}
-
-impl std::fmt::Display for RoleName {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.write_str(self.as_str())
-	}
-}
-
-impl std::fmt::Display for ToolName {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.write_str(self.as_str())
-	}
-}
-
-// Both names are written by hand rather than derived, and both go through
-// `as_str` and `parse`. These two names are read by the model, stored in the
-// database and put on the wire at once; a derive would name them a fourth way of
-// its own, and nothing would catch the day that name and `as_str` disagreed.
+// Each name is read by the model, stored in the database and put on the wire at
+// once, so there must be exactly one of it. `strum` derives that one — the
+// `snake_case` of the variant — and serde is written by hand on top of it rather
+// than derived, because a second derive would name the variant a second way and
+// nothing would catch the day the two disagreed.
 
 impl serde::Serialize for RoleName {
 	fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-		s.collect_str(self.as_str())
+		s.collect_str(self)
 	}
 }
 
@@ -212,7 +163,7 @@ impl<'de> serde::Deserialize<'de> for RoleName {
 		d: D,
 	) -> Result<Self, D::Error> {
 		let s = <String as serde::Deserialize>::deserialize(d)?;
-		RoleName::parse(&s).ok_or_else(|| {
+		s.parse().map_err(|_| {
 			serde::de::Error::custom(format!("`{s}` is not a Role"))
 		})
 	}
@@ -220,7 +171,7 @@ impl<'de> serde::Deserialize<'de> for RoleName {
 
 impl serde::Serialize for ToolName {
 	fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-		s.collect_str(self.as_str())
+		s.collect_str(self)
 	}
 }
 
@@ -229,7 +180,7 @@ impl<'de> serde::Deserialize<'de> for ToolName {
 		d: D,
 	) -> Result<Self, D::Error> {
 		let s = <String as serde::Deserialize>::deserialize(d)?;
-		ToolName::parse(&s).ok_or_else(|| {
+		s.parse().map_err(|_| {
 			serde::de::Error::custom(format!("`{s}` is not a tool"))
 		})
 	}

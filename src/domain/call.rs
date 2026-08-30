@@ -42,8 +42,17 @@ pub struct CallRequest {
 }
 
 /// Where a call is, and everything that depends on being there.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+	Debug,
+	Clone,
+	PartialEq,
+	serde::Serialize,
+	serde::Deserialize,
+	strum::Display,
+	strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum CallStatus {
 	/// In the scheduler's queue, waiting for the one slot.
 	Queued,
@@ -84,15 +93,6 @@ pub struct NewCall {
 }
 
 impl CallStatus {
-	pub fn discriminant(&self) -> &'static str {
-		match self {
-			CallStatus::Queued => "queued",
-			CallStatus::InFlight { .. } => "in_flight",
-			CallStatus::Done { .. } => "done",
-			CallStatus::Failed { .. } => "failed",
-		}
-	}
-
 	/// What this call consumed, if it finished successfully. Spend sums these.
 	pub fn usage(&self) -> Option<Usage> {
 		match self {

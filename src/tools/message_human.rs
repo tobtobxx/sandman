@@ -47,7 +47,7 @@ impl Tool for MessageHuman {
 		let listing: Vec<String> = ctx
 			.open_channels
 			.iter()
-			.map(|(id, kind)| format!("{id} ({})", kind.discriminant()))
+			.map(|(id, kind)| format!("{id} ({kind})"))
 			.collect();
 		ToolSchema {
 			name: self.name().to_string(),

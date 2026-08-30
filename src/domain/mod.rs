@@ -48,7 +48,7 @@ pub use session::{
 };
 pub use task::{
 	Creator, NewTask, Schedule, Task, TaskPriority, TaskResult, TaskState,
-	TaskSummary,
+	TaskStateName, TaskSummary,
 };
 pub use text::{Brief, Day, TextError, Title};
 pub use time::{

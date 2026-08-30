@@ -39,8 +39,18 @@ pub struct Lesson {
 }
 
 /// What a lesson is about, so a search hit can be placed without a second lookup.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+	Debug,
+	Clone,
+	PartialEq,
+	Eq,
+	serde::Serialize,
+	serde::Deserialize,
+	strum::Display,
+	strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum LessonSubject {
 	/// From a Worker Session: the work it was doing.
 	Task { task: TaskId, role: RoleName, title: Title },
@@ -74,13 +84,6 @@ impl LessonSubject {
 			LessonSubject::Conversation { channel } => {
 				format!("conversation on {channel}")
 			},
-		}
-	}
-
-	pub fn discriminant(&self) -> &'static str {
-		match self {
-			LessonSubject::Task { .. } => "task",
-			LessonSubject::Conversation { .. } => "conversation",
 		}
 	}
 }

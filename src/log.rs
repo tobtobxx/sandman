@@ -18,6 +18,8 @@
 use std::io::Write;
 use std::path::Path;
 
+use strum::IntoDiscriminant;
+
 use crate::domain::{AssistantBody, Message, ReflectionResult};
 use crate::event::Event;
 
@@ -117,14 +119,10 @@ impl Logger {
 			},
 
 			Event::SessionStarted(session) => {
-				format!(
-					"{} started, {}",
-					session.id,
-					session.kind.discriminant()
-				)
+				format!("{} started, {}", session.id, session.kind)
 			},
 			Event::SessionStatusChanged { session, to } => {
-				format!("{session} -> {}", to.discriminant())
+				format!("{session} -> {to}")
 			},
 			Event::MessageAppended { session, index, message } => format!(
 				"{session} #{index} {} {}",
@@ -150,7 +148,7 @@ impl Logger {
 				)
 			},
 			Event::CallStatusChanged { call, to } => {
-				format!("{call} -> {}", to.discriminant())
+				format!("{call} -> {to}")
 			},
 
 			Event::ChannelOpened { channel, session } => {

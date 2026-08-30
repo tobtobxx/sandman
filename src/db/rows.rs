@@ -11,16 +11,15 @@
 //! Defines: read and write helpers for every persisted entity.
 
 use rusqlite::{Row, Transaction};
+use strum::IntoDiscriminant;
 
 use super::DbError;
 use crate::domain::{
 	Brief, CallId, CallStatus, ChannelId, ChannelKind, ChannelRecord, Day,
-	Incoming, IncomingFrom, Lesson, LessonId, LessonSubject, LlmCall, Message,
-	Reflection, ReflectionKind, ReflectionResult, Run, RunId, Schedule,
-	Session, SessionId, SessionKind, SessionStatus, Task, TaskId, TaskState,
-	Timestamp, Title, Utterance, Who,
+	Incoming, Lesson, LessonId, LessonSubject, LlmCall, Message, Reflection,
+	ReflectionResult, Run, RunId, Schedule, Session, SessionId, SessionKind,
+	SessionStatus, Task, TaskId, TaskState, Timestamp, Title, Utterance,
 };
-use crate::roles::RoleName;
 use crate::scheduler::Tier;
 
 /// A sum type as it is stored: the variant's name, and what it carries.
@@ -70,7 +69,7 @@ fn from_tagged<T: serde::de::DeserializeOwned>(
 
 pub fn task_state_to_row(state: &TaskState) -> Result<Tagged, DbError> {
 	Ok(Tagged {
-		tag: state.discriminant(),
+		tag: state.discriminant().into(),
 		json: payload_of(state)?,
 	})
 }
@@ -82,19 +81,8 @@ pub fn task_state_from_row(
 	from_tagged("task state", tag, json)
 }
 
-fn schedule_tag(schedule: &Schedule) -> &'static str {
-	match schedule {
-		Schedule::Now => "now",
-		Schedule::At(_) => "at",
-		Schedule::Repeating { .. } => "repeating",
-	}
-}
-
 pub fn schedule_to_row(schedule: &Schedule) -> Result<Tagged, DbError> {
-	Ok(Tagged {
-		tag: schedule_tag(schedule),
-		json: payload_of(schedule)?,
-	})
+	Ok(Tagged { tag: schedule.into(), json: payload_of(schedule)? })
 }
 
 pub fn schedule_from_row(tag: &str, json: &str) -> Result<Schedule, DbError> {
@@ -102,10 +90,7 @@ pub fn schedule_from_row(tag: &str, json: &str) -> Result<Schedule, DbError> {
 }
 
 pub fn call_status_to_row(status: &CallStatus) -> Result<Tagged, DbError> {
-	Ok(Tagged {
-		tag: status.discriminant(),
-		json: payload_of(status)?,
-	})
+	Ok(Tagged { tag: status.into(), json: payload_of(status)? })
 }
 
 pub fn call_status_from_row(
@@ -115,20 +100,10 @@ pub fn call_status_from_row(
 	from_tagged("call status", tag, json)
 }
 
-fn reflection_result_tag(result: &ReflectionResult) -> &'static str {
-	match result {
-		ReflectionResult::Ran { .. } => "ran",
-		ReflectionResult::FailedOpen { .. } => "failed_open",
-	}
-}
-
 pub fn reflection_result_to_row(
 	r: &ReflectionResult,
 ) -> Result<Tagged, DbError> {
-	Ok(Tagged {
-		tag: reflection_result_tag(r),
-		json: payload_of(r)?,
-	})
+	Ok(Tagged { tag: r.into(), json: payload_of(r)? })
 }
 
 pub fn reflection_result_from_row(
@@ -139,7 +114,7 @@ pub fn reflection_result_from_row(
 }
 
 pub fn lesson_subject_to_row(s: &LessonSubject) -> Result<Tagged, DbError> {
-	Ok(Tagged { tag: s.discriminant(), json: payload_of(s)? })
+	Ok(Tagged { tag: s.into(), json: payload_of(s)? })
 }
 
 pub fn lesson_subject_from_row(
@@ -154,10 +129,7 @@ pub fn lesson_subject_from_row(
 pub fn session_status_to_row(
 	status: &SessionStatus,
 ) -> Result<Tagged, DbError> {
-	Ok(Tagged {
-		tag: status.discriminant(),
-		json: payload_of(status)?,
-	})
+	Ok(Tagged { tag: status.into(), json: payload_of(status)? })
 }
 
 pub fn session_status_from_row(
@@ -167,102 +139,36 @@ pub fn session_status_from_row(
 	from_tagged("session status", tag, json)
 }
 
-fn message_tag(message: &Message) -> &'static str {
-	match message {
-		Message::System { .. } => "system",
-		Message::User { .. } => "user",
-		Message::Assistant { .. } => "assistant",
-		Message::Tool { .. } => "tool",
-	}
-}
-
 /// `messages.role`/`body_json`, for `append_message`.
 pub fn message_to_row(message: &Message) -> Result<Tagged, DbError> {
-	Ok(Tagged {
-		tag: message_tag(message),
-		json: payload_of(message)?,
-	})
+	Ok(Tagged { tag: message.into(), json: payload_of(message)? })
 }
 
 // --- Small enums stored as a bare string, no payload ------------------------
+//
+// These have no payload to carry, so they are a column of their own rather than
+// a tag and a JSON blob. `strum` spells each one the same way it spells a tag.
+
+fn variant_from_str<T: std::str::FromStr>(
+	what: &'static str,
+	s: &str,
+) -> Result<T, DbError> {
+	s.parse()
+		.map_err(|_| DbError::UnknownVariant { what, tag: s.to_string() })
+}
 
 pub fn channel_kind_from_str(s: &str) -> Result<ChannelKind, DbError> {
-	match s {
-		"stdio" => Ok(ChannelKind::Stdio),
-		"web" => Ok(ChannelKind::Web),
-		"scripted" => Ok(ChannelKind::Scripted),
-		other => Err(DbError::UnknownVariant {
-			what: "channel kind",
-			tag: other.to_string(),
-		}),
-	}
+	variant_from_str("channel kind", s)
 }
 
-pub fn who_to_str(who: Who) -> &'static str {
-	match who {
-		Who::Human => "human",
-		Who::Sandman => "sandman",
-	}
-}
-
-fn who_from_str(s: &str) -> Result<Who, DbError> {
-	match s {
-		"human" => Ok(Who::Human),
-		"sandman" => Ok(Who::Sandman),
-		other => {
-			Err(DbError::UnknownVariant { what: "who", tag: other.to_string() })
-		},
-	}
-}
-
-pub fn incoming_from_to_str(from: IncomingFrom) -> &'static str {
-	match from {
-		IncomingFrom::Human => "human",
-		IncomingFrom::Swarm => "swarm",
-	}
-}
-
-fn incoming_from_from_str(s: &str) -> Result<IncomingFrom, DbError> {
-	match s {
-		"human" => Ok(IncomingFrom::Human),
-		"swarm" => Ok(IncomingFrom::Swarm),
-		other => Err(DbError::UnknownVariant {
-			what: "incoming from",
-			tag: other.to_string(),
-		}),
-	}
-}
-
-pub fn reflection_kind_to_str(kind: ReflectionKind) -> &'static str {
-	match kind {
-		ReflectionKind::Review => "review",
-		ReflectionKind::Interrupt => "interrupt",
-	}
-}
-
-fn reflection_kind_from_str(s: &str) -> Result<ReflectionKind, DbError> {
-	match s {
-		"review" => Ok(ReflectionKind::Review),
-		"interrupt" => Ok(ReflectionKind::Interrupt),
-		other => Err(DbError::UnknownVariant {
-			what: "reflection kind",
-			tag: other.to_string(),
-		}),
-	}
-}
-
-/// `calls.tier`, as [`Tier::as_number`] — the same 1..=5 a Watcher shows.
+/// `calls.tier`, as [`Tier`]'s `repr` — the same 1..=5 a Watcher shows.
 fn tier_from_i64(n: i64) -> Result<Tier, DbError> {
-	match n {
-		1 => Ok(Tier::Comms),
-		2 => Ok(Tier::TaskHigh),
-		3 => Ok(Tier::Metacognition),
-		4 => Ok(Tier::TaskNormal),
-		5 => Ok(Tier::TaskLow),
-		other => Err(DbError::Corrupt(format!(
-			"calls.tier is {other}, not 1..=5"
-		))),
-	}
+	u8::try_from(n)
+		.ok()
+		.and_then(|n| Tier::try_from(n).ok())
+		.ok_or_else(|| {
+			DbError::Corrupt(format!("calls.tier is {n}, not 1..=5"))
+		})
 }
 
 /// A `Vec<f32>` as bytes, for the `vectors` table. Little-endian, four bytes a
@@ -315,9 +221,9 @@ pub fn read_task(row: &Row<'_>) -> Result<Task, DbError> {
 			.map_err(|e| DbError::Corrupt(e.to_string()))?,
 		brief: Brief::try_from(brief)
 			.map_err(|e| DbError::Corrupt(e.to_string()))?,
-		role: RoleName::parse(&role).ok_or_else(|| {
-			DbError::UnknownVariant { what: "role", tag: role }
-		})?,
+		role: role
+			.parse()
+			.map_err(|_| DbError::UnknownVariant { what: "role", tag: role })?,
 		state: task_state_from_row(&state_tag, &state_json)?,
 		schedule: schedule_from_row(&schedule_tag, &schedule_json)?,
 		subscriber: subscriber.map(|v| ChannelId(v as u32)),
@@ -344,8 +250,9 @@ pub fn read_session_head(row: &Row<'_>) -> Result<Session, DbError> {
 			let role: String = row.get("role")?;
 			SessionKind::Worker {
 				task: TaskId(task as u32),
-				role: RoleName::parse(&role).ok_or_else(|| {
-					DbError::UnknownVariant { what: "role", tag: role }
+				role: role.parse().map_err(|_| DbError::UnknownVariant {
+					what: "role",
+					tag: role,
 				})?,
 			}
 		},
@@ -488,7 +395,7 @@ pub fn read_reflection(row: &Row<'_>) -> Result<Reflection, DbError> {
 	let result_json: String = row.get("result_json")?;
 	let at: i64 = row.get("at")?;
 	Ok(Reflection {
-		kind: reflection_kind_from_str(&kind)?,
+		kind: variant_from_str("reflection kind", &kind)?,
 		call: CallId(call as u32),
 		after_message: after_message as usize,
 		at: Timestamp(at),
@@ -501,7 +408,7 @@ pub fn read_incoming(row: &Row<'_>) -> Result<Incoming, DbError> {
 	let text: String = row.get("text")?;
 	let at: i64 = row.get("at")?;
 	Ok(Incoming {
-		from: incoming_from_from_str(&from_who)?,
+		from: variant_from_str("incoming from", &from_who)?,
 		text,
 		at: Timestamp(at),
 	})
@@ -511,7 +418,11 @@ pub fn read_utterance(row: &Row<'_>) -> Result<Utterance, DbError> {
 	let who: String = row.get("who")?;
 	let text: String = row.get("text")?;
 	let at: i64 = row.get("at")?;
-	Ok(Utterance { who: who_from_str(&who)?, text, at: Timestamp(at) })
+	Ok(Utterance {
+		who: variant_from_str("who", &who)?,
+		text,
+		at: Timestamp(at),
+	})
 }
 
 pub fn read_lesson(row: &Row<'_>) -> Result<Lesson, DbError> {

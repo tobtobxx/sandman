@@ -13,6 +13,7 @@
 //! Defines: [`CreateTask`], [`CreateResearchTask`], [`CreateTaskFull`].
 
 use async_trait::async_trait;
+use strum::VariantArray;
 
 use crate::domain::{
 	Brief, Creator, NewTask, Schedule, TaskId, TaskPriority, Title, ToolSchema,
@@ -85,7 +86,7 @@ fn require_brief(brief: Option<String>) -> Result<Brief, ToolError> {
 /// `create_task_full`'s Role, or why the one given is not one.
 fn require_role(role: Option<String>) -> Result<RoleName, ToolError> {
 	let given = role.ok_or(ToolError::Missing { field: "role" })?;
-	RoleName::parse(&given).ok_or(ToolError::NoSuchRole { given })
+	given.parse().map_err(|_| ToolError::NoSuchRole { given })
 }
 
 /// `create_task_full`'s Priority, or why the one given is not one. Defaults
@@ -93,7 +94,7 @@ fn require_role(role: Option<String>) -> Result<RoleName, ToolError> {
 fn priority_from(priority: Option<String>) -> Result<TaskPriority, ToolError> {
 	match priority.as_deref() {
 		None => Ok(TaskPriority::default()),
-		Some(other) => TaskPriority::parse(other).ok_or_else(|| {
+		Some(other) => other.parse().map_err(|_| {
 			ToolError::Rejected(format!(
 				"`{other}` is not a priority. Use high, normal or low."
 			))
@@ -232,13 +233,11 @@ impl Tool for CreateTaskFull {
 	}
 
 	/// Carries `role`, `run_at_seconds`, `repeat_seconds` and `priority` beyond
-	/// the common two. The `role` enum is built from [`crate::roles::ROLE_NAMES`],
-	/// so it cannot name a Role that does not exist.
+	/// the common two. The `role` enum is built from every [`RoleName`], so it
+	/// cannot name a Role that does not exist.
 	fn schema(&self, _ctx: &SchemaCtx) -> ToolSchema {
-		let roles: Vec<&'static str> = crate::roles::ROLE_NAMES
-			.iter()
-			.map(|r| r.as_str())
-			.collect();
+		let roles: Vec<&'static str> =
+			RoleName::VARIANTS.iter().map(Into::into).collect();
 		ToolSchema {
 			name: self.name().to_string(),
 			description: "Enqueue a Task, choosing its Role, its timing and \
