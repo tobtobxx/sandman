@@ -470,9 +470,27 @@ function renderInspector() {
   body.innerHTML = DETAIL[selected.bucket](entity);
 }
 
+// Whether this window is a Channel is simply whether the swarm has a `web`
+// Channel open — `channels.web = false` in config.toml opens none, and then
+// there is nothing to type into. Read only once `init` has landed, or an
+// unopened socket would look like a Channel that is turned off.
 function renderChat() {
   const channel = Object.values(state.channels).find((c) => c.kind === "web");
   const box = document.getElementById("transcript");
+  const input = document.getElementById("say-text");
+
+  input.disabled = runStartedAt !== null && !channel;
+  input.placeholder = input.disabled
+    ? "The web Channel is turned off."
+    : "Talk to the swarm…";
+  if (input.disabled) {
+    box.innerHTML =
+      `<p class="empty">The web Channel is turned off. Set ` +
+      `<code>channels.web = true</code> in config.toml and start Sandman ` +
+      `again to talk here.</p>`;
+    return;
+  }
+
   box.innerHTML = (channel?.transcript ?? [])
     .map(
       (u) =>
