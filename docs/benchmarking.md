@@ -19,6 +19,7 @@ apart.
 cargo test                            # everything that spends nothing
 cargo test -- --ignored               # the cases, against a real model
 cargo test -- --ignored greet         # one of them
+cargo run --bin bench -- --list       # which cases there are, and what each asks
 cargo run --bin bench                 # report and artifacts; all cases, in parallel
 cargo run --bin bench -- --case hello --times 5 --serial
 ```

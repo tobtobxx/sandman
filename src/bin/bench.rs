@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! cargo run --bin bench                     all cases, once, in parallel
+//! cargo run --bin bench -- --list           the cases there are, and nothing else
 //! cargo run --bin bench -- --case hello     only the named case(s)
 //! cargo run --bin bench -- --times 5        each case N times, for variance
 //! cargo run --bin bench -- --serial         one at a time
@@ -42,6 +43,9 @@ struct Args {
 	about = "Run Sandman's bench cases against a real model"
 )]
 struct Cli {
+	/// Say which cases there are, and run none of them.
+	#[arg(long)]
+	list: bool,
 	/// Only these cases. Repeatable; omit for every case.
 	#[arg(long = "case")]
 	case: Vec<String>,
@@ -60,6 +64,11 @@ fn parse(argv: &[String]) -> Result<Args, String> {
 	use clap::Parser;
 
 	let cli = Cli::try_parse_from(argv).unwrap_or_else(|e| e.exit());
+
+	if cli.list {
+		list();
+		std::process::exit(0);
+	}
 
 	let cases: Vec<&'static Case> = if cli.case.is_empty() {
 		CASES.iter().collect()
@@ -85,6 +94,24 @@ fn parse(argv: &[String]) -> Result<Args, String> {
 		serial: cli.serial,
 		out: cli.out,
 	})
+}
+
+/// Every case, one per line: the name `--case` takes, then what it asks.
+///
+/// Names are padded to the widest before they are painted, not after: an escape
+/// code counts toward a format width and would throw the columns off by exactly
+/// its length.
+fn list() {
+	let on = sandman::bench::color::enabled();
+	let width = CASES.iter().map(|c| c.name.len()).max().unwrap_or(0);
+	for case in CASES {
+		let name = format!("{:width$}", case.name);
+		println!(
+			"{}  {}",
+			sandman::bench::color::bold(on, &name),
+			sandman::bench::color::dim(on, case.description),
+		);
+	}
 }
 
 /// Run one case once, write its artifacts, and report.
