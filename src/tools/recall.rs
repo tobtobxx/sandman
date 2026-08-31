@@ -1,16 +1,36 @@
-//! Finding out what this swarm already did. The `memory` Role's tools.
+//! Swarm memory — what it already did, read by meaning.
 //!
-//! The `memory` Role does no new work. It searches what the swarm has already
-//! done: the Lessons metacognition kept, the Tasks that were asked and answered,
-//! and the conversations behind them. Now that the state persists, those reach
-//! back across every Run rather than only the one in progress.
+//! The `memory` Role does no new work. It reads what the swarm kept: Lessons
+//! metacognition wrote, Tasks asked and answered, and the Sessions behind them.
+//! State persists across Runs, so searches reach back to every Lesson and Task
+//! the Store holds. Ranking is by meaning, not keyword.
 //!
-//! Searching is by meaning, not by keyword — see `memory.rs` for the ranking.
-//! `search_tasks` deliberately ranks a Task by what it *asked for*, its Title
-//! and Brief, never by its Result: a hit is found by the question, and the
-//! answer is shown once it is a hit.
+//! Construct: `SearchLessons`, `SearchTasks`, `ViewSession` (`Tool` impls, no
+//! state) in `Registry::all`; no config beyond `Store` + `Embedder` on `SessionCtx`.
+//! Use: `Tool::call(ctx, args) -> String` via `Registry::run` after
+//! `session::turn` builds schemas; searches parse `query`/`count`, load corpus,
+//! delegate to `memory::rank`, render hits; `ViewSession` resolves an id then
+//! renders the capped transcript.
+//! Consumers: `RoleName::Memory` (all three) and `RoleName::TaskManager`
+//! (`SearchTasks`); bench recorder wraps `ToolRunner` to answer without embedding.
+//! Seam: `Tool` (one capability) vs `ToolRunner::Registry` (real dispatch).
 //!
-//! Defines: [`SearchLessons`], [`SearchTasks`], [`ViewSession`].
+//! | Tool | corpus | ranks by | shows on hit |
+//! | --- | --- | --- | --- |
+//! | `SearchLessons` | `lesson_corpus` (`lesson/{id}` → `text`) | `Lesson.text` | day, about, text, Session |
+//! | `SearchTasks` | `task/{id}` → `title\nbrief` | Title + Brief, never Result | id, title, Result/outcome |
+//! | `ViewSession` | one `Session` | — | capped transcript + metacognition |
+//!
+//! Call trace: `turn → schemas_for → model → Reply::Calls → Registry::run → recall::Tool::call → Store + memory::rank → String → append Tool message → loop`.
+//!
+//! Rules: **search is by meaning — `memory::rank` does cosine, brute force.**
+//! **SearchTasks ranks by Title+Brief, never Result — hit found by question, answer shown after.**
+//! **ViewSession returns at most `VIEW_SESSION_CAP` chars — a Session can be larger than its reader.**
+//! **Task id in ViewSession resolves to Session that ran it — search hit translates without guess.**
+//! **tool answers in words, always — embed or Store failure is a sentence, not an `Err`.**
+//! **searches reach across every Run, not just the current one.**
+//!
+//! Defines: [`SearchLessons`], [`SearchTasks`], [`ViewSession`], [`VIEW_SESSION_CAP`].
 
 use std::str::FromStr;
 
@@ -25,20 +45,19 @@ use crate::session::SessionCtx;
 
 use super::{Tool, ToolError};
 
-/// How many hits a search returns unless the model asks for more.
+/// Default hit count when `count` is omitted.
 const DEFAULT_HITS: usize = 5;
 
-/// How much of one conversation `view_session` will show. A whole Session can be
-/// longer than the Session reading it can hold.
+/// Cap on `ViewSession` output in chars.
 pub const VIEW_SESSION_CAP: usize = 40_000;
 
-/// Rank the Lessons against a query by meaning.
+/// Search Lessons by meaning; renders day, about, text and Session.
 pub struct SearchLessons;
 
-/// Rank Tasks by what they asked for. Shows the Result on a hit.
+/// Search Tasks by Title and Brief by meaning; shows Result on hits.
 pub struct SearchTasks;
 
-/// One Session's whole conversation as text, metacognition included, capped.
+/// Read one Session's transcript, capped at `VIEW_SESSION_CAP`.
 pub struct ViewSession;
 
 #[async_trait]
@@ -55,20 +74,26 @@ impl Tool for SearchLessons {
 		)
 	}
 
-	/// Each hit names its day, what it was about, and the Session to open to
-	/// read the whole conversation behind it.
+	/// Search Lessons by `query`/`count` and render hits.
+	///
+	/// Loads every Lesson, ranks via `memory::rank`, returns sentences on failure.
 	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String {
+		// Parse arguments
 		let (query, count) = match parse_search_args(&args) {
 			Ok(v) => v,
 			Err(e) => return e.to_string(),
 		};
 
+		// Load lessons
 		let lessons = match ctx.harness.store.all_lessons() {
 			Ok(l) => l,
 			Err(e) => return format!("Error: {e}"),
 		};
+
+		// Build corpus
 		let corpus = crate::memory::lesson_corpus(lessons);
 
+		// Rank and render
 		match crate::memory::rank(
 			&ctx.harness.store,
 			ctx.harness.embedder.as_ref(),
@@ -98,16 +123,23 @@ impl Tool for SearchTasks {
 		)
 	}
 
+	/// Search Tasks by `query`/`count` and render hits.
+	///
+	/// Loads every Task, ranks by Title+Brief via `memory::rank`, returns sentences on failure.
 	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String {
+		// Parse arguments
 		let (query, count) = match parse_search_args(&args) {
 			Ok(v) => v,
 			Err(e) => return e.to_string(),
 		};
 
+		// Load tasks
 		let tasks = match ctx.harness.store.all_tasks() {
 			Ok(t) => t,
 			Err(e) => return format!("Error: {e}"),
 		};
+
+		// Build corpus
 		let corpus: Vec<(String, String, Task)> = tasks
 			.into_iter()
 			.map(|t| {
@@ -116,6 +148,7 @@ impl Tool for SearchTasks {
 			})
 			.collect();
 
+		// Rank and render
 		match crate::memory::rank(
 			&ctx.harness.store,
 			ctx.harness.embedder.as_ref(),
@@ -164,14 +197,17 @@ impl Tool for ViewSession {
 		}
 	}
 
-	/// Takes a Task id too, and resolves it to the Session that did it — a hit
-	/// from `search_tasks` names a Task, and asking the reader to translate that
-	/// is asking it to guess.
+	/// Resolve a Session or Task id, load the Session and render it capped.
+	///
+	/// Accepts `session_id` or `task_id`; Task id maps to its running Session. Returns a sentence on bad ids or Store failure.
 	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String {
+		// Read raw ids
 		let given_session = args.get("session_id").and_then(|v| v.as_str());
 		let given_task = args.get("task_id").and_then(|v| v.as_str());
 
+		// Resolve Session id
 		let session_id = if let Some(s) = given_session {
+			// Session id given - parse
 			match SessionId::from_str(s) {
 				Ok(id) => id,
 				Err(_) => {
@@ -182,6 +218,7 @@ impl Tool for ViewSession {
 				},
 			}
 		} else if let Some(s) = given_task {
+			// Task id given - resolve to Session
 			let task = match TaskId::from_str(s) {
 				Ok(id) => id,
 				Err(_) => {
@@ -194,25 +231,29 @@ impl Tool for ViewSession {
 				Err(e) => return format!("Error: {e}"),
 			}
 		} else {
+			// No id given - reject
 			return ToolError::Rejected(
 				"Give either session_id or task_id.".to_string(),
 			)
 			.to_string();
 		};
 
+		// Load and render Session
 		match ctx.harness.store.session(session_id) {
+			// Found - render transcript
 			Ok(Some(session)) => render_session(&session),
+			// Not found - reject
 			Ok(None) => ToolError::Rejected(format!(
 				"There is no Session {session_id}."
 			))
 			.to_string(),
+			// Store failed - report error
 			Err(e) => format!("Error: {e}"),
 		}
 	}
 }
 
-/// The schema shared by both searches: a query, and how many hits to bring
-/// back.
+/// Build the shared search schema (`query` + `count`).
 fn search_schema(name: ToolName, description: &str) -> ToolSchema {
 	ToolSchema {
 		name: name.to_string(),
@@ -236,14 +277,16 @@ fn search_schema(name: ToolName, description: &str) -> ToolSchema {
 	}
 }
 
-/// Read `query` and `count` off a search tool's arguments.
+/// Parse `query` and `count` from search args.
 fn parse_search_args(
 	args: &serde_json::Value,
 ) -> Result<(String, usize), ToolError> {
+	// Parse query
 	let query = args
 		.get("query")
 		.and_then(|v| v.as_str())
 		.ok_or(ToolError::Missing { field: "query" })?;
+	// Parse count
 	let count = args
 		.get("count")
 		.and_then(|v| v.as_u64())
@@ -252,11 +295,13 @@ fn parse_search_args(
 	Ok((query.to_string(), count))
 }
 
-/// Each hit, with its day, what it was about, and where to read more.
+/// Render Lesson hits as text.
 fn render_lesson_hits(hits: &[Hit<Lesson>]) -> String {
+	// Handle empty
 	if hits.is_empty() {
 		return "No lessons match.".to_string();
 	}
+	// Render hits
 	hits.iter()
 		.map(|h| {
 			format!(
@@ -271,22 +316,28 @@ fn render_lesson_hits(hits: &[Hit<Lesson>]) -> String {
 		.join("\n\n")
 }
 
-/// Each hit, with its Title and, once it is a hit, its Result.
+/// Render Task hits with outcome on each.
 fn render_task_hits(hits: &[Hit<Task>]) -> String {
+	// Handle empty
 	if hits.is_empty() {
 		return "No Tasks match.".to_string();
 	}
+	// Render hits
 	hits.iter()
 		.map(|h| {
 			let task = &h.item;
 			let outcome = match &task.state {
+				// Completed - show Result
 				TaskState::Completed { result, .. } => {
 					result.content().to_string()
 				},
+				// Cancelled - no answer
 				TaskState::Cancelled { .. } => {
 					"Cancelled; no answer.".to_string()
 				},
+				// Pending - still waiting
 				TaskState::Pending => "Still pending.".to_string(),
+				// Running - still working
 				TaskState::Running { .. } => "Still running.".to_string(),
 			};
 			format!("{} — {}\n{}", task.id, task.title, outcome)
@@ -295,22 +346,27 @@ fn render_task_hits(hits: &[Hit<Task>]) -> String {
 		.join("\n\n")
 }
 
-/// One Session's whole conversation, metacognition included, capped at
-/// [`VIEW_SESSION_CAP`] characters.
+/// Render one Session's transcript, capped at `VIEW_SESSION_CAP`.
 fn render_session(session: &Session) -> String {
+	// Collect transcript
 	let mut out = String::new();
 	for message in &session.messages {
 		match message {
+			// System - append content
 			Message::System { content } => {
 				out.push_str(&format!("[system] {content}\n\n"));
 			},
+			// User - append content
 			Message::User { content } => {
 				out.push_str(&format!("[user] {content}\n\n"));
 			},
+			// Assistant - render body
 			Message::Assistant { body, .. } => match body {
+				// Text - append
 				AssistantBody::Text(text) => {
 					out.push_str(&format!("[assistant] {text}\n\n"));
 				},
+				// Calls - render preamble and calls
 				AssistantBody::Calls { preamble, calls } => {
 					if let Some(preamble) = preamble {
 						out.push_str(&format!("[assistant] {preamble}\n"));
@@ -324,22 +380,26 @@ fn render_session(session: &Session) -> String {
 					out.push('\n');
 				},
 			},
+			// Tool - append result
 			Message::Tool { content, .. } => {
 				out.push_str(&format!("[tool result] {content}\n\n"));
 			},
 		}
 	}
 
+	// Append metacognition
 	if !session.reflections.is_empty() {
 		out.push_str("--- metacognition ---\n");
 		for reflection in &session.reflections {
 			match &reflection.result {
+				// Ran - show content
 				ReflectionResult::Ran { content, .. } => {
 					out.push_str(&format!(
 						"[{:?}] {content}\n\n",
 						reflection.kind
 					));
 				},
+				// Failed open - show error
 				ReflectionResult::FailedOpen { error } => {
 					out.push_str(&format!(
 						"[{:?}] failed open: {error}\n\n",
@@ -350,6 +410,7 @@ fn render_session(session: &Session) -> String {
 		}
 	}
 
+	// Cap output
 	if out.chars().count() > VIEW_SESSION_CAP {
 		out = out.chars().take(VIEW_SESSION_CAP).collect();
 		out.push_str("\n... (truncated)");

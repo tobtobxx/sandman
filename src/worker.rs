@@ -1,19 +1,18 @@
-//! The Worker Session: created from a Task, ends when that Task completes.
+//! The Worker Session: one Session per Task, ends with it — the only place a Task's Result is decided.
 //!
-//! A Worker is a Session plus one policy — what the text a turn produces means.
-//! Here it means: stop and be reviewed. **A Worker has no tool to submit
-//! anything.** After every plain-text turn the metacognitive review reads the
-//! whole conversation and either writes the Task's answer as its summary,
-//! corrects the Worker with feedback it takes another turn on, or has nothing to
-//! say. So what reaches a subscriber is chosen from the whole conversation, not
-//! taken from whatever the Worker happened to say last.
+//! Construct: `new_worker_session(ctx, task)` mints a `SessionId` from the Role's prompt and stamped Brief; every entry takes `SessionCtx` built by `Harness::ctx(id)`.
+//! Use: `work_turn(ctx) → Worked` runs `session::turn(ctx, Tier from Task priority)` then `reflect` if `Text`/`Silent`; `Harness::drive_worker` loops until `Done` or `Aborted` then `complete_task` delivers and re-arms.
+//! Consumers and seam — `Turn` reported by `session::turn`, decided here vs `comms.rs` (neither references the other):
 //!
-//! A Worker is uniform. Every one runs the same way; only the Role of its Task
-//! differs. It sees the Brief and nothing of the work that led to it.
+//! | `Turn` | `worker.rs` | `comms.rs` |
+//! | --- | --- | --- |
+//! | `Text` | `reflect` → `Done` or `Continue` | `say` to human |
+//! | `Silent` | `reflect`; `Nothing` → `Continue` | legitimate end → `Idle` |
+//! | `Unreachable` | `Failed` without review | `Idle`, nothing said |
+//! | `Cancelled` | `Aborted`, no Result | unreachable (no Task) |
 //!
-//! Neither loop here has a mechanical bound. Silence is not an ending but
-//! something the review corrects, and nothing caps how many turns a Task takes.
-//! The human watching is the guard rail.
+//! Call trace: `Harness::drive_worker → work_turn → session::turn → reflect::reflect → tell` on `Feedback`; `Harness::complete_task → deliver → waiters::resolve`.
+//! Rules: **a Turn decides nothing — ending policy lives in `worker.rs`/`comms.rs`, never `session.rs`.** **a Worker has no tool to submit — only `Review` completes a Task.** **Unreachable fails the Task without review — nothing can correct a gone model.** **`Cancelled` ends with no Result.** **`Review` fallback: `Nothing` on `Text` → Worker's text stands, on `Silent` → back to work.** **one Worker per Task, branchless dispatch (every Task becomes a Worker, never a Comms).** **uniform — Role varies, loop does not; Brief is the only parent context.** **no mechanical bound — human is the guard rail.**
 //!
 //! Defines: [`Worked`], [`new_worker_session`], [`work_turn`].
 
@@ -34,16 +33,14 @@ pub enum Worked {
 	Aborted,
 }
 
-/// A fresh Worker Session for a Task: the Role's system prompt, the Brief, and
-/// nothing else.
+/// Create a Worker Session from a Task.
 ///
-/// The Brief arrives stamped with the time it reached its Worker, so "just now"
-/// and "earlier" mean something to a Session that runs for a while. Separate
-/// from running it, so a caller can put something in the context first.
+/// Stamps the Brief with the current time and writes the Session via `Store::start_session`. Returns the new `SessionId`.
 pub async fn new_worker_session(
 	ctx: &SessionCtx,
 	task: &Task,
 ) -> Result<crate::domain::SessionId, crate::store::StoreError> {
+	// Build brief
 	let now = ctx.clock.now();
 	let brief =
 		format!("{}\n\n{}", crate::domain::time::stamp(now), task.brief);
@@ -55,40 +52,37 @@ pub async fn new_worker_session(
 			Message::User { content: brief },
 		],
 	};
+	// Start session
 	ctx.store.start_session(new, now)
 }
 
-/// One turn for a Worker Session, and what follows it.
+/// Run one Worker turn and apply review policy.
 ///
-/// The whole policy of a Worker lives here; the Harness only decides when to
-/// call this again.
-///
-/// An unreachable model is the one failure written without a review — nothing
-/// can review or correct a Worker whose model is gone. A cancellation ends the
-/// Session with no Result, because the Task was already marked cancelled and
-/// must not complete.
-///
-/// A review that wrote neither a summary nor feedback falls back to what the
-/// Worker itself wrote last; a review of silence sends the Worker back to work.
+/// Runs `session::turn` at the Task's Tier, then `reflect` on `Text`/`Silent`. Returns `Done`, `Continue`, or `Aborted`.
 pub async fn work_turn(ctx: &SessionCtx) -> Worked {
+	// Load session
 	let Ok(Some(session)) = ctx.store.session(ctx.id) else {
 		return Worked::Aborted;
 	};
 	let Some(task_id) = session.kind.task() else {
 		return Worked::Aborted;
 	};
+	// Resolve tier
 	let tier = match ctx.store.task(task_id) {
 		Ok(Some(task)) => Tier::from(task.priority),
 		_ => Tier::TaskNormal,
 	};
 
+	// Run turn
 	match crate::session::turn(ctx, tier).await {
+		// Cancelled - end with no Result
 		crate::session::Turn::Cancelled => {
 			let now = ctx.clock.now();
 			let _ = ctx.store.end_session(ctx.id, SessionStatus::Finished, now);
 			Worked::Aborted
 		},
 
+		// Unreachable - fail without review
 		crate::session::Turn::Unreachable(error) => {
 			let now = ctx.clock.now();
 			let _ = ctx.store.end_session(
@@ -99,35 +93,39 @@ pub async fn work_turn(ctx: &SessionCtx) -> Worked {
 			Worked::Done(TaskResult::Failed(error))
 		},
 
+		// Text - review with Worker's text as fallback
 		crate::session::Turn::Text(text) => {
-			// A review that has nothing to say falls back to the Worker's
-			// own text as the Task's answer.
 			review(ctx, Worked::Done(TaskResult::Succeeded(text))).await
 		},
 
+		// Silent - review with Continue as fallback
 		crate::session::Turn::Silent => {
-			// A review of silence that has nothing to say sends the Worker
-			// back to work.
 			review(ctx, Worked::Continue).await
 		},
 	}
 }
 
-/// Review the turn just taken and act on it. `on_nothing` is what a review
-/// with neither a summary nor feedback falls back to.
+/// Apply review after a turn and handle its outcome.
+///
+/// On `Complete` ends with success, on `Feedback` enqueues and continues, on `Nothing` falls back to `on_nothing`.
 async fn review(ctx: &SessionCtx, on_nothing: Worked) -> Worked {
+	// Mark reflecting
 	let _ = ctx.store.set_status(ctx.id, SessionStatus::Reflecting);
+	// Run review
 	match crate::reflect::reflect(ctx).await {
+		// Complete - end with success
 		Outcome::Complete(answer) => {
 			let now = ctx.clock.now();
 			let _ = ctx.store.end_session(ctx.id, SessionStatus::Finished, now);
 			Worked::Done(TaskResult::Succeeded(answer))
 		},
+		// Feedback - enqueue and continue
 		Outcome::Feedback(feedback) => {
 			crate::session::tell(ctx, &feedback).await;
 			let _ = ctx.store.set_status(ctx.id, SessionStatus::Waiting);
 			Worked::Continue
 		},
+		// Nothing - fallback to caller's intent
 		Outcome::Nothing => {
 			if matches!(on_nothing, Worked::Done(_)) {
 				let now = ctx.clock.now();

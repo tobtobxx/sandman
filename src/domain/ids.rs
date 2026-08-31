@@ -1,24 +1,44 @@
-//! Short readable ids, one newtype per entity.
+//! Typed ids for every entity.
 //!
-//! A log full of `t-07` reads far better than one full of uuids, and this
-//! system is meant to be read. Each id is a `u32` behind a distinct type, so
-//! handing a `SessionId` to something that wants a `TaskId` does not compile.
+//! One `u32` per entity behind distinct types, so a `SessionId` cannot be
+//! passed where a `TaskId` is expected. Printed as `<prefix>-nn` for logs,
+//! wire, and tool args; parsed back via `FromStr`.
 //!
-//! Ids are minted by the Store, inside the same transaction as the insert that
-//! uses them (see `db::counters`). They are therefore unique across restarts,
-//! and a Store opened on a fresh database counts from one — which is what lets
-//! two Harnesses share a process without sharing an id space.
+//! Construct: `Store` mints inside the same transaction as the insert via
+//! `db::counters::take(tx, T::COUNTER)` — unique across restarts, never leaked
+//! on rollback, fresh DB starts at 1. Two Harnesses share a process without
+//! sharing an id space because the counter lives in SQLite.
+//!
+//! Use: `Display` / `FromStr` / `serde` as text; `IdError` on mismatch.
+//! `db::rows` decodes rows into the same types; tools parse args via `FromStr`.
+//!
+//! Consumers: `Task`, `Session`, `LlmCall`, `Channel`, `Lesson`, `Run` carry
+//! them; `Store` mints them; `db::{counters,rows}` owns the mapping.
+//!
+//! | Id | Prefix | Entity | Counter row |
+//! | --- | --- | --- | --- |
+//! | `RunId` | `run` | `Run` | `counters.next` where `name = "run"` |
+//! | `TaskId` | `t` | `Task` | `counters.next` where `name = "t"` |
+//! | `SessionId` | `s` | `Session` | `counters.next` where `name = "s"` |
+//! | `ChannelId` | `ch` | `Channel` | `counters.next` where `name = "ch"` |
+//! | `CallId` | `call` | `LlmCall` | `counters.next` where `name = "call"` |
+//! | `LessonId` | `l` | `Lesson` | `counters.next` where `name = "l"` |
+//!
+//! Rules: **one counter per type, keyed by `PREFIX`** — adding an entity means
+//! adding a variant here. **mint and insert are one transaction** — no id
+//! without a row. **text form is canonical** — logs, DB text fields, and tool
+//! args share `Display`/`FromStr`. **distinct types are the seam** — cross-entity
+//! misuse does not compile.
 //!
 //! Defines: [`RunId`], [`TaskId`], [`SessionId`], [`ChannelId`], [`CallId`],
-//! [`LessonId`], and the `id_type!` macro behind them.
+//! [`LessonId`], `id_type!`, [`IdError`]
 
 use std::fmt;
 use std::str::FromStr;
 
-/// Builds one id newtype: a `u32` that prints as `<prefix>-<n>` and parses back.
+/// Define one typed id backed by `u32`.
 ///
-/// The `Display` form is what reaches the log, the wire and a human's eye. The
-/// `FromStr` form is what reads it back off a database row or a tool argument.
+/// Prints as `<prefix>-nn` and parses back. Serializes as that string.
 macro_rules! id_type {
 	($name:ident, $prefix:literal, $doc:literal) => {
 		#[doc = $doc]
@@ -26,10 +46,10 @@ macro_rules! id_type {
 		pub struct $name(pub u32);
 
 		impl $name {
-			/// The counter name this id is minted from, in the `counters` table.
+			/// Counter row this id is minted from.
 			pub const COUNTER: &'static str = $prefix;
 
-			/// The textual prefix, as it appears in `t-07`.
+			/// Text prefix as it appears in `t-07`.
 			pub const PREFIX: &'static str = $prefix;
 		}
 
@@ -89,7 +109,7 @@ id_type!(
 id_type!(CallId, "call", "One model call.");
 id_type!(LessonId, "l", "One lesson kept by metacognition.");
 
-/// An id that could not be read back from its textual form.
+/// Id parse failure — text did not match `<prefix>-<n>`.
 #[derive(Debug, thiserror::Error)]
 #[error("`{text}` is not a {expected} id")]
 pub struct IdError {

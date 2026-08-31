@@ -1,24 +1,24 @@
-//! The transport: the one place that talks to a model over the wire.
+//! The transport — one place that talks to a model over the wire.
 //!
-//! [`Model`] is a seam, and it sits *under* the scheduler on purpose. A bench
-//! that swaps in a scripted model still exercises the real queue, the real tier
-//! ordering and the real one-call-at-a-time invariant; only the answer is
-//! written by the test.
+//! Construct: `OpenRouter::from_spec(spec)` per `ModelSpec`; `Models::from_config(config)` dedupes by value so one pool per endpoint; `Models::uniform(model)` for benches that script answers.
+//! Use: `Models::pick(purpose) → Arc<dyn Model>` then `model.send(request) → Completion`; scheduler decides *when*, `Model` decides *how*.
+//! Consumers: `scheduler::Scheduler::request` (sole caller of `send`); `Harness` builds `Models`; `bench` replaces `Model` with scripted replies.
 //!
-//! The wire shape is private to this module. That is what keeps recorded
-//! reasoning off the wire: a stored assistant message carries the model's
-//! reasoning for a Watcher to read, and [`WireMessage`] simply has no field for
-//! it. Stripping it is not a step anyone has to remember.
+//! Seam: `Model` — real `OpenRouter`, bench scripted. Wire shape is private so recorded reasoning never reaches the wire.
 //!
-//! Ordering — which call runs next — is `scheduler.rs`'s. What lives here is one
-//! request, sent once, with no retry: a failed call already has a full path to a
-//! failed Result.
+//! | `Model` | `OpenRouter` | bench scripted |
+//! | --- | --- | --- |
+//! | `name` | `spec.model` | fixed test name |
+//! | `send` | POST chat-completions → `Completion` | canned `Completion` |
 //!
-//! Which model a call goes to is [`Purpose`], resolved through [`Models`]. Two
-//! Roles may share one model or have one each; the swarm asks for a purpose and
-//! never for a name.
+//! Rules:
+//! **Under the scheduler.** Swapping `Model` still exercises queue, tier ordering and one-at-a-time.
+//! **One attempt, no retry.** A failure already has a path to `TaskState::Failed` via `SchedulerError::Call`.
+//! **Wire shape is private.** `WireMessage` has no `reasoning` field — domain reasoning is dropped on conversion.
+//! **Same spec shares a pool.** Equal `ModelSpec`s share one `Arc<dyn Model>`.
+//! **No default in code.** `Purpose` has no default variant; `config` falls back to `models.all` once.
 //!
-//! Defines: [`Model`], [`Models`], [`Purpose`], [`OpenRouter`], [`ModelError`].
+//! Defines: `Model`, `Models`, `Purpose`, `OpenRouter`, `ModelError`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,25 +31,22 @@ use crate::roles::RoleName;
 
 /// One exchange with a model.
 ///
-/// The seam a bench replaces. Two adapters exist: [`OpenRouter`], and the
-/// scripted model in [`crate::bench`].
+/// The seam benches replace. `OpenRouter` is the wire adapter.
 #[async_trait]
 pub trait Model: Send + Sync {
-	/// The model's name, as it goes on the call record.
+	/// Returns the model name as recorded on the call.
 	fn name(&self) -> &str;
 
-	/// Send one request and bring back what came of it.
+	/// Send one request.
 	///
-	/// One attempt, no retry. A transport failure is a [`ModelError`]; a model
-	/// that answers with nothing is a successful call carrying
-	/// [`crate::domain::Reply::Text`] holding an empty string.
+	/// One attempt, no retry. Empty answer is `Reply::Text` with empty string.
 	async fn send(
 		&self,
 		request: &CallRequest,
 	) -> Result<Completion, ModelError>;
 }
 
-/// Why an exchange did not happen.
+/// Why `Model::send` failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
 	#[error("could not reach the model: {0}")]
@@ -60,20 +57,18 @@ pub enum ModelError {
 	Malformed(String),
 }
 
-/// The real transport.
+/// The real transport over OpenRouter.
 pub struct OpenRouter {
 	client: reqwest::Client,
 	endpoint: String,
 	api_key: String,
 	model: String,
-	/// How much the model may think before it answers. `None` asks for no
-	/// thinking at all; `Some(effort)` is sent as `reasoning: {"effort":
-	/// effort}` verbatim.
+	/// Reasoning effort. `None` sends no thinking; `Some(level)` sends `reasoning: {"effort": level}`.
 	effort: Option<String>,
 }
 
 impl OpenRouter {
-	/// One model, as the configuration describes it.
+	/// Build one transport from a spec.
 	pub fn from_spec(spec: &ModelSpec) -> Self {
 		OpenRouter {
 			client: reqwest::Client::new(),
@@ -85,15 +80,12 @@ impl OpenRouter {
 	}
 }
 
-/// What a call is for, which is how it finds its model.
+/// What a call is for.
 ///
-/// A property of the Session making it, like [`crate::scheduler::Tier`] is a
-/// property of the caller. There is no variant for "whatever the default is":
-/// the fallback to `models.all` happens once, in the configuration, so nothing
-/// downstream has to know a default exists.
+/// Resolved to a `Model` via `Models::pick`. No default variant — fallback is in `Config`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purpose {
-	/// A Comms Session, talking to a human.
+	/// A Comms Session talking to a human.
 	Comms,
 	/// A Worker on a Task of this Role.
 	Work(RoleName),
@@ -101,20 +93,20 @@ pub enum Purpose {
 	Metacognition,
 }
 
-/// Every model a swarm may talk to, one per [`Purpose`].
+/// Every model a swarm may talk to, one per `Purpose`.
 ///
-/// Built once at startup. Two purposes that name the same model share one
-/// adapter, and so one connection pool — resolving them separately would open a
-/// second pool to the same endpoint for no reason.
+/// Built once at startup. Equal `ModelSpec`s share one adapter and pool.
 pub struct Models {
 	comms: Arc<dyn Model>,
 	metacognition: Arc<dyn Model>,
-	/// Total over [`RoleName`]: filled from `VARIANTS`, so every Role has one.
+	/// One entry per `RoleName`, from `VARIANTS`.
 	work: HashMap<RoleName, Arc<dyn Model>>,
 }
 
 impl Models {
-	/// What the configuration says.
+	/// Build from `Config`.
+	///
+	/// Deduplicates by `ModelSpec` value so one pool per endpoint.
 	pub fn from_config(config: &Config) -> Models {
 		let mut built: HashMap<ModelSpec, Arc<dyn Model>> = HashMap::new();
 		let mut of = |spec: &ModelSpec| -> Arc<dyn Model> {
@@ -134,8 +126,9 @@ impl Models {
 		}
 	}
 
-	/// One model for everything. What a bench passes: a case that scripts the
-	/// answers is not asking which model would have given them.
+	/// Build with one model for every `Purpose`.
+	///
+	/// For benches that script every answer.
 	pub fn uniform(model: Arc<dyn Model>) -> Models {
 		Models {
 			comms: model.clone(),
@@ -147,7 +140,7 @@ impl Models {
 		}
 	}
 
-	/// The model this call goes to.
+	/// Pick the model for a `Purpose`.
 	pub fn pick(&self, purpose: Purpose) -> &Arc<dyn Model> {
 		match purpose {
 			Purpose::Comms => &self.comms,
@@ -263,11 +256,9 @@ impl Model for OpenRouter {
 	}
 }
 
-// --- The wire shape --------------------------------------------------------
-// Private on purpose. Nothing outside this module builds a request body, so
-// nothing outside this module can put recorded reasoning back on the wire.
+// Wire shape — private so reasoning never reaches the wire.
 
-/// The request body, as the chat-completions API wants it.
+/// Wire request body for chat-completions.
 #[derive(serde::Serialize)]
 struct ChatRequest<'a> {
 	model: &'a str,
@@ -294,17 +285,15 @@ struct WireChatTemplateKwargs {
 	enable_thinking: bool,
 }
 
-/// Asks OpenRouter to report what a call actually cost, so [`Completion::cost`]
-/// comes off the response rather than a price list kept here.
+/// Ask OpenRouter to include cost in the response.
 #[derive(serde::Serialize)]
 struct WireUsageConfig {
 	include: bool,
 }
 
-/// One message, as the chat-completions API wants it.
+/// One wire message.
 ///
-/// Note what is missing: there is no `reasoning` field. A domain message carries
-/// the model's own reasoning for inspection, and the conversion below drops it.
+/// No `reasoning` field — domain reasoning is dropped on conversion.
 #[derive(serde::Serialize)]
 struct WireMessage {
 	role: &'static str,
@@ -396,8 +385,7 @@ impl From<&crate::domain::Message> for WireMessage {
 	}
 }
 
-/// The response body, as the chat-completions API returns it. Only the fields
-/// this module reads are named; everything else is dropped on deserialize.
+/// Wire response. Only fields this module reads are named.
 #[derive(serde::Deserialize)]
 struct WireResponse {
 	choices: Vec<WireChoice>,
@@ -435,7 +423,7 @@ struct WireResponseFunctionCall {
 struct WireResponseUsage {
 	#[serde(default)]
 	total_tokens: Option<u64>,
-	/// Present because the request set [`WireUsageConfig::include`].
+	/// Present when `WireUsageConfig::include` was set.
 	#[serde(default)]
 	cost: Option<f64>,
 }

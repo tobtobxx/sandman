@@ -1,22 +1,33 @@
-//! SQLite: where all of Sandman's state actually lives.
+//! SQLite backing, schema, and row mapping beneath the Store.
 //!
-//! The database is the single source of truth. There is no in-memory mirror of
-//! it, so there is nothing for the two to disagree about. Every read is a query
-//! and every write is a transaction. That is affordable because the swarm
-//! already serialises on one model call at a time — a query is microseconds
-//! against a network round trip.
+//! What it is: the only place that knows SQLite — files, pragmas, migrations,
+//! row encoding, id minting, and the pid lockfile. [`store.rs`](crate::store)
+//! owns the vocabulary; this module owns the mapping.
 //!
-//! Nothing outside `store.rs` opens a connection or writes a statement. This
-//! module is the mapping and the schema; the Store is the vocabulary.
+//! Construct: `Backing::File(path)` or `Memory` → [`open`] returns
+//! `(Connection, Option<(from, to)>)` with `schema::apply` applied. File
+//! backing needs `Lock::take` first; `Memory` is private per connection.
 //!
-//! Ids are minted here, from the [`counters`] table, inside the same transaction
-//! as the insert that uses them. They survive a restart, and a fresh database
-//! counts from one — which is what lets two Harnesses live in one process
-//! without sharing an id space.
+//! Use: `schema` migrates, `rows` encodes/decodes, `counters::take(tx, prefix)`
+//! mints ids inside the caller's transaction, `save_copy` snapshots via
+//! `VACUUM INTO`.
 //!
-//! Modules: [`schema`] — tables and migrations; [`rows`] — rows to domain values.
+//! Consumers: `store.rs` exclusively — nothing else opens a connection or
+//! writes SQL. Bench cases use `Memory` + `save_copy`; real runs use
+//! `File` + `Lock`.
 //!
-//! Defines: [`Backing`], [`Lock`], [`DbError`], [`open`], [`counters`].
+//! Rules: **only `store.rs` writes** — connection is private, every mutation
+//! emits an Event there. **ids are transactional** — `counters.next` bumps in
+//! the same tx as the insert. **stale locks are cleared** — pid checked under
+//! `/proc`, `clear` + `create_new` closes the race. **newer schema is refused**.
+//!
+//! | Backing | Pragmas | Lock | Consumer |
+//! | --- | --- | --- | --- |
+//! | `File(path)` | WAL + FK + busy timeout | `Lock::take` required | real Run |
+//! | `Memory` | FK + busy timeout, no WAL | none (private) | bench case |
+//!
+//! Defines: [`Backing`], [`DbError`], [`Lock`], [`open`], [`save_copy`], [`counters`].
+//! Submodules: [`schema`] — tables and migrations; [`rows`] — rows to domain values.
 
 pub mod rows;
 pub mod schema;
@@ -28,8 +39,7 @@ use rusqlite::Connection;
 pub enum Backing {
 	/// A file on disk. What a real Sandman run uses.
 	File(std::path::PathBuf),
-	/// Private to this process and gone when it closes. What each bench case
-	/// uses, which is why a case needs no process of its own.
+	/// Private to this process and gone when it closes. What each bench case uses.
 	Memory,
 }
 
@@ -63,29 +73,21 @@ pub enum DbError {
 	},
 }
 
-/// Exclusive use of one database file, for as long as this value lives.
+/// Exclusive file lock for one Sandman per database file.
 ///
-/// `Store::recover` ends every Task, Session and call it finds still open,
-/// reasoning that a Run which has only just started owns none of them. That
-/// holds for a database nobody else has: a second Sandman opening the same file
-/// would cancel the first one's work out from under it, mid-Turn. This is what
-/// makes it hold.
-///
-/// A lockfile beside the database, naming the process that took it. A Run that
-/// dies leaves it behind — Ctrl+C is the ordinary way out here, so a lock that
-/// outlived its holder must not stop the next start. The pid is what settles
-/// which of the two it is: gone from `/proc`, and the lock is stale and taken
-/// over without a word. That check is Linux-only, as the control socket already
-/// is.
-///
-/// `Drop` removes it, so leaving cleanly leaves nothing behind either.
+/// Held as this value; `Drop` removes the file. Stale pids are cleared via
+/// `/proc` so a killed Run never blocks the next start.
 pub struct Lock {
 	path: std::path::PathBuf,
 }
 
 impl Lock {
-	/// Take the lock on `db`, or say which process holds it.
+	/// Take the file lock or report the live holder.
+	///
+	/// Checks for a live pid, clears a stale file, and creates the new
+	/// lockfile atomically with `create_new`.
 	pub fn take(db: &std::path::Path) -> Result<Lock, DbError> {
+		// Check holder
 		let path = lock_path(db);
 		if let Some(pid) = holder(&path) {
 			return Err(DbError::Locked {
@@ -93,11 +95,9 @@ impl Lock {
 				pid,
 			});
 		}
-		// Nothing holds it: either there is no lockfile, or the one there
-		// outlived its process. Clearing and creating are two steps, and
-		// `create_new` is what keeps them honest — a start that wins the gap
-		// between them fails here rather than being overwritten.
+		// Clear stale file
 		let _ = std::fs::remove_file(&path);
+		// Create lockfile
 		let mut file = std::fs::OpenOptions::new()
 			.write(true)
 			.create_new(true)
@@ -106,6 +106,7 @@ impl Lock {
 				path: path.display().to_string(),
 				source,
 			})?;
+		// Write pid
 		std::io::Write::write_all(
 			&mut file,
 			std::process::id().to_string().as_bytes(),
@@ -117,9 +118,9 @@ impl Lock {
 		Ok(Lock { path })
 	}
 
-	/// Remove the lock on `db`, whatever holds it. What `--break-lock` does,
-	/// for the one case a pid cannot settle: a pid that has since been recycled
-	/// makes a stale lock look live for good.
+	/// Clear any lockfile at `db`, ignoring missing.
+	///
+	/// What `--break-lock` does for a recycled pid that looks live.
 	pub fn clear(db: &std::path::Path) -> std::io::Result<()> {
 		match std::fs::remove_file(lock_path(db)) {
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -129,25 +130,24 @@ impl Lock {
 }
 
 impl Drop for Lock {
-	/// Best effort. A lock this fails to remove is one the next start finds
-	/// stale and clears itself.
+	/// Best-effort cleanup.
 	fn drop(&mut self) {
 		let _ = std::fs::remove_file(&self.path);
 	}
 }
 
-/// Where a database's lock lives: beside it, under its own name plus `.lock`.
-/// Appended rather than substituted, so `sandman.sqlite` and `sandman.db` in
-/// one directory cannot end up sharing one.
+/// Resolve lockfile path beside the database.
+///
+/// Appends `.lock` so `sandman.sqlite` and `sandman.db` never share one.
 fn lock_path(db: &std::path::Path) -> std::path::PathBuf {
 	let mut path = db.as_os_str().to_os_string();
 	path.push(".lock");
 	std::path::PathBuf::from(path)
 }
 
-/// The pid of a live process holding this lockfile, if one does. `None` covers
-/// all three ways there is nothing to respect: no lockfile, one whose contents
-/// are not a pid, and one whose process is gone.
+/// Live holder pid, if any.
+///
+/// Returns `None` when no lockfile, not a pid, or pid gone from `/proc`.
 fn holder(lock: &std::path::Path) -> Option<u32> {
 	let pid: u32 = std::fs::read_to_string(lock).ok()?.trim().parse().ok()?;
 	std::path::Path::new("/proc")
@@ -156,60 +156,54 @@ fn holder(lock: &std::path::Path) -> Option<u32> {
 		.then_some(pid)
 }
 
-/// Open a database and bring it up to the current schema.
+/// Open a database and migrate to the current schema.
 ///
-/// WAL, foreign keys on, and a busy timeout — a Watcher and a `VACUUM INTO` may
-/// read while the swarm writes.
-///
-/// The second element is `(from, to)` if [`schema::apply`] actually migrated
-/// the database — worth a log line once a Logger exists (see TASKS.md, step 8)
-/// — or `None` if it was already current.
+/// Sets FK, busy timeout, and WAL for files. Returns `(from, to)` when a
+/// migration ran, or `None` if already current.
 pub fn open(
 	backing: Backing,
 ) -> Result<(Connection, Option<(u32, u32)>), DbError> {
+	// Open connection
 	let is_file = matches!(backing, Backing::File(_));
 	let conn = match backing {
 		Backing::File(path) => Connection::open(path)?,
 		Backing::Memory => Connection::open_in_memory()?,
 	};
+	// Configure pragmas
 	conn.pragma_update(None, "foreign_keys", "ON")?;
 	conn.busy_timeout(std::time::Duration::from_secs(5))?;
-	// An in-memory database is private to this connection already, and SQLite
-	// does not support WAL for one.
 	if is_file {
 		conn.pragma_update(None, "journal_mode", "WAL")?;
 	}
+	// Apply migrations
 	let migration = schema::apply(&conn)?;
 	Ok((conn, migration))
 }
 
-/// Copy the whole database to a file, consistently, while it is in use.
+/// Snapshot the whole database to a file while in use.
 ///
-/// This is how a bench case keeps its artifact: one `store.sqlite` holding every
-/// Task, Session, transcript and model call of the run, queryable afterwards
-/// with `sqlite3`.
+/// Uses `VACUUM INTO`; how bench cases keep `store.sqlite`.
 pub fn save_copy(
 	conn: &Connection,
 	to: &std::path::Path,
 ) -> Result<(), DbError> {
+	// Validate path
 	let to = to.to_str().ok_or_else(|| {
 		DbError::Corrupt(format!("{} is not valid UTF-8", to.display()))
 	})?;
+	// Vacuum into file
 	conn.execute("VACUUM INTO ?1", [to])?;
 	Ok(())
 }
 
-/// Id minting.
-///
-/// One row per entity prefix. `next` is read and bumped inside the caller's
-/// transaction, so an id is never handed out twice and never handed out for an
-/// insert that then rolls back.
+/// Transactional id minting from the `counters` table.
 pub mod counters {
 	use super::DbError;
 	use rusqlite::Transaction;
 
-	/// Take the next number for a prefix, bumping the counter in the same
-	/// transaction.
+	/// Mint the next id for `prefix` inside `tx`.
+	///
+	/// Bumps `next` atomically; rolled-back inserts never leak ids.
 	pub fn take(tx: &Transaction<'_>, prefix: &str) -> Result<u32, DbError> {
 		let taken: u32 = tx.query_row(
 			"INSERT INTO counters (name, next) VALUES (?1, 2)

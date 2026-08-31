@@ -1,22 +1,32 @@
-//! The control socket: how another process puts work into a running Sandman.
+//! Control socket: one-shot JSON entry for non-human callers.
 //!
-//! A Channel is a two-way connection to a human. Cron, an RSS script, a mail
-//! watcher and a shell one-liner are none of those — they have nothing to say
-//! back to and nothing to be told. They get this instead: one line of JSON in,
-//! one line out, and the connection closes.
+//! A `Channel` is a two-way human conversation — cron, RSS watchers, mail
+//! scripts and shell one-liners have nothing to say back and get this instead:
+//! one JSON line in, one line out, then close.
 //!
-//! It is a **socket rather than a second writer to the database**, and that is
-//! the whole design decision here. A process inserting a row directly would
-//! bypass the Store, so no [`crate::event::Event`] would be emitted for it — the
-//! log, the Watcher and anything replaying the stream would all have the same
-//! blind spot. One writer is the property the Store was shaped around, and this
-//! keeps it.
+//! Construct: `serve(harness, path)` binds a Unix socket at
+//! `[sandman].control_socket`; `send(path, request)` is the client — what
+//! `sandman task` calls.
+//! Use: `Request` → `handle` → `Response` through `Harness`/`Store`; every
+//! failure becomes `Response::Error` with a single message.
+//! Consumers: the `sandman` binary spawns `serve`; external processes and
+//! shell scripts drive `send`; `Harness` remains the sole `Store` writer so
+//! every change emits an `Event`.
 //!
-//! A Unix domain socket with restrictive permissions, never a TCP port: this is a
-//! write path into a running swarm. Where it lives is
-//! `[sandman].control_socket`.
+//! | `Request` | `Harness`/`Store` call | `Response` |
+//! |---|---|---|
+//! | `CreateTask` | parse `RoleName`/`Title`/`Brief`/`Schedule::from_offsets` → `Harness::create_task` | `Created` |
+//! | `ListTasks` | parse `TaskStateName` → `Store::list_tasks` | `Tasks` |
+//! | `Spend` | `Harness::spend` | `Spent` |
+//! | bad JSON / bad fields | — | `Error` |
 //!
-//! Defines: [`Request`], [`Response`], [`serve`], [`send`].
+//! Rules: never a second database writer — a direct insert would emit no
+//! `Event` and blind the log, Watcher and replay.
+//! Unix socket, `0o600`, never TCP; stale file removed, live socket →
+//! `AddrInUse`. One request per connection; missing socket means no Sandman is
+//! running.
+//!
+//! Defines: [`Request`], [`Response`], [`TaskLine`], [`serve`], [`send`].
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -34,11 +44,10 @@ use crate::harness::Harness;
 use crate::roles::RoleName;
 use crate::store::ListFilter;
 
-/// What another process may ask for.
+/// What a client may ask a running Sandman to do.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Request {
-	/// Put a Task on the queue. Recorded as
-	/// [`crate::domain::Creator::Control`], so where it came from is not lost.
+	/// Enqueue a Task as `Creator::Control`.
 	CreateTask {
 		role: String,
 		title: String,
@@ -53,11 +62,11 @@ pub enum Request {
 		state: Option<String>,
 		count: Option<usize>,
 	},
-	/// What the running Sandman has spent.
+	/// Return current spend for this run.
 	Spend,
 }
 
-/// What it gets back.
+/// What the control socket returns.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Response {
 	Created {
@@ -71,14 +80,13 @@ pub enum Response {
 		tokens: u64,
 		cost: String,
 	},
-	/// Everything that went wrong, said in one sentence.
+	/// Single-message failure for any bad input or store error.
 	Error {
 		message: String,
 	},
 }
 
-/// A Task as the socket reports it: flat, so a shell script can read it without
-/// knowing the domain.
+/// Flat task summary for shell callers.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TaskLine {
 	pub id: String,
@@ -89,25 +97,29 @@ pub struct TaskLine {
 	pub created_at: i64,
 }
 
-/// Listen, and answer requests until the Harness stops.
+/// Listen on `path` and answer requests until the harness stops.
 ///
-/// Removes a stale socket file left by a killed process, and creates the new one
-/// readable and writable only by its owner.
+/// Binds a Unix socket and spawns one task per connection.
+/// Returns `AddrInUse` if a Sandman is already listening.
 pub async fn serve(harness: Arc<Harness>, path: &Path) -> std::io::Result<()> {
+	// Reject if already listening
 	if UnixStream::connect(path).await.is_ok() {
 		return Err(std::io::Error::new(
 			std::io::ErrorKind::AddrInUse,
 			format!("a Sandman is already listening on {}", path.display()),
 		));
 	}
+	// Clean stale socket
 	let _ = std::fs::remove_file(path);
 	if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
 		std::fs::create_dir_all(parent)?;
 	}
 
+	// Bind with restricted permissions
 	let listener = UnixListener::bind(path)?;
 	std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
 
+	// Accept loop
 	loop {
 		let (stream, _) = listener.accept().await?;
 		let harness = harness.clone();
@@ -117,33 +129,39 @@ pub async fn serve(harness: Arc<Harness>, path: &Path) -> std::io::Result<()> {
 	}
 }
 
-/// One connection: one request line in, one response line out, then close.
+/// Handle one connection.
+///
+/// Reads one JSON line, dispatches it, and writes one response line.
 async fn handle_connection(
 	harness: &Arc<Harness>,
 	stream: UnixStream,
 ) -> std::io::Result<()> {
+	// Read request line
 	let (reader, mut writer) = stream.into_split();
 	let mut lines = BufReader::new(reader).lines();
 
 	let Some(line) = lines.next_line().await? else {
 		return Ok(());
 	};
+	// Dispatch request
 	let response = match serde_json::from_str::<Request>(&line) {
 		Ok(request) => handle(harness, request).await,
 		Err(e) => Response::Error { message: format!("bad request: {e}") },
 	};
 
+	// Encode and reply
 	let mut line = serde_json::to_string(&response)
 		.unwrap_or_else(|e| format!("could not encode the response: {e}"));
 	line.push('\n');
 	writer.write_all(line.as_bytes()).await
 }
 
-/// Send one request from the client side and read the answer.
+/// Send one request and read the response.
 ///
-/// What `sandman task` does. A missing socket means no Sandman is running, and
-/// that is the error the caller gets.
+/// Connects to `path`, writes one JSON line, and decodes the reply.
+/// Fails if no Sandman is listening.
 pub async fn send(path: &Path, request: &Request) -> std::io::Result<Response> {
+	// Connect
 	let stream = UnixStream::connect(path).await.map_err(|e| {
 		std::io::Error::new(
 			e.kind(),
@@ -152,12 +170,14 @@ pub async fn send(path: &Path, request: &Request) -> std::io::Result<Response> {
 	})?;
 	let (reader, mut writer) = stream.into_split();
 
+	// Send request
 	let mut line = serde_json::to_string(request)
 		.map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 	line.push('\n');
 	writer.write_all(line.as_bytes()).await?;
 	writer.shutdown().await?;
 
+	// Read response
 	let mut lines = BufReader::new(reader).lines();
 	match lines.next_line().await? {
 		Some(line) => serde_json::from_str(&line).map_err(|e| {
@@ -170,9 +190,13 @@ pub async fn send(path: &Path, request: &Request) -> std::io::Result<Response> {
 	}
 }
 
-/// Turn one request into what the Harness does about it.
+/// Dispatch one request to the harness.
+///
+/// Validates fields, calls `Harness`/`Store`, and maps every failure to
+/// `Response::Error`.
 async fn handle(harness: &Arc<Harness>, request: Request) -> Response {
 	match request {
+		// Create task - validate and enqueue
 		Request::CreateTask {
 			role,
 			title,
@@ -181,19 +205,23 @@ async fn handle(harness: &Arc<Harness>, request: Request) -> Response {
 			repeat_seconds,
 			priority,
 		} => {
+			// Validate role
 			let Ok(role) = role.parse::<RoleName>() else {
 				return Response::Error {
 					message: format!("`{role}` is not a Role."),
 				};
 			};
+			// Validate title
 			let title = match Title::try_from(title) {
 				Ok(title) => title,
 				Err(e) => return Response::Error { message: e.to_string() },
 			};
+			// Validate brief
 			let brief = match Brief::try_from(brief) {
 				Ok(brief) => brief,
 				Err(e) => return Response::Error { message: e.to_string() },
 			};
+			// Validate priority
 			let priority = match priority.as_deref() {
 				None => TaskPriority::default(),
 				Some(given) => match given.parse() {
@@ -208,6 +236,7 @@ async fn handle(harness: &Arc<Harness>, request: Request) -> Response {
 					},
 				},
 			};
+			// Build schedule and create task
 			let schedule = Schedule::from_offsets(
 				run_at_seconds,
 				repeat_seconds,
@@ -227,7 +256,9 @@ async fn handle(harness: &Arc<Harness>, request: Request) -> Response {
 			}
 		},
 
+		// List tasks - validate filter and query
 		Request::ListTasks { state, count } => {
+			// Validate state filter
 			let state = match &state {
 				None => None,
 				Some(given) => match given.parse() {
@@ -239,6 +270,7 @@ async fn handle(harness: &Arc<Harness>, request: Request) -> Response {
 					},
 				},
 			};
+			// Query store
 			match harness.store.list_tasks(ListFilter { state, count }) {
 				Ok(tasks) => Response::Tasks {
 					tasks: tasks.into_iter().map(TaskLine::from).collect(),
@@ -247,6 +279,7 @@ async fn handle(harness: &Arc<Harness>, request: Request) -> Response {
 			}
 		},
 
+		// Spend - sum completed calls
 		Request::Spend => match harness.spend() {
 			Ok(spend) => spend.into(),
 			Err(e) => Response::Error { message: e.to_string() },

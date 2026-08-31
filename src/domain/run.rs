@@ -1,32 +1,54 @@
-//! The Run: one lifetime of Sandman, as the database records it.
+//! One process lifetime, as the database records it.
 //!
-//! Before anything persisted, "a run" and "the process" were the same thing and
-//! neither needed a name. With the state kept, they come apart: several Runs
-//! share one database, and the question of what a number covers has to be
-//! answerable.
+//! Construct at [`crate::store::Store::open`] — mints [`RunId`] via
+//! `counters::take` in the same transaction that inserts `runs`, emits
+//! `RunStarted`, then `recover` cancels stale `running` Tasks, open Sessions
+//! and `queued`/`in_flight` Calls. Close at [`crate::store::Store::end_run`]
+//! which stamps `ended_at` and emits `RunEnded`. Decoded by
+//! [`crate::db::rows::read_run`] from `SELECT * FROM runs`.
 //!
-//! The split is deliberate and not symmetric. **Spend is scoped to a Run** —
-//! what this run has cost is the number a human wants, and summing every run
-//! Sandman has ever done would be summing nothing in particular. **The Lessons
-//! and past Tasks are not** — they are searched across every Run, which is what
-//! finally makes the `memory` Role useful rather than empty for the first ten
-//! minutes of every start.
+//! Use as the cost boundary: [`crate::store::Store::spend`], `tasks_of_run`
+//! and `Snapshot.run` are scoped by `run`; everything else that benefits
+//! from history (Lessons, `all_tasks`, `memory`) is not. Pending Tasks
+//! survive `recover` as the queue for the next Run.
 //!
-//! Defines: [`Run`].
+//! Consumers:
+//!
+//! | Consumer | Reads | Writes | Emits |
+//! | --- | --- | --- | --- |
+//! | `Store::open` | — | `runs` row | `RunStarted` |
+//! | `Store::end_run` | `runs` row | `ended_at` | `RunEnded` |
+//! | `Store::spend` / `tasks_of_run` | `calls` / `tasks WHERE run` | — | — |
+//! | `db::rows::read_run` | `runs` row → `Run` | — | — |
+//! | Watchers / `Snapshot` | `Run` | — | first frame |
+//!
+//! Rules / asymmetry:
+//!
+//! - **Spend is scoped to a Run; Lessons and past Tasks are not.** Cross-Run
+//!   search is what makes `memory` useful in the first minutes after start.
+//! - **Pending Tasks survive a Run boundary; Running ones do not.** `recover`
+//!   leaves `pending` for the next Run and cancels `running`.
+//! - **`ended_at` is `Some` only on clean shutdown.** Live and killed Runs
+//!   both read as `None` afterwards — indistinguishable, accepted.
+//! - **One `Run` per `Store`.** `Store` holds `run: RunId`; every later insert
+//!   stamps that id, so no row is unscoped.
+//!
+//! Defines: [`Run`]
 
 use super::ids::RunId;
 use super::time::Timestamp;
 
-/// One lifetime of Sandman.
+/// One process lifetime, as stored in `runs`.
+///
+/// Minted by [`crate::store::Store::open`], closed by
+/// [`crate::store::Store::end_run`]. `ended_at` is `None` while running.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Run {
 	pub id: RunId,
 	pub started_at: Timestamp,
-	/// Set on a clean shutdown. Absent on a Run still going, and on one whose
-	/// process was killed — the two are indistinguishable afterwards, which is
-	/// accepted.
+	/// Set on clean shutdown. `None` while running and after a killed process
+	/// — indistinguishable, accepted.
 	pub ended_at: Option<Timestamp>,
-	/// The model this Run talked to, so a comparison across Runs knows what it
-	/// is comparing.
+	/// Model this Run used. Lets comparisons across Runs name what they compare.
 	pub model: String,
 }

@@ -1,27 +1,20 @@
-//! What the tools are, and what runs them.
+//! Tool registry — twelve capabilities dispatched through one seam.
 //!
-//! Tools are independent of Roles: `roles.rs` decides which Role holds which of
-//! these, and more than one Role may hold the same tool.
+//! Construct: [`Registry::all`] builds every [`Tool`] (`Vec<Arc<dyn Tool>>`);
+//! `SessionCtx.tools: Arc<dyn ToolRunner>` carries it.
+//! Use: `session::turn` builds `schemas(names, SchemaCtx) -> Vec<ToolSchema>`
+//! then `run(ctx, call) -> String` per `Reply::Calls` until `Text`/`Silent`.
+//! Consumers: `session::turn` (Worker vs Comms tool set via `roles::tools_for`);
+//! bench recorder/script wrapping [`Registry`] without touching prompts.
 //!
-//! Two traits, and the difference matters. [`Tool`] is one capability —
-//! its schema and what it does. [`ToolRunner`] is *how a Session's tool calls
-//! get answered at all*, and it is the seam a bench replaces: wrapping the real
-//! [`Registry`] in a recorder is how a unit bench watches every call a model
-//! makes without changing a single prompt, and answering from a closure is how
-//! it drives a model down a path without paying for the work behind it.
+//! | Seam | Real | Bench |
+//! | --- | --- | --- |
+//! | [`Tool`] — one capability | `create_task`, `await_result`, `message_human`, `web`, `recall`, `queue` in `tools/*` | — |
+//! | [`ToolRunner`] — how calls get answered | [`Registry`] | recorder, script, refusal |
 //!
-//! A tool returns a `String` to the model, always — including when it failed.
-//! An error a model can read is domain output, not a Rust error, and the same
-//! reasoning applies here as to a Task's Result: a failure is something that
-//! says so, not something missing.
+//! Call trace: `turn → scheduler.request → Reply::Calls → tools.run(call) → Tool::call(ctx, args) → Store/Harness/Waiters → String → append Tool message → loop`.
 //!
-//! Schemas are built per Session rather than declared once, because
-//! `message_human` must offer the Channels that are open now.
-//!
-//! Files: [`create_task`] the three enqueue tools; [`await_result`] holding for
-//! an answer; [`message_human`] reaching a human; [`web`] searching and reading
-//! the world; [`recall`] searching what the swarm already did; [`queue`] running
-//! the queue.
+//! Rules: **tools independent of Roles — `roles.rs` assigns, multiple Roles may share a tool.** **a tool answers in words, always — failure is a sentence, not an `Err`.** **schemas built per Session — `message_human` enumerates only open Channels.** **`await_result` is the only tool that holds a Turn.** **metacognition has no tools.** **`Registry` emits `ToolCalled`/`ToolReturned` itself — tool calls are not Store state changes.**
 //!
 //! Defines: [`Tool`], [`ToolRunner`], [`Registry`], [`ToolError`].
 
@@ -45,31 +38,24 @@ use crate::session::SessionCtx;
 pub trait Tool: Send + Sync {
 	fn name(&self) -> ToolName;
 
-	/// How this tool describes itself to the model.
+	/// Describe this tool to the model.
 	///
-	/// Takes the world it is described against, because at least one tool —
-	/// `message_human` — must name the Channels that actually exist.
+	/// Builds a [`ToolSchema`] for `ctx`; per-Session so Channel lists stay live.
 	fn schema(&self, ctx: &SchemaCtx) -> ToolSchema;
 
-	/// Do it, and answer the model in words.
+	/// Execute the call and return the model's next read.
 	///
-	/// `args` is whatever the model sent, already parsed as JSON. Reading it
-	/// wrongly is not a failure of the system: return a sentence saying what was
-	/// wrong and the model tries again.
+	/// Takes parsed `args`; returns a sentence on success or on bad input.
 	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String;
 }
 
-/// How a Session's tool calls get answered.
-///
-/// The seam. [`Registry`] is the real one; a bench substitutes a recorder, a
-/// script, or a refusal.
+/// How a Session's tool calls get answered — the seam [`Registry`] implements.
 #[async_trait]
 pub trait ToolRunner: Send + Sync {
-	/// The schemas for a set of tools, as they go to the model.
+	/// Build schemas for the named tools.
 	fn schemas(&self, names: &[ToolName], ctx: &SchemaCtx) -> Vec<ToolSchema>;
 
-	/// Answer one tool call. Never fails: everything the model needs to know
-	/// comes back as the string it reads.
+	/// Answer one call. Never fails; returns the string the model reads.
 	async fn run(&self, ctx: &SessionCtx, call: &ToolCall) -> String;
 }
 
@@ -80,7 +66,7 @@ pub struct Registry {
 }
 
 impl Registry {
-	/// Every tool Sandman has.
+	/// Build the full registry with every tool.
 	pub fn all(events: Arc<crate::event::Events>) -> Self {
 		let tools: Vec<Arc<dyn Tool>> = vec![
 			Arc::new(create_task::CreateTask),
@@ -102,39 +88,43 @@ impl Registry {
 
 #[async_trait]
 impl ToolRunner for Registry {
-	/// Delegates to [`crate::roles::schemas_for`] — the single implementation,
-	/// so the model is never offered two competing descriptions of a tool.
+	/// Build schemas via the single [`crate::roles::schemas_for`] implementation.
 	fn schemas(&self, names: &[ToolName], ctx: &SchemaCtx) -> Vec<ToolSchema> {
 		crate::roles::schemas_for(names, ctx)
 	}
 
-	/// Parse the arguments, emit [`crate::event::Event::ToolCalled`], dispatch,
-	/// emit [`crate::event::Event::ToolReturned`].
+	/// Dispatch one call and emit `ToolCalled`/`ToolReturned`.
 	///
-	/// A name that matches no tool, and arguments that are not JSON, both come
-	/// back as a sentence the model can act on rather than as anything that
-	/// stops the turn.
+	/// Returns a sentence for unknown tools or bad JSON; never fails the turn.
 	async fn run(&self, ctx: &SessionCtx, call: &ToolCall) -> String {
+		// Parse tool name
 		let Ok(name) = call.name.parse::<ToolName>() else {
 			return ToolError::NoSuchTool(call.name.clone()).to_string();
 		};
 
+		// Parse arguments
 		let parsed =
 			serde_json::from_str::<serde_json::Value>(&call.arguments).ok();
+
+		// Emit ToolCalled
 		self.events.emit(crate::event::Event::ToolCalled {
 			session: ctx.id,
 			name,
 			args: parsed.clone().unwrap_or(serde_json::Value::Null),
 		});
 
+		// Dispatch call
 		let output = match parsed {
+			// Bad JSON — return sentence
 			None => ToolError::BadJson.to_string(),
+			// Valid JSON — find tool and call
 			Some(args) => match self.tools.iter().find(|t| t.name() == name) {
 				Some(tool) => tool.call(ctx, args).await,
 				None => ToolError::NoSuchTool(call.name.clone()).to_string(),
 			},
 		};
 
+		// Emit ToolReturned
 		self.events.emit(crate::event::Event::ToolReturned {
 			session: ctx.id,
 			name,
@@ -144,10 +134,9 @@ impl ToolRunner for Registry {
 	}
 }
 
-/// Why a tool could not do what it was asked, worded for the model that asked.
+/// Why a tool could not do what it asked — worded for the model.
 ///
-/// Never returned as an `Err` past the runner: it becomes the string the model
-/// reads. It exists as a type so the wording lives in one place.
+/// Rendered as the string the model reads; never an `Err` past the runner.
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
 	#[error("Error: your arguments were not valid JSON. Try again.")]

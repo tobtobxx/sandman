@@ -1,35 +1,33 @@
-//! The bench: measuring what the model does inside Sandman.
+//! Bench — what the model reaches for inside Sandman.
 //!
-//! It tests the harness-and-model combination against the real system prompts,
-//! the real tools and the real scheduler. It exists to inform prompt and
-//! mechanics changes.
+//! One Session against one real Brief, real prompts and real scheduler.
+//! Every tool call goes through [`intercept::Interceptor`] so the case decides
+//! what happens without paying for work behind it. One Rig is one isolated
+//! Sandman (private DB, counters, log, Harness); integration is a series of
+//! unit benches, not a swarm case.
 //!
-//! **A case is an ordinary test.** No process of its own, no working directory
-//! to move, no globals to keep apart. A [`Rig`] owns a private in-memory
-//! database, its own id counters, its own log file and its own Harness, so two
-//! cases in one process share nothing. That is the whole isolation story.
+//! Construct: [`rig::RigBuilder`] → [`rig::Rig`] (model/clock/tools/drive/channel/timeout).
+//! Drive: [`Rig::until`] follows the Event stream; predicate and every
+//! tripwire re-checked on each Event, no polling.
+//! Verify: tripwire (continuous → [`Trip`]) vs check (once → [`CheckResult`])
+//! vs grader (model judgement, after checks pass).
+//! Report: [`report::assemble`] winds down, waits for in-flight calls, emits
+//! `RunReport` + `store.sqlite`/`sandman.log`/`result.json`.
 //!
-//! **A case waits on the Event stream, not on a clock.** [`Rig::until`] wakes
-//! when something actually changed and evaluates every tripwire on the way past.
-//! Nothing polls, and nothing has to throw across a polling loop to stop a run.
+//! Consumers: [`cases::CASES`] via `tests/cases.rs` (`cargo test -- --ignored`)
+//! and `bin/bench`; both call `Case::run` → `(Option<Rig>, RunReport)`.
 //!
-//! **Everything a case does not want to be real can be replaced**, at one of
-//! four seams: the model, the tool runner, the clock, the embedder. The tool
-//! runner is replaced in every case. Intercepting it is how a bench asks the
-//! real model, with the real prompt for one real Brief, what it would *do* — and
-//! answers every tool call itself instead of paying for the work behind it.
+//! Seams — real unless the case replaces them:
+//! | Seam | Real | Bench |
+//! | --- | --- | --- |
+//! | Model | OpenRouter | [`script::ScriptedModel`] / custom |
+//! | ToolRunner | `tools::Registry` | [`intercept::Interceptor`] (always) |
+//! | Clock | `SystemClock` | `FixedClock` / `ManualClock` |
+//! | Embedder | `OpenRouterEmbedder` | test-supplied |
 //!
-//! **Every case is a unit bench.** One Session, and assertions on what it
-//! reached for. Nothing here runs a swarm and reads what it produced; that
-//! question is answered by a series of unit benches, each of which stays cheap
-//! and says which decision was wrong.
-//!
-//! Files: [`rig`] the harness under test; [`intercept`] watching and answering
-//! tool calls; [`script`] a model whose replies are written by the test;
-//! [`grader`] verification a model has to do; [`report`] what a run leaves
-//! behind; [`cases`] the cases, which `tests/cases.rs` and `bin/bench` share.
-//!
-//! Defines: [`Trip`], [`CheckResult`].
+//! Rules: one Session per case; per-Rig isolation, not per-process.
+//! Schemas never change, only answers do. A case that waits for a Schedule
+//! to fire is about the Harness, not the model.
 
 pub mod cases;
 pub mod color;
@@ -45,14 +43,10 @@ pub use intercept::{Interceptor, RecordedToolCall, ToolsChoice};
 pub use rig::{Rig, RigBuilder, Watch};
 pub use script::ScriptedModel;
 
-/// Why a run stopped early.
+/// Early stop reason for a case.
 ///
-/// A tripwire is "this must never happen", and it is evaluated continuously
-/// while a case drives. Tripping one ends the run at once, so a looping Session
-/// costs at most a call or two past the violation.
-///
-/// This is a value a test propagates with `?`, not a panic and not a process
-/// exit. The [`Rig`] winds itself down on the way out either way.
+/// Tripwire fires continuously on the Event stream; timeout hits the case bound.
+/// Propagated with `?`, never a panic; [`Rig`] winds down either way.
 #[derive(Debug, thiserror::Error)]
 pub enum Trip {
 	#[error("tripwire `{name}`: {detail}")]
@@ -65,16 +59,19 @@ pub enum Trip {
 	Store(#[from] crate::store::StoreError),
 }
 
-/// What one check found.
+/// Result of one goal check, evaluated once at the end.
+///
+/// `ok` with `detail` always stored so `result.json` reads without artifacts.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CheckResult {
 	pub name: String,
 	pub ok: bool,
-	/// What was seen, so a failure reads without opening the artifacts.
+	/// Human-readable evidence kept in `result.json`.
 	pub detail: String,
 }
 
 impl CheckResult {
+	/// Build a passing result with evidence.
 	pub fn ok(name: &str, detail: impl Into<String>) -> Self {
 		CheckResult {
 			name: name.to_string(),
@@ -83,6 +80,7 @@ impl CheckResult {
 		}
 	}
 
+	/// Build a failing result with evidence.
 	pub fn no(name: &str, detail: impl Into<String>) -> Self {
 		CheckResult {
 			name: name.to_string(),

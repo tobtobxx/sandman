@@ -1,21 +1,30 @@
-//! Watching, and answering, every tool call.
+//! The `ToolRunner` bench seam — record and answer every tool call without changing what the model sees.
 //!
-//! This is the seam the bench is built on. A case takes one real Task, the real
-//! system prompt for its Role, and the real model — and puts an [`Interceptor`]
-//! where the tool registry would be. Every call the model makes is recorded, and
-//! the case decides which of them actually happen.
+//! A case measures one real Session (real Brief, real Role prompt, real scheduler) but must stay
+//! one Session: letting tools run would pull web searches and child Workers into a decision test.
+//! `Interceptor` wraps the real [`Registry`] so schemas pass through unchanged and `run` records
+//! and answers per [`ToolsChoice`].
 //!
-//! That is the only question a case asks: given this Brief, what does the model
-//! reach for, with what arguments, and in what order? It is also what keeps a
-//! case to one Session — letting the real tools run would drag a web search and
-//! three more Workers into a test about one decision.
+//! Construct: `Interceptor::new(registry, choice)` — installed by `RigBuilder::tools`; `Rig` owns the `Arc`.
+//! Use: `schemas(names, ctx) -> Vec<ToolSchema>` unchanged; `run(ctx, call) -> String` records a
+//! [`RecordedToolCall`]; read via `calls()` / `calls_to()` / `tools_used()` or `Rig::tool_calls` / `Watch::calls`.
+//! Consumers: `Rig` (driver) and every bench case/tripwire (assertions on order, args, and `real`).
 //!
-//! Three modes, and a case usually mixes them: pass a tool through because its
-//! effect is what is being asserted on, answer another from a closure because
-//! its result is a fixture, deny a third because reaching for it at all is the
-//! failure.
+//! | `ToolsChoice` | `Answer` | `run` does | `real` | Events |
+//! | --- | --- | --- | --- | --- |
+//! | `Deny` | — | refuses with text | `false` | synthetic `ToolCalled`/`ToolReturned` |
+//! | `Intercept(f)` | `Real` | delegates to inner | `true` | inner emits |
+//! | `Intercept(f)` | `Say(text)` | returns fixture | `false` | synthetic |
+//! | `Intercept(f)` | `Deny(reason)` | returns reason | `false` | synthetic |
 //!
-//! Defines: [`Interceptor`], [`ToolsChoice`], [`RecordedToolCall`], [`Answer`].
+//! Rules:
+//! - **`schemas` never changes** — filtering would measure a different model.
+//! - **No "run all" variant** — the bench is one Session by construction.
+//! - **Unknown `ToolName` leaves no trace** — same as `Registry`, returns `NoSuchTool` before any Event or log.
+//! - **Unparseable arguments kept as `String`** — broken JSON is a finding, not a lost call.
+//! - **Only non-`real` calls emit here** — `Registry` emits its own pair when it runs.
+//!
+//! Defines: [`Interceptor`], [`ToolsChoice`], [`Answer`], [`RecordedToolCall`], [`RecordedCall`].
 
 use std::sync::Arc;
 
@@ -26,45 +35,41 @@ use crate::roles::{SchemaCtx, ToolName};
 use crate::session::SessionCtx;
 use crate::tools::ToolRunner;
 
-/// One tool call a Session made, and what it got back.
+/// One tool call and what it returned, in order made.
+///
+/// Records parsed `args`, output text, timestamp and whether `real` ran.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordedToolCall {
 	pub session: SessionId,
 	pub name: ToolName,
-	/// What the model sent, parsed. Unparseable arguments are recorded as they
-	/// arrived — a model that sends broken JSON is a finding, not a hole in the
-	/// record.
+	/// Parsed arguments; unparseable JSON kept as `String`.
 	pub args: serde_json::Value,
 	pub output: String,
 	pub at: Timestamp,
-	/// Whether the real tool ran, or the case answered for it.
+	/// Whether the real tool ran.
 	pub real: bool,
 }
 
-/// What the case does about one call.
+/// Answer for one intercepted call.
+///
+/// `Real` delegates to inner, `Say` returns fixture, `Deny` refuses in model-readable words.
 pub enum Answer {
-	/// Let the real tool run.
 	Real,
-	/// Answer with this text and do nothing.
 	Say(String),
-	/// Refuse, in words the model can read.
 	Deny(String),
 }
 
-/// How a Rig gets its tool calls answered.
+/// How the `Rig` answers tool calls. No "run all" variant.
 ///
-/// There is no "run them all" variant. A case that let the whole registry run
-/// would stop being one Session, and that is the one thing the bench does not
-/// measure.
+/// `Intercept` records and answers per call; `Deny` records and refuses all.
 pub enum ToolsChoice {
-	/// Every call recorded, and each one answered by the case.
 	Intercept(Box<dyn Fn(&RecordedCall) -> Answer + Send + Sync>),
-	/// Every call recorded and refused. The default, and what a case asserting
-	/// that a Session got where it was going without any tool at all wants.
 	Deny,
 }
 
-/// A call as the interceptor's closure sees it, before it has an answer.
+/// A call as the `Intercept` closure sees it, before answering.
+///
+/// Session, name and parsed args only; output not yet chosen.
 #[derive(Debug, Clone)]
 pub struct RecordedCall {
 	pub session: SessionId,
@@ -72,7 +77,7 @@ pub struct RecordedCall {
 	pub args: serde_json::Value,
 }
 
-/// The real registry, wrapped.
+/// Wraps the real registry to record and answer calls.
 pub struct Interceptor {
 	inner: Arc<dyn ToolRunner>,
 	choice: ToolsChoice,
@@ -88,12 +93,12 @@ impl Interceptor {
 		}
 	}
 
-	/// Every call so far, in order.
+	/// Returns all recorded calls, in order made.
 	pub fn calls(&self) -> Vec<RecordedToolCall> {
 		self.log.lock().expect("not poisoned").clone()
 	}
 
-	/// The calls to one tool, in order. What most assertions want.
+	/// Returns calls to `name`, in order made.
 	pub fn calls_to(&self, name: ToolName) -> Vec<RecordedToolCall> {
 		self.calls()
 			.into_iter()
@@ -101,7 +106,7 @@ impl Interceptor {
 			.collect()
 	}
 
-	/// The tools reached for at all, in the order they were first used.
+	/// Returns distinct tools used, in first-seen order.
 	pub fn tools_used(&self) -> Vec<ToolName> {
 		let mut used = Vec::new();
 		for call in self.log.lock().expect("not poisoned").iter() {
@@ -115,22 +120,26 @@ impl Interceptor {
 
 #[async_trait]
 impl ToolRunner for Interceptor {
-	/// Unchanged: the model is offered exactly the schemas it would be offered
-	/// in a real run, whatever the case intends to do about the calls. Changing
-	/// them would change the thing being measured.
+	/// Returns schemas for `names` unchanged.
+	///
+	/// Delegates to inner; the model sees the real tool set.
 	fn schemas(&self, names: &[ToolName], ctx: &SchemaCtx) -> Vec<ToolSchema> {
 		self.inner.schemas(names, ctx)
 	}
 
-	/// A name the model sent that matches no [`ToolName`] cannot be recorded as
-	/// one — the real registry would fail it the same way, before ever emitting
-	/// an Event, so this does the same and leaves no trace.
+	/// Answers one tool call and records it.
+	///
+	/// Returns `NoSuchTool` text for unknown names without recording or emitting.
+	/// Otherwise records parsed args, answers per `ToolsChoice`, emits synthetic
+	/// events when not `real`, and appends to log.
 	async fn run(&self, ctx: &SessionCtx, call: &ToolCall) -> String {
+		// Parse tool name
 		let Ok(name) = call.name.parse::<ToolName>() else {
 			return crate::tools::ToolError::NoSuchTool(call.name.clone())
 				.to_string();
 		};
 
+		// Parse arguments
 		let args = serde_json::from_str::<serde_json::Value>(&call.arguments)
 			.unwrap_or_else(|_| {
 				serde_json::Value::String(call.arguments.clone())
@@ -138,6 +147,7 @@ impl ToolRunner for Interceptor {
 		let recorded =
 			RecordedCall { session: ctx.id, name, args: args.clone() };
 
+		// Decide answer
 		let (output, real) = match &self.choice {
 			ToolsChoice::Deny => (
 				format!("Error: {name} is not available in this case."),
@@ -150,9 +160,7 @@ impl ToolRunner for Interceptor {
 			},
 		};
 
-		// The real registry emits ToolCalled/ToolReturned itself when it runs;
-		// an intercepted call never reaches it, so nothing would otherwise say
-		// what the model tried. This is the only place that gap is closed.
+		// Emit synthetic events
 		if !real {
 			ctx.events.emit(crate::event::Event::ToolCalled {
 				session: ctx.id,
@@ -166,6 +174,7 @@ impl ToolRunner for Interceptor {
 			});
 		}
 
+		// Record call
 		self.log
 			.lock()
 			.expect("not poisoned")

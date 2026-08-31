@@ -1,21 +1,39 @@
-//! What a Watcher sees. The one place that decides that.
+//! Event → Frame: what a Watcher sees, decided in one place.
 //!
-//! Two frames. `init` carries every entity, once, when a browser connects.
-//! `patch` carries what one Event changed. A Patch always carries the whole
-//! current entity, fetched fresh from the Store by the id the Event named, so
-//! a browser can replace what it holds for that id outright rather than
-//! merging fields into it. Every connection begins with a fresh `init`, so
-//! reconnecting needs no replay.
+//! Construct: no state — `init_frame(&Snapshot, Spend) -> Frame::Init` and
+//! `patch_for(&Store, &Event) -> Option<Frame>` are pure translators.
+//! Use: `server::watch` sends one `Init` on connect (full `Snapshot` plus
+//! `Spend` and `Run`), then one `patch_for` per `Event`; `Ranked` is built
+//! in `server::on_search`, not here.
+//! Consumers: browser JS over `/ws` via `server::watch` — sole external
+//! consumer; `Store` is read for fresh entities, `Events` is the input bus.
+//! Seam: `Event` → `Frame` translation lives only here; `server` owns
+//! transport, broadcast-lag recovery, and the two Watcher writes (`Say`/`Find`).
 //!
-//! Nothing here recomputes anything: every field on the wire comes off the
-//! value the Store handed over, never derived or summed here.
+//! | `Event` | `Frame` |
+//! | --- | --- |
+//! | `TaskCreated` / `TaskStateChanged` | `Patch(Tasks)` — whole Task re-read, browser replaces |
+//! | `SessionStarted` / `SessionStatusChanged` / `ReflectionRecorded` | `Patch(Sessions)` — whole Session re-read |
+//! | `CallQueued` / `CallStatusChanged` | `Patch(Calls)` — whole Call re-read |
+//! | `ChannelOpened` / `Said` | `Patch(Channels)` — whole Channel re-read |
+//! | `LessonKept` | `Patch(Lessons)` — lesson as kept |
+//! | `MessageAppended` | `Appended` — single message, no conversation resend |
+//! | `RunStarted` / `RunEnded` / `MailReceived` / `ToolCalled` / `ToolReturned` | `None` — nothing a Watcher shows |
+//!
+//! Call trace: `watch → init_frame(snapshot) → send(Init)` then
+//! `events.recv → patch_for → send(Patch/Appended)`; `Lagged` is handled in
+//! `server` with a fresh `Init`, not here.
+//! Rules: **patch carries whole entity, never a delta.**
+//! **nothing recomputed — every wire field comes off the Store value.**
+//! **reconnect gets fresh `Init`, no replay.**
+//! **broadcast is lossy — slow Watcher loses Events, never slows the swarm.**
 //!
 //! Defines: [`Frame`], [`Bucket`], [`patch_for`], [`init_frame`].
 
 use crate::event::Event;
 use crate::store::{Snapshot, Store};
 
-/// Which collection an entity belongs to on the wire.
+/// Collection a patched entity belongs to on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Bucket {
@@ -26,36 +44,37 @@ pub enum Bucket {
 	Lessons,
 }
 
-/// One thing sent to a browser.
+/// One frame sent to a Watcher browser.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Frame {
-	/// Everything, on connect. The Run rides along so a Watcher can say how
-	/// long Sandman has been up without timing its own connection — a
-	/// reconnect must not look like a restart.
+	/// Everything on connect — every entity plus `Spend` and `Run`.
 	Init {
 		state: serde_json::Value,
 		spend: serde_json::Value,
 		run: serde_json::Value,
 	},
-	/// One entity that changed.
+	/// One entity that changed — whole current value.
 	Patch {
 		bucket: Bucket,
 		id: String,
 		entity: serde_json::Value,
 	},
-	/// One message appended to a Session, without resending the conversation.
+	/// One message appended, without resending the conversation.
 	Appended {
 		session: String,
 		index: usize,
 		message: serde_json::Value,
 	},
-	/// The answer to a Lessons search: ids and scores, in order.
+	/// Answer to a Lessons search — ids and scores in rank order.
 	Ranked { query: String, hits: Vec<(String, f32)> },
 }
 
-/// The first frame a browser gets.
+/// Build the first frame a browser gets.
+///
+/// Maps every entity in the `Snapshot` by id and bundles `Spend` and `Run`.
 pub fn init_frame(snapshot: &Snapshot, spend: crate::domain::Spend) -> Frame {
+	// Build id map
 	fn map<T: serde::Serialize>(
 		items: &[T],
 		id: impl Fn(&T) -> String,
@@ -68,6 +87,7 @@ pub fn init_frame(snapshot: &Snapshot, spend: crate::domain::Spend) -> Frame {
 		)
 	}
 
+	// Assemble init payload
 	let state = serde_json::json!({
 		"tasks": map(&snapshot.tasks, |t| t.id.to_string()),
 		"sessions": map(&snapshot.sessions, |s| s.id.to_string()),
@@ -83,36 +103,42 @@ pub fn init_frame(snapshot: &Snapshot, spend: crate::domain::Spend) -> Frame {
 	}
 }
 
-/// What one Event means to a browser.
+/// Translate one `Event` into a Watcher frame.
 ///
-/// Some Events change nothing a Watcher shows, and produce nothing. Every
-/// Patch carries the whole current entity — fetched fresh from the Store —
-/// rather than just the field the Event named, so a browser never has to
-/// merge a partial record: it replaces what it holds for that id outright.
+/// Returns `None` when the Event changes nothing a Watcher shows.
+/// Re-reads the entity from the `Store` so a `Patch` carries the whole current value.
 pub fn patch_for(store: &Store, event: &Event) -> Option<Frame> {
+	// Build patch helper
 	let patch = |bucket: Bucket, id: String, entity: serde_json::Value| {
 		Some(Frame::Patch { bucket, id, entity })
 	};
 
+	// Map event to frame
 	match event {
+		// Run lifecycle - nothing a Watcher shows
 		Event::RunStarted(_) | Event::RunEnded(_) => None,
 
+		// Task created - patch directly
 		Event::TaskCreated(task) => {
 			patch(Bucket::Tasks, task.id.to_string(), json(task))
 		},
+		// Task changed - re-read then patch
 		Event::TaskStateChanged { task, .. } => {
 			let task = store.task(*task).ok().flatten()?;
 			patch(Bucket::Tasks, task.id.to_string(), json(&task))
 		},
 
+		// Session started - patch directly
 		Event::SessionStarted(session) => {
 			patch(Bucket::Sessions, session.id.to_string(), json(session))
 		},
+		// Session or reflection changed - re-read then patch
 		Event::SessionStatusChanged { session, .. }
 		| Event::ReflectionRecorded { session, .. } => {
 			let session = store.session(*session).ok().flatten()?;
 			patch(Bucket::Sessions, session.id.to_string(), json(&session))
 		},
+		// Message appended - single message
 		Event::MessageAppended { session, index, message } => {
 			Some(Frame::Appended {
 				session: session.to_string(),
@@ -120,30 +146,36 @@ pub fn patch_for(store: &Store, event: &Event) -> Option<Frame> {
 				message: json(message),
 			})
 		},
+		// Mail received - not shown
 		Event::MailReceived { .. } => None,
 
+		// Call queued - patch directly
 		Event::CallQueued(call) => {
 			patch(Bucket::Calls, call.id.to_string(), json(call))
 		},
+		// Call changed - re-read then patch
 		Event::CallStatusChanged { call, .. } => {
 			let call = store.call(*call).ok().flatten()?;
 			patch(Bucket::Calls, call.id.to_string(), json(&call))
 		},
 
+		// Channel opened or said - re-read then patch
 		Event::ChannelOpened { channel, .. } | Event::Said { channel, .. } => {
 			let channel = store.channel(*channel).ok().flatten()?;
 			patch(Bucket::Channels, channel.id.to_string(), json(&channel))
 		},
 
+		// Lesson kept - patch directly
 		Event::LessonKept(lesson) => {
 			patch(Bucket::Lessons, lesson.id.to_string(), json(lesson))
 		},
 
+		// Tool activity - not shown
 		Event::ToolCalled { .. } | Event::ToolReturned { .. } => None,
 	}
 }
 
-/// Shorthand for the one thing every arm above does to its payload.
+/// Serialize a domain value to JSON.
 fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {
 	serde_json::to_value(value).expect("domain values always serialize")
 }

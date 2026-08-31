@@ -1,13 +1,35 @@
-//! Running the queue. The `task_manager` Role's tools.
+//! Operating the queue. The `TaskManager` Role's two tools.
 //!
-//! `cancel_task` is the only write in Sandman that stops work rather than
-//! starting it, and it is terminal: a pending Task never runs, a running one
-//! ends at its Session's next decision point with no Result, and a repeating one
-//! stops as a chain — otherwise a running occurrence would re-arm the next when
-//! it finished.
+//! `list_tasks` reads, `cancel_task` is the only write in Sandman that stops
+//! work rather than starting it.
 //!
-//! Whoever was waiting on a cancelled Task is told, so nothing hangs on work
-//! that will never produce a Result.
+//! Construct: `ListTasks`/`CancelTask` implement [`Tool`], built in
+//! `Registry::all` with no state; named via `ToolName::ListTasks`/
+//! `ToolName::CancelTask`.
+//! Use: `Tool::call(ctx, args) -> String` — `ListTasks` parses optional
+//! `state`/`count` → `Store::list_tasks(ListFilter)` → one line per hit;
+//! `CancelTask` parses `task_id` → `Harness::cancel_task` → wording per
+//! `CancelOutcome`.
+//! Consumers: `roles.rs` assigns both to `TaskManager` (with `SearchTasks`/
+//! `CreateTaskFull`); `Store` owns list filtering, `Harness` owns cancel policy
+//! (`chain_of` → `cancel_tasks` → `waiters::resolve`); bench replaces
+//! `ToolRunner` to observe without touching the queue.
+//!
+//! Call trace: `turn → scheduler.request → tools.run(list_tasks) → store.list_tasks → String → loop`
+//! and `turn → tools.run(cancel_task) → harness.cancel_task → store.cancel_tasks → waiters.resolve → String`.
+//!
+//! | `CancelOutcome` | `CancelTask` replies |
+//! | --- | --- |
+//! | `NotFound` | no such Task |
+//! | `Completed` | already completed, nothing to stop |
+//! | `Already` | already cancelled |
+//! | `Cancelled{ids, running}` | ids stopped; notes if Session halts at next decision |
+//!
+//! Rules: **cancel is terminal — no Result, stops repeating chain, no re-arm.**
+//! **pending never runs, running stops at next decision with no Result.**
+//! **waiters told so `await_result` never hangs.**
+//! **list order is newest first; state enum from `TaskStateName` so impossible states cannot be named.**
+//! **list is read-only via `Store`, cancel is write via `Harness` — only tool that stops work.**
 //!
 //! Defines: [`ListTasks`], [`CancelTask`].
 
@@ -24,10 +46,10 @@ use crate::store::ListFilter;
 
 use super::{Tool, ToolError};
 
-/// Enumerate the queue, newest first. Filters by state, or to repeating work.
+/// Enumerate the queue, newest first. Filters by state or count.
 pub struct ListTasks;
 
-/// Stop a Task by id.
+/// Stop a Task by id. Terminates its repeating chain and releases waiters.
 pub struct CancelTask;
 
 #[async_trait]
@@ -36,9 +58,11 @@ impl Tool for ListTasks {
 		ToolName::ListTasks
 	}
 
-	/// The `state` enum is built from every [`TaskStateName`], so it cannot name
-	/// a state a Task can never be in.
+	/// Build schema with state enum from `TaskStateName` and optional count.
+	///
+	/// State enumerates every valid Task state; no impossible value.
 	fn schema(&self, _ctx: &SchemaCtx) -> ToolSchema {
+		// Collect states
 		let states: Vec<&'static str> =
 			TaskStateName::VARIANTS.iter().map(Into::into).collect();
 		ToolSchema {
@@ -62,7 +86,11 @@ impl Tool for ListTasks {
 		}
 	}
 
+	/// Parse state and count, list matching Tasks and render them.
+	///
+	/// Returns an error sentence on invalid state.
 	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String {
+		// Parse state filter
 		let state = match args.get("state").and_then(|v| v.as_str()) {
 			None => None,
 			Some(given) => match given.parse() {
@@ -75,11 +103,13 @@ impl Tool for ListTasks {
 				},
 			},
 		};
+		// Parse count limit
 		let count = args
 			.get("count")
 			.and_then(|v| v.as_u64())
 			.map(|n| n as usize);
 
+		// List and render
 		match ctx.harness.store.list_tasks(ListFilter { state, count }) {
 			Ok(tasks) => render_list(&tasks),
 			Err(e) => format!("Error: {e}"),
@@ -93,6 +123,9 @@ impl Tool for CancelTask {
 		ToolName::CancelTask
 	}
 
+	/// Build schema requiring one `task_id` string.
+	///
+	/// Same id form as `list_tasks` output.
 	fn schema(&self, _ctx: &SchemaCtx) -> ToolSchema {
 		ToolSchema {
 			name: self.name().to_string(),
@@ -112,10 +145,11 @@ impl Tool for CancelTask {
 		}
 	}
 
-	/// Says what actually happened in words: which Tasks stopped, whether one of
-	/// them was running, and — for a Task already completed or already cancelled
-	/// — that there was nothing to stop.
+	/// Parse `task_id`, cancel its chain and report outcome.
+	///
+	/// Returns Already/Completed/NotFound wording when nothing stops.
 	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String {
+		// Parse task id
 		let task = match args.get("task_id").and_then(|v| v.as_str()) {
 			None => return ToolError::Missing { field: "task_id" }.to_string(),
 			Some(s) => match TaskId::from_str(s) {
@@ -126,16 +160,21 @@ impl Tool for CancelTask {
 			},
 		};
 
+		// Cancel chain
 		match ctx.harness.cancel_task(task).await {
+			// - Not found
 			Ok(CancelOutcome::NotFound) => {
 				ToolError::NoSuchTask(task.to_string()).to_string()
 			},
+			// - Already completed
 			Ok(CancelOutcome::Completed) => {
 				format!("{task} already completed. Nothing to stop.")
 			},
+			// - Already cancelled
 			Ok(CancelOutcome::Already) => {
 				format!("{task} was already cancelled.")
 			},
+			// - Cancelled with chain
 			Ok(CancelOutcome::Cancelled { ids, running }) => {
 				let ids = ids
 					.iter()
@@ -151,12 +190,15 @@ impl Tool for CancelTask {
 					format!("Cancelled {ids}.")
 				}
 			},
+			// - Store error
 			Err(e) => format!("Error: {e}"),
 		}
 	}
 }
 
-/// One line per Task: id, state, Role and Title.
+/// Format Tasks as one line per Task: id, state, Role and Title.
+///
+/// Returns "No Tasks match." when empty.
 fn render_list(tasks: &[TaskSummary]) -> String {
 	if tasks.is_empty() {
 		return "No Tasks match.".to_string();

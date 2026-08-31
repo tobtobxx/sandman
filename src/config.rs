@@ -1,25 +1,30 @@
-//! `config.toml`: everything about the world Sandman runs in.
+//! One file, one read: everything about the world Sandman runs in.
 //!
-//! Which models, where the database and the trace go, which Channels open, what
-//! the Watcher listens on. Not policy — nothing here decides what the swarm
-//! does, only what it is made of.
+//! Models, paths, channels, watcher — not policy. Read once at start, shared
+//! as `Arc<Config>`; nothing else is configured anywhere.
 //!
-//! **Nothing has a built-in fallback.** A missing key is an error at start, and
-//! an unknown key is one too. The one place a default lives is
-//! `default-config.toml`, compiled in with `include_str!` and written out the
-//! first time Sandman finds no configuration — after which it stops, because
-//! there is nothing sensible to run before a human has read that file. The
-//! exception is `[models]`, where a Role left out falls back to `all`; absence
-//! there *means* something, which is why it is allowed to mean it.
+//! Construct: `Config::path(flag)` → path; `Config::load(path)` reads or writes
+//! `DEFAULT` (`include_str!("default-config.toml")`) and returns `Written` on
+//! first start; `read` does not write; `parse`/`parse_with(env)` expand then
+//! validate. Use: `Harness { config: Arc<Config> }` — `for_all`/`for_role`/
+//! `for_comms`/`for_metacognition`/`for_grader` resolve slug → `&ModelSpec`
+//! (slugs checked at load, so `resolve` never fails). Consumers: `bin/sandman`
+//! (`assemble` → Store, Events, Channels, web, Embedder), `model::Models::from_config`,
+//! `memory::OpenRouterEmbedder::from_spec`, `session` (interrupt_interval), `bench::Rig`.
 //!
-//! Any string may name an environment variable — `$NAME`, `${NAME}`, `$$` for a
-//! literal `$`. A variable that is not set is an error rather than an empty
-//! string: `$XDG_STATE_HOME/sandman/sandman.sqlite` silently becoming
-//! `/sandman/sandman.sqlite` is how a database ends up somewhere nobody meant.
-//! Expansion happens on the parsed tree before it becomes a [`Config`], so it
-//! reaches every string in the file and every string added to it later.
+//! Rules:
+//! **No fallback in code.** Missing or unknown key is an error at load; `DEFAULT` is the only defaults, as text so file and code cannot drift.
+//! **One fallback in file.** Optional `[models]` keys (`comms`, `planning`, …) fall back to `all`; absence means something, which is why it may mean it.
+//! **Every string is expanded.** `$NAME` / `${NAME}` / `$$` on the parsed tree before it becomes `Config`; unset is an error, not empty; keys never expanded.
+//! **Every named slug must exist.** `check_slugs` fails at start, not mid-run; a slug nothing names is kept without complaint.
+//! **Hash by value.** `ModelSpec` hashed by all fields, so two slugs naming the same endpoint share one adapter in `Models`.
 //!
-//! Defines: [`Config`], [`ModelSpec`], [`ConfigError`], [`DEFAULT`].
+//! ```text
+//! path → load → read → parse → parse_with → expand_tree → expand → check_slugs → Config
+//!         │       └─ Written if NotFound (writes DEFAULT mode 0o600)
+//!         └─ never overwrites a file that fails to parse
+//! ```
+//! Defines: `Config`, `ModelSpec`, `ConfigError`, `DEFAULT`.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -27,17 +32,13 @@ use std::path::{Path, PathBuf};
 
 use crate::roles::RoleName;
 
-/// The configuration written out when there is none. The only defaults there
-/// are, and they are text rather than code so that what a human reads and what
-/// Sandman runs cannot drift apart.
+/// Single defaults text, written on first start.
 pub const DEFAULT: &str = include_str!("default-config.toml");
 
-/// The whole file.
+/// All world configuration from `config.toml`.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-	/// Every model this Sandman knows, by slug. Everything else names one of
-	/// these; a slug nothing names is kept and not complained about.
 	pub model: BTreeMap<String, ModelSpec>,
 	pub models: ModelChoices,
 	pub sandman: Sandman,
@@ -48,38 +49,23 @@ pub struct Config {
 	pub bench: Bench,
 }
 
-/// One model, and how to reach it.
-///
-/// Hashed by everything it holds, so two purposes that name the same model —
-/// whether by the same slug or by two slugs that say the same thing — share one
-/// adapter. See [`crate::model::Models`].
+/// One model and how to reach it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSpec {
-	/// A chat-completions URL.
 	pub endpoint: String,
-	/// Sent as `Authorization: Bearer`. May be empty for a local endpoint.
 	pub api_key: String,
-	/// What the endpoint calls the model.
 	pub model: String,
-	/// How much the model may think before it answers. `false` in the file is
-	/// `None` here and asks for no reasoning at all; anything else is sent as
-	/// written.
 	#[serde(deserialize_with = "effort")]
 	pub effort: Option<String>,
 }
 
-/// Which model does which work.
-///
-/// The Roles are named fields rather than a map, so [`ModelChoices::for_role`]
-/// matches [`RoleName`] exhaustively: a Role added without a line here does not
-/// compile.
+/// Which slug does which work.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelChoices {
-	/// What every Session uses unless one of the rest names another.
+	/// Fallback for every Session.
 	pub all: String,
-	/// The Session that talks to a human.
 	pub comms: Option<String>,
 	pub planning: Option<String>,
 	pub research: Option<String>,
@@ -87,71 +73,56 @@ pub struct ModelChoices {
 	pub task_manager: Option<String>,
 }
 
-/// Where Sandman keeps things, and what it listens on.
+/// Paths and listen addresses.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sandman {
 	pub sqlite_path: PathBuf,
 	pub log_path: PathBuf,
-	/// How `sandman task`, `sandman list` and `sandman spend` reach a Sandman
-	/// that is already running.
 	pub control_socket: PathBuf,
 	pub webui_address: IpAddr,
 	pub webui_port: u16,
 }
 
+/// Metacognition settings.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Metacognition {
-	/// How many messages may pass with no review and no interrupt before one
-	/// fires.
 	pub interrupt_interval: usize,
 	pub model: String,
 }
 
-/// What the `memory` Role searches with. Not a chat model: its own endpoint,
-/// and no effort to set.
+/// Embedding model for `memory` search.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Embedding {
 	pub endpoint: String,
 	pub api_key: String,
 	pub model: String,
-	/// Longer inputs cost more and embed worse. The cap is here so one runaway
-	/// Brief cannot fail a whole batch.
 	pub max_input_chars: usize,
 }
 
-/// The ways a human reaches the swarm.
+/// Ways a human reaches the swarm.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Channels {
-	/// The terminal. Turned off, the trace goes to stdout as well as to the
-	/// log, because nothing else is using it.
 	pub stdio: bool,
-	/// The Watcher's chat pane. The UI is served either way; this only decides
-	/// whether that pane is a Channel or says it is turned off.
 	pub web: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tools {
-	/// What `web_search` asks.
 	pub searxng_endpoint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bench {
-	/// The grader's model, by slug.
 	pub grader: String,
 }
 
-/// Why Sandman has no configuration to run on.
-///
-/// [`ConfigError::Written`] is not a failure of anything — it is the first-start
-/// path, and it is an error because it is a reason to stop.
+/// Failure to obtain a `Config`.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
 	#[error(
@@ -184,9 +155,10 @@ pub enum ConfigError {
 }
 
 impl Config {
-	/// Where the configuration lives: `--config`, else
-	/// `$XDG_CONFIG_HOME/sandman/config.toml`. `$XDG_CONFIG_HOME` must be set;
-	/// there is no fallback.
+	/// Resolve configuration path.
+	///
+	/// Uses `--config` if given, else `$XDG_CONFIG_HOME/sandman/config.toml`.
+	/// Fails with `Nowhere` if the variable is unset.
 	pub fn path(flag: Option<PathBuf>) -> Result<PathBuf, ConfigError> {
 		if let Some(path) = flag {
 			return Ok(path);
@@ -196,12 +168,10 @@ impl Config {
 		Ok(PathBuf::from(dir).join("sandman").join("config.toml"))
 	}
 
-	/// Read the configuration, or write the default one and stop.
+	/// Read config, or write `DEFAULT` and stop.
 	///
-	/// Writing happens only when there is no file at all. A file that is there
-	/// and will not parse is left exactly as it is: overwriting a configuration
-	/// a human is in the middle of editing would be the worst possible answer to
-	/// a missing comma.
+	/// Writes only when no file exists; parse errors are left untouched.
+	/// Returns `Written` on first start.
 	pub fn load(path: &Path) -> Result<Config, ConfigError> {
 		match Config::read(path) {
 			Err(ConfigError::Read { source, .. })
@@ -214,10 +184,9 @@ impl Config {
 		}
 	}
 
-	/// The configuration as it is, and nothing written if it is not there.
+	/// Read config without writing.
 	///
-	/// What a bench reads: a case is not the place to create a human's
-	/// configuration, and one that cannot find it should say so and stop.
+	/// Returns `Read` or `Parse` on failure.
 	pub fn read(path: &Path) -> Result<Config, ConfigError> {
 		let text = std::fs::read_to_string(path).map_err(|source| {
 			ConfigError::Read { path: path.to_path_buf(), source }
@@ -230,15 +199,16 @@ impl Config {
 		})
 	}
 
-	/// Parse one configuration: expand what it names, then read it, then check
-	/// that every slug it names exists.
+	/// Parse config text with the real environment.
+	///
+	/// Expands vars, deserializes and checks slugs.
 	pub fn parse(text: &str) -> Result<Config, ConfigError> {
 		Config::parse_with(text, &|name| std::env::var(name).ok())
 	}
 
-	/// The same, against an environment the caller supplies. For anything that
-	/// must not read the one it is running in — a test, or a configuration read
-	/// on behalf of somewhere else.
+	/// Parse config text against a supplied environment.
+	///
+	/// For tests or callers that must not read the process environment.
 	pub fn parse_with(
 		text: &str,
 		env: &dyn Fn(&str) -> Option<String>,
@@ -251,7 +221,7 @@ impl Config {
 		Ok(config)
 	}
 
-	/// Every slug this configuration names, and where it named it.
+	/// Every slug this configuration names.
 	fn named_slugs(&self) -> Vec<(String, &str)> {
 		let mut named: Vec<(String, &str)> =
 			vec![("models.all".to_string(), self.models.all.as_str())];
@@ -271,8 +241,7 @@ impl Config {
 		named
 	}
 
-	/// A model named by something that has no table is an error at start, not a
-	/// failed call in the middle of a run.
+	/// Verify every named slug has a `[model.*]` table.
 	fn check_slugs(&self) -> Result<(), ConfigError> {
 		for (key, slug) in self.named_slugs() {
 			if !self.model.contains_key(slug) {
@@ -285,46 +254,44 @@ impl Config {
 		Ok(())
 	}
 
-	/// One model by slug.
+	/// Lookup spec by slug.
 	pub fn spec(&self, slug: &str) -> Option<&ModelSpec> {
 		self.model.get(slug)
 	}
 
-	/// The model named by `models.all` — what a Session uses when nothing names
-	/// another, and the name a Run is recorded under.
+	/// Spec for `models.all`.
 	pub fn for_all(&self) -> &ModelSpec {
 		self.resolve(&self.models.all)
 	}
 
-	/// The model a Role's Workers talk to.
+	/// Spec for a Role's Workers.
 	pub fn for_role(&self, role: RoleName) -> &ModelSpec {
 		self.resolve(self.models.named_for(role).unwrap_or(&self.models.all))
 	}
 
-	/// The model a Comms Session talks to.
+	/// Spec for the Comms Session.
 	pub fn for_comms(&self) -> &ModelSpec {
 		self.resolve(self.models.comms.as_deref().unwrap_or(&self.models.all))
 	}
 
-	/// The model a review or an interrupt talks to.
+	/// Spec for review and interrupt.
 	pub fn for_metacognition(&self) -> &ModelSpec {
 		self.resolve(&self.metacognition.model)
 	}
 
-	/// The model a bench grader talks to.
+	/// Spec for the bench grader.
 	pub fn for_grader(&self) -> &ModelSpec {
 		self.resolve(&self.bench.grader)
 	}
 
-	/// Every slug is checked at load, so by the time anything asks, it is there.
+	/// Resolve slug, panicking if unchecked.
 	fn resolve(&self, slug: &str) -> &ModelSpec {
 		self.spec(slug).expect("slugs are checked at load")
 	}
 }
 
 impl ModelChoices {
-	/// The slug named for this Role, if one is. Matched exhaustively: a Role
-	/// with no line in this struct does not compile.
+	/// Slug for this `Role`, if one is configured.
 	fn named_for(&self, role: RoleName) -> Option<&str> {
 		match role {
 			RoleName::Research => self.research.as_deref(),
@@ -335,9 +302,7 @@ impl ModelChoices {
 	}
 }
 
-/// Write the default configuration, and the directory it goes in.
-///
-/// Readable and writable by its owner alone: it carries API keys.
+/// Write `DEFAULT` to `path` with parent dirs and `0o600`.
 fn write_default(path: &Path) -> Result<(), ConfigError> {
 	let failed = |source: std::io::Error| ConfigError::Write {
 		path: path.to_path_buf(),
@@ -356,8 +321,7 @@ fn write_default(path: &Path) -> Result<(), ConfigError> {
 	Ok(())
 }
 
-/// Expand every string in the tree, keys excepted — a slug is a name in this
-/// file, not a name in the environment.
+/// Expand env vars in every string of the parsed tree.
 fn expand_tree(
 	value: &mut toml::Value,
 	env: &dyn Fn(&str) -> Option<String>,
@@ -379,29 +343,28 @@ fn expand_tree(
 	Ok(())
 }
 
-/// One string, with what it names put in.
-///
-/// `$NAME` and `${NAME}` are the environment; `$$` is a literal `$`; a `$`
-/// before anything that is not a name is itself. A name that is not set is an
-/// error — an empty string in a path is how a database ends up somewhere nobody
-/// meant.
+/// Expand `$NAME` / `${NAME}` / `$$` in one string.
 fn expand(
 	text: &str,
 	env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<String, ConfigError> {
+	// Init buffer
 	let mut out = String::with_capacity(text.len());
 	let mut rest = text;
 
+	// Scan for next variable
 	while let Some(at) = rest.find('$') {
 		out.push_str(&rest[..at]);
 		rest = &rest[at + 1..];
 
+		// Handle escape
 		if let Some(tail) = rest.strip_prefix('$') {
 			out.push('$');
 			rest = tail;
 			continue;
 		}
 
+		// Extract name
 		let (name, tail) = match rest.strip_prefix('{') {
 			Some(braced) => match braced.find('}') {
 				Some(end) => (&braced[..end], &braced[end + 1..]),
@@ -420,9 +383,9 @@ fn expand(
 			},
 		};
 
+		// Handle bare delimiter
 		if name.is_empty() {
-			// `$` before anything that cannot start a name is a `$`. `${}` is
-			// not that — it is someone meaning a name and writing none.
+			// Bare `$` is literal, `${}` is error
 			if rest.starts_with('{') {
 				return Err(ConfigError::BadVar {
 					text: text.to_string(),
@@ -434,6 +397,7 @@ fn expand(
 			continue;
 		}
 
+		// Substitute variable
 		match env(name) {
 			Some(value) => out.push_str(&value),
 			None => return Err(ConfigError::UnsetVar(name.to_string())),
@@ -441,14 +405,12 @@ fn expand(
 		rest = tail;
 	}
 
+	// Append remainder
 	out.push_str(rest);
 	Ok(out)
 }
 
-/// `false` means no reasoning at all; anything else is a level, sent as written.
-///
-/// `true` is refused. It would have to mean "some amount, you choose", and
-/// nothing here can choose.
+/// Deserialize `effort`: `false` → `None`, level string → `Some`, `true` rejected.
 fn effort<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
 	D: serde::Deserializer<'de>,
@@ -476,8 +438,6 @@ where
 mod tests {
 	use super::*;
 
-	/// The environment the shipped default names. Stubbed rather than set, so
-	/// the test says what it depends on and no other test can see it.
 	fn stub(name: &str) -> Option<String> {
 		match name {
 			"XDG_STATE_HOME" => Some("/home/someone/.local/state".to_string()),

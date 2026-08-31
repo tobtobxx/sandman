@@ -1,19 +1,42 @@
-//! `sandman.log`: the sequence, which a view of current state cannot show.
+//! Append-only line trace of `Event` order — what a snapshot cannot show.
 //!
-//! Two Tasks that both ran are indistinguishable in a snapshot, and the log is
-//! where their order lives. It reads the [`crate::event::Event`] stream and
-//! writes one line per Event, so nothing anywhere has to remember to log
-//! anything.
+//! Construct: `Logger::create(path, verbosity, echo)` truncates `path`; `path`
+//! is per-Harness (config `log_path` or bench temp dir) so parallel Harnesses
+//! never collide and no `cwd` move is needed.
+//! Use: `Arc<Logger>::follow(&Events)` spawned once at startup — `subscribe`s,
+//! `recv`s and `write`s one `timestamp category detail` line per `Event` under
+//! a single `Mutex<File>`; `note` writes a non-Event line (banner, warnings);
+//! `render` + `body` build the detail, `banner` builds the opening line.
 //!
-//! **The log is the index; the database is the content.** A line names what
-//! happened and the id to look it up under — it does not carry a model's whole
-//! reply, a Brief, or a recorded request. Those are rows now, and a log that
-//! reprinted them would bury the sequence it exists to show. `--verbose`
-//! restores the bodies for a session where that is what is wanted.
+//! Consumers:
+//! | Caller | Builds | Echo |
+//! | --- | --- | --- |
+//! | `bin/sandman::assemble` | `Logger::create(paths.log, Verbosity, Echo)` | `Quiet` if `stdio` channel owns terminal, `Stdout` otherwise |
+//! | `bench/rig::build` | `Logger::create(temp/sandman.log, Verbosity, Quiet)` | always `Quiet` |
 //!
-//! The terminal shows only the conversation, so the two never interleave —
-//! unless the terminal is not a Channel at all, in which case [`Echo::Stdout`]
-//! puts the trace there too rather than leave it empty.
+//! `Event` → detail (`render`):
+//! | `Event` | Detail after `timestamp category` |
+//! | --- | --- |
+//! | `RunStarted`/`RunEnded` | `run id` + model |
+//! | `TaskCreated`/`TaskStateChanged` | `task id` + title/role/brief or new state |
+//! | `SessionStarted`/`SessionStatusChanged`/`MessageAppended`/`ReflectionRecorded`/`MailReceived` | `session id` + kind/status/index/body |
+//! | `CallQueued`/`CallStatusChanged` | `call id` + model/tier or new status |
+//! | `ChannelOpened`/`Said` | `channel id` + session/utterance |
+//! | `LessonKept` | `lesson id` + subject/body |
+//! | `ToolCalled`/`ToolReturned` | `session id` + tool name/args/output |
+//!
+//! Seam `Verbosity`/`Echo`:
+//! | Variant | `Terse` / `Quiet` | `Verbose` / `Stdout` |
+//! | --- | --- | --- |
+//! | `Verbosity` | `elide` to 60-char snippet + len | `format!("{text:?}")` whole |
+//! | `Echo` | file only | also `println!` under same lock |
+//!
+//! Rules:
+//! - **One line per `Event`, nothing else logs.** Nothing has to remember to log.
+//! - **Log is index, database is content.** Bodies are lengths/counts in `Terse`, quoted whole in `Verbose`.
+//! - **Terminal owns conversation.** `Quiet` keeps trace in file alone; `Stdout` only when no Channel owns terminal.
+//! - **One `Mutex<File>` guards both file and stdout.** Prevents interleaved lines.
+//! - **Broadcast is lossy, not blocking.** `Lagged(n)` is noted, never stalls the swarm.
 //!
 //! Defines: [`Logger`], [`Verbosity`], [`Echo`], [`banner`].
 
@@ -25,33 +48,29 @@ use strum::IntoDiscriminant;
 use crate::domain::{AssistantBody, Message, ReflectionResult};
 use crate::event::Event;
 
-/// How much of an Event's content reaches the log.
+/// How much body text a log line carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Verbosity {
-	/// One line per Event, bodies elided to a length and a count.
+	/// One line per Event, bodies elided to length + snippet.
 	#[default]
 	Terse,
-	/// Bodies written out whole. For a run being read closely.
+	/// Bodies written whole.
 	Verbose,
 }
 
-/// Whether the trace also goes to the terminal.
+/// Whether trace also goes to terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Echo {
-	/// The log file alone. The terminal is the human's, and the conversation
-	/// is what belongs there.
+	/// File alone; terminal shows conversation.
 	#[default]
 	Quiet,
-	/// Stdout as well, because the terminal is not a Channel and nothing else
-	/// is using it.
+	/// Also stdout; terminal has no Channel.
 	Stdout,
 }
 
-/// Writes the trace.
+/// Append-only trace writer.
 ///
-/// Takes the log's path rather than writing to the working directory, so several
-/// Harnesses in one process — a bench running its cases — never write over each
-/// other and nothing has to move `cwd` to keep them apart.
+/// Holds file, verbosity and echo.
 pub struct Logger {
 	file: std::sync::Mutex<std::fs::File>,
 	verbosity: Verbosity,
@@ -59,7 +78,9 @@ pub struct Logger {
 }
 
 impl Logger {
-	/// Open a log, truncating whatever was there.
+	/// Create log file at `path`, truncating existing content.
+	///
+	/// Creates file if missing. Fails if parent does not exist.
 	pub fn create(
 		path: &Path,
 		verbosity: Verbosity,
@@ -73,28 +94,36 @@ impl Logger {
 		Ok(Logger { file: std::sync::Mutex::new(file), verbosity, echo })
 	}
 
-	/// Follow an Event stream until it ends. Spawned once, at startup.
+	/// Follow Event stream until closed.
+	///
+	/// Subscribes and writes each Event; notes lag. Spawned once at startup.
 	pub async fn follow(
 		self: std::sync::Arc<Self>,
 		events: &crate::event::Events,
 	) {
+		// Subscribe to stream
 		use tokio::sync::broadcast::error::RecvError;
 		let mut rx = events.subscribe();
 		loop {
 			match rx.recv().await {
+				// Write event
 				Ok(event) => self.write(&event),
+				// Handle lag
 				Err(RecvError::Lagged(n)) => {
 					self.note(
 						"log",
 						&format!("fell behind, dropped {n} event(s)"),
 					);
 				},
+				// Handle close
 				Err(RecvError::Closed) => return,
 			}
 		}
 	}
 
-	/// Write one Event.
+	/// Write one Event as timestamped line.
+	///
+	/// Formats `timestamp category detail` and appends.
 	pub fn write(&self, event: &Event) {
 		let line = format!(
 			"{} {:<7} {}",
@@ -105,32 +134,36 @@ impl Logger {
 		self.append(&line);
 	}
 
-	/// A line that is not an Event: a startup banner, a warning from the
-	/// Harness, a note from the bench driver.
+	/// Write non-Event line.
+	///
+	/// Formats `timestamp category text` and appends. Used for banners and warnings.
 	pub fn note(&self, category: &str, text: &str) {
 		let line = format!("{} {:<7} {}", timestamp(), category, text);
 		self.append(&line);
 	}
 
 	fn append(&self, line: &str) {
+		// Append to file
 		let mut file = self.file.lock().unwrap();
 		let _ = writeln!(file, "{line}");
 		if self.echo == Echo::Stdout {
-			// Under the same lock as the file, so two Events cannot interleave
-			// on one line here while staying apart in the log.
+			// Mirror to stdout
 			println!("{line}");
 		}
 	}
 
-	/// One Event's detail, past the timestamp and category every line already
-	/// carries.
+	/// Render detail after timestamp and category.
+	///
+	/// Maps each `Event` variant to id plus summary.
 	fn render(&self, event: &Event) -> String {
 		match event {
+			// Render run
 			Event::RunStarted(run) => {
 				format!("{} started, model {}", run.id, run.model)
 			},
 			Event::RunEnded(run) => format!("{} ended", run.id),
 
+			// Render task
 			Event::TaskCreated(task) => format!(
 				"{} created \"{}\", role {}, brief {}",
 				task.id,
@@ -142,6 +175,7 @@ impl Logger {
 				format!("{task} -> {}", to.discriminant())
 			},
 
+			// Render session
 			Event::SessionStarted(session) => {
 				format!("{} started, {}", session.id, session.kind)
 			},
@@ -165,6 +199,7 @@ impl Logger {
 				self.body(&incoming.text)
 			),
 
+			// Render call
 			Event::CallQueued(call) => {
 				format!(
 					"{} queued, model {}, tier {:?}",
@@ -175,6 +210,7 @@ impl Logger {
 				format!("{call} -> {to}")
 			},
 
+			// Render channel
 			Event::ChannelOpened { channel, session } => {
 				format!("{channel} opened for {session}")
 			},
@@ -184,6 +220,7 @@ impl Logger {
 				self.body(&utterance.text)
 			),
 
+			// Render lesson
 			Event::LessonKept(lesson) => format!(
 				"{} kept, about {} {}",
 				lesson.id,
@@ -191,6 +228,7 @@ impl Logger {
 				self.body(&lesson.text)
 			),
 
+			// Render tool
 			Event::ToolCalled { session, name, args } => {
 				format!(
 					"{session} called {name} {}",
@@ -203,7 +241,9 @@ impl Logger {
 		}
 	}
 
-	/// One body of free text: elided in `Terse`, whole in `Verbose`.
+	/// Format body per verbosity.
+	///
+	/// `Terse` elides to snippet, `Verbose` quotes whole.
 	fn body(&self, text: &str) -> String {
 		match self.verbosity {
 			Verbosity::Terse => elide(text),
@@ -212,7 +252,9 @@ impl Logger {
 	}
 }
 
-/// The free text carried by one Message, whichever variant it is.
+/// Extract free text from a `Message`.
+///
+/// Returns system/user content, assistant text or preamble, or tool content.
 fn message_text(message: &Message) -> &str {
 	match message {
 		Message::System { content } | Message::User { content } => content,
@@ -226,7 +268,9 @@ fn message_text(message: &Message) -> &str {
 	}
 }
 
-/// The free text carried by one metacognitive result, whichever way it went.
+/// Extract free text from a `ReflectionResult`.
+///
+/// Returns content on `Ran`, error on `FailedOpen`.
 fn reflection_text(result: &ReflectionResult) -> &str {
 	match result {
 		ReflectionResult::Ran { content, .. } => content,
@@ -234,13 +278,16 @@ fn reflection_text(result: &ReflectionResult) -> &str {
 	}
 }
 
-/// The wall-clock instant a line was written, to the millisecond.
+/// Current wall-clock time to millisecond.
+///
+/// Formats as `HH:MM:SS.mmm`.
 fn timestamp() -> String {
 	chrono::Local::now().format("%H:%M:%S%.3f").to_string()
 }
 
-/// Shorten a body for a terse line: a length, and enough of the text to
-/// recognise it by.
+/// Elide text to snippet plus length.
+///
+/// Takes 60 chars then appends total char count.
 fn elide(text: &str) -> String {
 	const SNIPPET: usize = 60;
 	let len = text.chars().count();
@@ -252,7 +299,9 @@ fn elide(text: &str) -> String {
 	}
 }
 
-/// The header a run opens with: when, which model, which database.
+/// Build opening banner line.
+///
+/// Prepends local date-time to `what`.
 pub fn banner(what: &str) -> String {
 	format!(
 		"{} {what}",

@@ -1,32 +1,43 @@
-//! The Channel: a two-way connection to a human.
+//! The Channel: one two-way line to a human, as the Store holds it.
 //!
-//! More than one may be open at once, and each has its own Comms Session, so the
-//! swarm may be talking to several humans who share nothing. One-way sources
-//! such as RSS or mail are out of scope — anything outside issues a Task through
-//! the control socket instead.
+//! Construct: `Store::open_comms(kind, messages, now)` mints `ChannelId` +
+//! `SessionId` atomically; `Store::open_channel(kind, session)` mints alone.
+//! Both ids from `counters` inside the transaction that inserts them.
+//! Use: `Store::say(channel, utterance)` appends one row; `Store::transcript(id)`
+//! reads it; `Store::channels` / `Store::channel` hydrate `ChannelRecord` with
+//! its transcript. `Store::channel_session` resolves the standing Comms Session.
+//! Consumers: `Store` owns rows; `Harness` owns adapters and drives Comms;
+//! `comms::{receive, respond, say}` are transport-agnostic and never import
+//! `channels`; `channels::stdio` / `channels::web` implement `Channel::send`;
+//! `web::wire` and `log` render the transcript.
+//! Seam: `ChannelKind` ↔ adapter behaviour:
 //!
-//! The Transcript is narrower than the Comms Session's own history: it is what
-//! the human actually saw and what they said, without the system prompt, the
-//! tool calls, or the post from the swarm the human was never shown.
+//! | Kind | `Channel::send` | Inbound path |
+//! |---|---|---|
+//! | `Stdio` | cyan to stdout | stdin loop → `Harness::receive` |
+//! | `Web` | no-op (Store `Said` already holds it) | browser → `Harness::receive` |
+//! | `Scripted` | captured for artifacts | bench script → `Harness::receive` |
+//!
+//! Rules: **one Comms Session per Channel, for its life.** **Transcript is what the human saw — no system prompt, tool calls, or unseen swarm post.** **More than one Channel may be open; they share nothing.** **One-way sources (RSS/mail) out of scope — outside work enters as Task via control socket.**
 //!
 //! Defines: [`ChannelRecord`], [`ChannelKind`], [`Utterance`], [`Who`].
 
 use super::ids::{ChannelId, SessionId};
 use super::time::Timestamp;
 
-/// One open connection to a human, as the Store holds it.
+/// One open Channel, as the Store holds it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChannelRecord {
 	pub id: ChannelId,
-	/// How this Channel reaches its human, for a person reading the UI.
+	/// Transport this Channel uses, shown in the UI.
 	pub kind: ChannelKind,
-	/// The Comms Session standing on it. Exactly one, for the Channel's life.
+	/// The single Comms Session standing on this Channel.
 	pub session: SessionId,
-	/// What the human has seen, and what they said.
+	/// What the human saw and said, without system prompt or tool calls.
 	pub transcript: Vec<Utterance>,
 }
 
-/// What kind of transport a Channel sits on.
+/// How a Channel reaches its human.
 #[derive(
 	Debug,
 	Clone,
@@ -46,12 +57,11 @@ pub enum ChannelKind {
 	Stdio,
 	/// A browser on the Watcher UI.
 	Web,
-	/// A bench case's script. Named honestly, so an artifact does not claim a
-	/// terminal that was never there.
+	/// A bench script — named honestly, not a fake terminal.
 	Scripted,
 }
 
-/// One thing said on a Channel.
+/// One turn on the transcript: what was said, by whom, and when.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Utterance {
 	pub who: Who,

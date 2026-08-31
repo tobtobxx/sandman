@@ -1,15 +1,19 @@
-//! Putting work on the queue. The only route between agents.
+//! Enqueueing work. The only route between agents.
 //!
-//! Three tools, one enqueue path. They differ only in what they let the caller
-//! choose, and the split is the point: the common case — hand a piece of work to
-//! planning — is free of the Role and schedule arguments a Worker can get wrong,
-//! and a Role that should not be choosing Roles is given only the narrow tool.
+//! Construct: `NewTask { title, brief, role, schedule, priority, created_by }` at `Harness::create_task` → `Store::create_task` mints `TaskId`, derives `subscriber` from `Creator::Session` and emits `TaskCreated`; each tool builds `NewTask` from `SessionCtx`.
+//! Use: `Tool::call(ctx, args) -> String` parses JSON via `parse_args`, validates via `require_*`, builds `NewTask` and enqueues; `await_result` later holds for the answer, `created_reply` tells Workers to await and Comms Sessions that mail will arrive.
+//! Consumers: `roles.rs` assigns `CreateTask` to every Worker and Comms (`COMMS_SESSION_TOOLS`), `CreateResearchTask` to `Research`, `CreateTaskFull` to `Planning`/`TaskManager`; `Registry::all` constructs all three.
+//! Seam: `Tool` (one capability: `schema` + `call`) vs `ToolRunner::Registry` (real dispatch, emits `ToolCalled`/`ToolReturned`); bench replaces `ToolRunner` to watch or script answers without changing prompts.
 //!
-//! None of them waits. A Worker that wants the answer calls `await_result` with
-//! the id it got back, when it is ready for it. None of them subscribes anyone
-//! either: the Store reads the subscriber off the calling Session, so a Comms
-//! Session — which cannot block on a tool call, and must be handed the answer as
-//! mail instead — is subscribed whether or not a tool remembered to ask.
+//! | Tool | role | schedule | priority | holder |
+//! | --- | --- | --- | --- | --- |
+//! | `CreateTask` | `Planning` fixed | `Now` fixed | `Normal` fixed | every Worker + Comms |
+//! | `CreateResearchTask` | `Research` fixed | `Now` fixed | `Normal` fixed | `Research` |
+//! | `CreateTaskFull` | caller chooses | caller chooses (`run_at`/`repeat`) | caller chooses | `Planning`, `TaskManager` |
+//!
+//! Call trace: `Tool::call → parse_args → require_* → NewTask → Harness::create_task → Store::create_task → created_reply`
+//!
+//! Rules: **one enqueue path — `Harness::create_task` → `Store::create_task`.** **no tool waits; `await_result` holds.** **no tool subscribes; Store derives `subscriber` from `Creator`.** **narrow tool per Role so common case carries no `Role`/`Schedule` to get wrong.** **Worker told to `await_result`, Comms told mail will arrive — same `Session` read both ways.**
 //!
 //! Defines: [`CreateTask`], [`CreateResearchTask`], [`CreateTaskFull`].
 
@@ -24,8 +28,7 @@ use crate::session::SessionCtx;
 
 use super::{Tool, ToolError};
 
-/// Shared wording, so three schemas cannot describe the same argument three
-/// ways.
+/// Shared wording, so three schemas cannot describe the same argument three ways.
 pub const TITLE_DESC: &str =
 	"One line describing the Task, so a human can scan it.";
 pub const BRIEF_DESC: &str =
@@ -35,18 +38,14 @@ pub const BRIEF_DESC: &str =
 /// Enqueue a planning Task. No Role and no timing to choose.
 pub struct CreateTask;
 
-/// Enqueue a research Task, so a Worker can have something looked up without
-/// leaving its own line of work.
+/// Enqueue a research Task without leaving the current line of work.
 pub struct CreateResearchTask;
 
-/// Enqueue a Task, choosing its Role, its timing and its priority.
+/// Enqueue a Task, choosing its Role, timing and priority.
 pub struct CreateTaskFull;
 
-/// Every field a create-task tool call might carry, read off the arguments
-/// but not yet checked. Not every tool accepts every field — `create_task`
-/// and `create_research_task` only ever look at `title` and `brief` — so
-/// nothing here fails on its own; each tool below validates and fills in
-/// what it needs.
+/// Raw fields from a create-task call, unchecked.
+/// Each tool validates only what it accepts.
 struct ParsedArgs {
 	title: Option<String>,
 	brief: Option<String>,
@@ -56,8 +55,7 @@ struct ParsedArgs {
 	priority: Option<String>,
 }
 
-/// Read every field a create-task tool might carry off the raw arguments.
-/// Nothing is checked here — that is each tool's own job.
+/// Extract all create-task fields from JSON without validation.
 fn parse_args(args: &serde_json::Value) -> ParsedArgs {
 	let str_field = |name: &str| {
 		args.get(name).and_then(|v| v.as_str()).map(str::to_string)
@@ -90,8 +88,7 @@ fn require_role(role: Option<String>) -> Result<RoleName, ToolError> {
 	given.parse().map_err(|_| ToolError::NoSuchRole { given })
 }
 
-/// `create_task_full`'s Priority, or why the one given is not one. Defaults
-/// to normal.
+/// Parse `priority` or default to `Normal`.
 fn priority_from(priority: Option<String>) -> Result<TaskPriority, ToolError> {
 	match priority.as_deref() {
 		None => Ok(TaskPriority::default()),
@@ -103,13 +100,10 @@ fn priority_from(priority: Option<String>) -> Result<TaskPriority, ToolError> {
 	}
 }
 
-/// What a caller is told once its Task exists.
-///
-/// A Worker is reminded that it can call `await_result`; a Comms Session is told
-/// the answer will reach it when it is ready, because it has no such tool. The
-/// branch that picks the wording and the subscription the Store derives read the
-/// same Session — say the two differently and this promise goes unkept.
+/// Reply after enqueue, worded by `SessionKind`.
+/// Workers are told to `await_result`; Comms Sessions are told mail will arrive.
 fn created_reply(ctx: &SessionCtx, id: TaskId) -> String {
+	// Resolve Session kind
 	let is_worker = ctx
 		.store
 		.session(ctx.id)
@@ -117,6 +111,7 @@ fn created_reply(ctx: &SessionCtx, id: TaskId) -> String {
 		.flatten()
 		.map(|s| matches!(s.kind, crate::domain::SessionKind::Worker { .. }))
 		.unwrap_or(true);
+	// Reply by kind
 	if is_worker {
 		format!(
 			"Created {id}. Call await_result with this id when you are ready \
@@ -153,7 +148,9 @@ impl Tool for CreateTask {
 	}
 
 	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String {
+		// Parse arguments
 		let parsed = parse_args(&args);
+		// Validate fields
 		let title = match require_title(parsed.title) {
 			Ok(t) => t,
 			Err(e) => return e.to_string(),
@@ -163,6 +160,7 @@ impl Tool for CreateTask {
 			Err(e) => return e.to_string(),
 		};
 
+		// Enqueue task
 		let new = NewTask {
 			title,
 			brief,
@@ -202,7 +200,9 @@ impl Tool for CreateResearchTask {
 	}
 
 	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String {
+		// Parse arguments
 		let parsed = parse_args(&args);
+		// Validate fields
 		let title = match require_title(parsed.title) {
 			Ok(t) => t,
 			Err(e) => return e.to_string(),
@@ -212,6 +212,7 @@ impl Tool for CreateResearchTask {
 			Err(e) => return e.to_string(),
 		};
 
+		// Enqueue task
 		let new = NewTask {
 			title,
 			brief,
@@ -233,12 +234,13 @@ impl Tool for CreateTaskFull {
 		ToolName::CreateTaskFull
 	}
 
-	/// Carries `role`, `run_at_seconds`, `repeat_seconds` and `priority` beyond
-	/// the common two. The `role` enum is built from every [`RoleName`], so it
-	/// cannot name a Role that does not exist.
+	/// Schema with `role`, `run_at_seconds`, `repeat_seconds` and `priority`.
+	/// `role` enum is built from `RoleName`, so no unknown Role.
 	fn schema(&self, _ctx: &SchemaCtx) -> ToolSchema {
+		// Collect roles
 		let roles: Vec<&'static str> =
 			RoleName::VARIANTS.iter().map(Into::into).collect();
+		// Build schema
 		ToolSchema {
 			name: self.name().to_string(),
 			description: "Enqueue a Task, choosing its Role, its timing and \
@@ -280,16 +282,20 @@ impl Tool for CreateTaskFull {
 	}
 
 	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String {
+		// Parse arguments
 		let parsed = parse_args(&args);
+		// Build schedule
 		let schedule = Schedule::from_offsets(
 			parsed.run_at_seconds,
 			parsed.repeat_seconds,
 			ctx.clock.now(),
 		);
+		// Validate priority
 		let priority = match priority_from(parsed.priority) {
 			Ok(p) => p,
 			Err(e) => return e.to_string(),
 		};
+		// Validate fields
 		let title = match require_title(parsed.title) {
 			Ok(t) => t,
 			Err(e) => return e.to_string(),
@@ -303,6 +309,7 @@ impl Tool for CreateTaskFull {
 			Err(e) => return e.to_string(),
 		};
 
+		// Enqueue task
 		let new = NewTask {
 			title,
 			brief,

@@ -1,24 +1,40 @@
-//! The conversation: what a Session holds, and what a model call gives back.
+//! The conversation: transcript, tool contract, and model exchange.
 //!
-//! Two rules are carried by the types rather than by comments.
+//! One row per [`Message`] (`role` + `body_json`), oldest first; a transcript
+//! is a query, not a blob. [`CallRequest`](super::call::CallRequest)
+//! snapshots the transcript and the [`ToolSchema`]s offered to the model, and
+//! [`Completion`] is what `Model::send` brings back in one attempt, no retry.
+//! [`ToolSchema`] is hand-written JSON Schema per tool — descriptions are
+//! prompt text, not derived — and [`NonEmpty`] makes "called tools but empty
+//! list" unrepresentable.
 //!
-//! **Text alongside tool calls is preamble, not an ending.** A model that both
-//! says something and calls a tool has not finished its turn. [`AssistantBody`]
-//! and [`Reply`] make that one match rather than a test on the length of a list,
-//! and [`NonEmpty`] means "called tools but the list is empty" cannot be built.
+//! Construct via `Store::append_message` (one indexed row) and
+//! `CallRequest { messages, tools }` before `Model::send`. `model.rs` maps
+//! `Message` → private `WireMessage`, which has no `reasoning` field —
+//! inspection never leaks back to the model.
 //!
-//! **Reasoning is inspection, never context.** Some models expose their
-//! reasoning. It is recorded on the assistant message so a Watcher can read it,
-//! and it must never go back to the model. The wire shape lives privately inside
-//! `model.rs` and simply has no field for it, so sending it is not something to
-//! remember not to do.
+//! Consumers: `session::turn` builds the request and matches [`Reply`];
+//! `model::OpenRouter` converts `Message` → `WireMessage` and `WireResponse` →
+//! `Completion`; `db::rows` encodes `Message` as `role` + `json`;
+//! `tools::Tool` supplies `ToolSchema`; `recall` and `web` read `Message` for display.
+//!
+//! Rules:
+//! - **Text alongside tool calls is preamble, not an ending.** [`AssistantBody::Calls`]
+//!   and [`Reply::Calls`] carry `preamble`; [`NonEmpty`] forbids empty calls.
+//! - **Reasoning is inspection, never context.** Stored on `Assistant { reasoning }`,
+//!   absent from the wire — stripping it is not a step to remember.
+//! - **One system prompt, first.** A Session has exactly one `Message::System` at idx 0.
+//! - **Tool answers are words.** Every tool returns `String`, including failures, so the model can read it.
 //!
 //! Defines: [`Message`], [`AssistantBody`], [`Reply`], [`ToolCall`],
 //! [`ToolSchema`], [`Completion`], [`NonEmpty`].
 
 use super::time::Cost;
 
-/// One message in a Session's context.
+/// One entry in a Session transcript.
+///
+/// Persisted as one row per entry, oldest first. `Assistant` carries `reasoning`
+/// for inspection; it is never sent to the model.
 #[derive(
 	Debug,
 	Clone,
@@ -32,36 +48,39 @@ use super::time::Cost;
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum Message {
-	/// The Role's system prompt. A Session has exactly one, first.
+	/// The Role's system prompt. Exactly one per Session, at idx 0.
 	System { content: String },
-	/// Everything put into the context from outside: the Brief, mail, a Result
-	/// a child produced, and the feedback metacognition wrote.
+	/// External input: Brief, mail, a child's Result, or metacognitive feedback.
 	User { content: String },
 	/// What the model said.
 	Assistant {
 		body: AssistantBody,
-		/// Recorded for inspection only. Never sent.
+		/// Model reasoning for inspection. Never sent on the wire.
 		reasoning: Option<String>,
 	},
-	/// What one tool answered.
+	/// What one tool answered. Always words, even on failure.
 	Tool { tool_call_id: String, content: String },
 }
 
-/// What an assistant message carries: an ending, or work in progress.
+/// What an assistant message carries.
+///
+/// Either the turn ends with text, or it continues with tool calls. Text
+/// alongside calls is preamble, not an ending.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssistantBody {
-	/// Plain text and no tool calls. For a Worker this triggers a review; for a
-	/// Comms Session it is something to say to the human.
+	/// Plain text — triggers review for a Worker, said to the human for Comms.
 	Text(String),
-	/// Tool calls, and whatever the model said alongside them.
+	/// Tool calls with optional preamble. Preamble is not a turn ending.
 	Calls {
 		preamble: Option<String>,
 		calls: NonEmpty<ToolCall>,
 	},
 }
 
-/// What one model call gave back.
+/// What one model call returned.
+///
+/// Mirrors [`AssistantBody`] but without `reasoning`; that travels on [`Completion`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reply {
@@ -72,8 +91,9 @@ pub enum Reply {
 	},
 }
 
-/// One tool call, as the model asked for it. Arguments arrive as a JSON string
-/// and are parsed by the tool that owns them.
+/// One tool call as the model asked for it.
+///
+/// Arguments are a JSON string parsed by the owning tool.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
 	pub id: String,
@@ -81,11 +101,10 @@ pub struct ToolCall {
 	pub arguments: String,
 }
 
-/// One tool as it is offered to the model.
+/// One tool as offered to the model.
 ///
-/// `parameters` is a JSON Schema object. It is written by hand in each tool
-/// rather than derived, because the descriptions in it are prompt text and are
-/// part of what is being tuned.
+/// `parameters` is a hand-written JSON Schema object; descriptions are prompt
+/// text and part of what is tuned.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolSchema {
 	pub name: String,
@@ -93,21 +112,21 @@ pub struct ToolSchema {
 	pub parameters: serde_json::Value,
 }
 
-/// What the transport brings back from one exchange: the reply, and what it cost.
+/// What the transport returned for one exchange.
+///
+/// `cost` is taken from the provider's response, not a local price list.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Completion {
 	pub reply: Reply,
 	pub reasoning: Option<String>,
 	pub tokens: u64,
-	/// What the provider billed, taken from the response rather than worked out
-	/// from a price list, so it stays right when pricing changes.
+	/// Billed cost from the response. Stays right when pricing changes.
 	pub cost: Cost,
 }
 
 /// A list that cannot be empty.
 ///
-/// Used for the tool calls on an assistant message, where "called tools" and
-/// "called no tools" are two different messages and must not be spelled the same.
+/// Guarantees `Calls` never holds an empty list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NonEmpty<T> {
 	head: T,
@@ -115,45 +134,47 @@ pub struct NonEmpty<T> {
 }
 
 impl<T> NonEmpty<T> {
+	/// Create from head and tail.
 	pub fn new(head: T, tail: Vec<T>) -> Self {
 		NonEmpty { head, tail }
 	}
 
-	/// Build from a list, or fail because it was empty.
+	/// Collect a vec; `None` if empty.
 	pub fn from_vec(items: Vec<T>) -> Option<Self> {
 		let mut items = items.into_iter();
 		let head = items.next()?;
 		Some(NonEmpty { head, tail: items.collect() })
 	}
 
+	/// First element.
 	pub fn first(&self) -> &T {
 		&self.head
 	}
 
+	/// Number of elements. Always `>= 1`.
 	pub fn len(&self) -> usize {
 		1 + self.tail.len()
 	}
 
+	/// Always `false`; present for collection parity.
 	pub fn is_empty(&self) -> bool {
 		false
 	}
 
+	/// Iterate head then tail.
 	pub fn iter(&self) -> impl Iterator<Item = &T> {
 		std::iter::once(&self.head).chain(self.tail.iter())
 	}
 }
 
-/// A plain array, both ways. Derived impls would spell it `head` and `tail` in
-/// every stored assistant message and on every wire frame, which is the shape of
-/// the guarantee rather than the shape of the data.
+/// Serialise as a plain array — `head`/`tail` never leaks to storage or wire.
 impl<T: serde::Serialize> serde::Serialize for NonEmpty<T> {
 	fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
 		s.collect_seq(self.iter())
 	}
 }
 
-/// Reads an array back, and refuses an empty one — the invariant survives a
-/// round trip through the database rather than being re-checked after it.
+/// Deserialise a plain array; reject empty — invariant survives round-trip.
 impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for NonEmpty<T> {
 	fn deserialize<D: serde::Deserializer<'de>>(
 		d: D,
@@ -166,18 +187,21 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for NonEmpty<T> {
 }
 
 impl Message {
-	/// One line naming what this message is, for the log. The body stays in the
-	/// database.
+	/// One-line kind for the log. Body stays in the database.
 	pub fn describe(&self) -> String {
 		match self {
+			// System - single prompt at idx 0
 			Message::System { .. } => "system".to_string(),
+			// User - Brief, mail, or feedback
 			Message::User { .. } => "user".to_string(),
+			// Assistant - text or tool calls
 			Message::Assistant { body, .. } => match body {
 				AssistantBody::Text(_) => "assistant: text".to_string(),
 				AssistantBody::Calls { calls, .. } => {
 					format!("assistant: {} tool call(s)", calls.len())
 				},
 			},
+			// Tool - result for one call
 			Message::Tool { tool_call_id, .. } => {
 				format!("tool result for {tool_call_id}")
 			},

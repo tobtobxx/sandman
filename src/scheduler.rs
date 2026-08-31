@@ -1,27 +1,25 @@
-//! The central model-call scheduler.
+//! One slot in front of the models, ordered by [`Tier`] then arrival.
 //!
-//! Every model call in the whole Harness goes through here. Exactly one is in
-//! flight at any moment, and the rest wait ordered by [`Tier`], then by arrival
-//! within a tier.
+//! Construct: `Scheduler::new(models, store, clock)` — owns the queue; `Inner`
+//! (`in_flight`, `waiting`, `next_arrival`) is private and only `try_grant` decides who runs next.
+//! Use: `request(session, request, tier, purpose) -> (CallId, Completion)` queues as `Queued`,
+//! waits for the slot, marks `InFlight`, sends via [`crate::model::Model`], records `Done|Failed`;
+//! `waiting() -> usize` inspects depth for wind-down. `CallId` returns on both paths so reflection can anchor.
+//! Consumers: `session::turn` (`Tier::from(TaskPriority)` / `Tier::Comms`), `reflect::interrupt`
+//! (`Tier::Metacognition`), `Harness::wind_down` via `waiting`, Watchers via `CallQueued`/`CallStatusChanged`,
+//! `SessionCtx` threads `Arc<Scheduler>` through every turn and tool.
+//! Seam: **scheduler decides *when*, [`crate::model::Model`] decides *how*** — `Model` sits under the queue
+//! so a scripted bench still exercises real tier ordering and one-at-a-time.
 //!
-//! One call at a time is deliberate. It makes a run possible to follow, which is
-//! the only guard against runaway work — there is no budget on a turn and no cap
-//! on how many Tasks the swarm creates, so the human watching is the guard rail.
+//! | Tier | Caller | Purpose |
+//! | --- | --- | --- |
+//! | `Comms` (1) | Comms Session — human never behind swarm | `Purpose::Comms` |
+//! | `TaskHigh` (2) | Worker on high Task | `Purpose::Work(role)` |
+//! | `Metacognition` (3) | review / interrupt — not held behind work | `Purpose::Metacognition` |
+//! | `TaskNormal` (4) | Worker on normal Task | `Purpose::Work(role)` |
+//! | `TaskLow` (5) | Worker on low Task | `Purpose::Work(role)` |
 //!
-//! A higher-priority call that arrives while a lower one waits jumps ahead of it
-//! in the waiting queue. It never aborts the call already in flight: that one is
-//! committed and paid. So "skip the queue" means skip the *waiting* calls, not
-//! preempt the one with the model. Within one tier, arrival order decides, which
-//! is what makes two same-tier Workers alternate at the model-call level — each
-//! one's next call lands behind the other's call that was already waiting while
-//! its own was in flight.
-//!
-//! Priority is a property of the caller, not of the call. A Comms Session passes
-//! [`Tier::Comms`], a Worker passes its Task's tier, metacognition passes
-//! [`Tier::Metacognition`]. So is [`crate::model::Purpose`], which travels
-//! beside it and says which model the call goes to.
-//!
-//! The scheduler decides *when*; the [`crate::model::Model`] seam decides *how*.
+//! Rules: **exactly one `InFlight` across the whole Harness.** **higher Tier jumps waiting, never preempts in-flight — committed and paid.** **within one Tier arrival order alternates Workers.** **Tier fixed at queue time; declaration order is the policy and `repr u8` 1..=5 mirrors stored value.** **queued call visible before send.** **Store is the only writer; every status change emits one Event.** **release hands slot directly to lowest `(Tier, arrival)`.
 //!
 //! Defines: [`Tier`], [`Scheduler`], [`SchedulerError`].
 
@@ -34,11 +32,8 @@ use crate::domain::{
 use crate::model::{ModelError, Models, Purpose};
 use crate::store::Store;
 
-/// Where a call waits. Lower runs first, and the derived ordering is the
-/// ordering — declaration order is the policy.
-///
-/// The 1..=5 the call record and the Watcher show is the `repr`, so the number
-/// and the order cannot disagree: `u8::from(tier)` counts up as the tier falls.
+/// Queue position. Lower runs first; declaration order is the policy.
+/// `repr u8` 1..=5 mirrors the stored value so ordering and display cannot disagree.
 #[derive(
 	Debug,
 	Clone,
@@ -60,8 +55,7 @@ pub enum Tier {
 	Comms = 1,
 	/// A Worker on a `high` priority Task.
 	TaskHigh = 2,
-	/// A review or an interrupt, so metacognition is not held behind ordinary
-	/// work.
+	/// Review or interrupt — not held behind ordinary work.
 	Metacognition = 3,
 	/// A Worker on a `normal` priority Task.
 	TaskNormal = 4,
@@ -87,33 +81,25 @@ pub struct Scheduler {
 	inner: tokio::sync::Mutex<Inner>,
 }
 
-/// The waiting calls and the one in flight. Private: nothing outside decides
-/// what runs next.
+/// Waiting calls and the one in flight. Private: only `try_grant` decides next.
 struct Inner {
-	/// Whether the one slot is taken. A waiter that is granted the slot sees
-	/// this already `true` — it never flips it itself.
+	/// Whether the one slot is taken. Granted waiter sees this already `true`.
 	in_flight: bool,
-	/// Counts up, never down: arrival order within a [`Tier`].
+	/// Counts up, never down — arrival order within a [`Tier`].
 	next_arrival: u64,
 	waiting: Vec<Waiting>,
 }
 
-/// One call, registered and waiting for the slot. `notify` is single-use: at
-/// most one `notify_one` is ever sent on it, by whichever call releases the
-/// slot next.
+/// One queued call waiting for the slot.
+/// Single-use `notify`; at most one `notify_one` from the releaser.
 struct Waiting {
 	tier: Tier,
 	arrival: u64,
 	notify: Arc<tokio::sync::Notify>,
 }
 
-/// What can go wrong asking for a model call.
-///
-/// [`SchedulerError::Call`] carries the [`CallId`] of the exchange that failed.
-/// The call record exists from the moment it joined the queue, so a failure has
-/// one to name — which is what lets metacognition record a `FailedOpen`
-/// reflection against the call it could not make. [`SchedulerError::Store`] is
-/// the one case with no id at all: nothing was ever queued.
+/// Failure from `request`.
+/// `Call` carries the queued `CallId` for `FailedOpen` reflection; `Store` means nothing was queued.
 #[derive(Debug, thiserror::Error)]
 pub enum SchedulerError {
 	#[error("{source}")]
@@ -144,17 +130,8 @@ impl Scheduler {
 		}
 	}
 
-	/// Ask the model, and leave a full record of the exchange in the Store
-	/// whatever happens.
-	///
-	/// The call is recorded the moment it joins the queue, so a Watcher sees it
-	/// waiting. It is sent when it reaches the front and nothing else is in
-	/// flight.
-	///
-	/// The [`CallId`] comes back on both paths — beside the [`Completion`], and
-	/// inside [`SchedulerError::Call`]. `reflect.rs` anchors a
-	/// [`crate::domain::Reflection`] on it, and that record is not optional when
-	/// the call fails. A Turn does not want it and drops it.
+	/// Queue, send, and record one model exchange.
+	/// Queued immediately so waiting is visible; `CallId` returns on success and on `Call` failure for reflection.
 	pub async fn request(
 		&self,
 		session: SessionId,
@@ -162,6 +139,7 @@ impl Scheduler {
 		tier: Tier,
 		purpose: Purpose,
 	) -> Result<(CallId, Completion), SchedulerError> {
+		// Queue call
 		let model = self.models.pick(purpose);
 		let id = self.store.queue_call(
 			NewCall {
@@ -173,18 +151,24 @@ impl Scheduler {
 			self.clock.now(),
 		)?;
 
+		// Acquire slot
 		self.acquire(tier).await;
 
+		// Mark in-flight
 		let sent_at = self.clock.now();
 		self.store
 			.set_call_status(id, CallStatus::InFlight { sent_at })?;
 
+		// Send request
 		let outcome = model.send(&request).await;
 		let finished_at = self.clock.now();
 
+		// Release slot
 		self.release().await;
 
+		// Persist result
 		match outcome {
+			// Call succeeded - record Done
 			Ok(completion) => {
 				let usage =
 					Usage { tokens: completion.tokens, cost: completion.cost };
@@ -199,6 +183,7 @@ impl Scheduler {
 				)?;
 				Ok((id, completion))
 			},
+			// Call failed - record Failed
 			Err(error) => {
 				self.store.set_call_status(
 					id,
@@ -213,8 +198,8 @@ impl Scheduler {
 		}
 	}
 
-	/// How many calls are waiting. For a wind-down that wants to know whether
-	/// anything can still spend.
+	/// Number of calls waiting for the slot.
+	/// Used by wind-down to check whether spend is still possible.
 	pub async fn waiting(&self) -> usize {
 		self.inner.lock().await.waiting.len()
 	}
@@ -233,16 +218,14 @@ impl Scheduler {
 		notify.notified().await;
 	}
 
-	/// Free the slot, and hand it straight to whichever waiter now sorts lowest.
+	/// Free the slot and hand it to the lowest waiting `(tier, arrival)`.
 	async fn release(&self) {
 		let mut inner = self.inner.lock().await;
 		inner.in_flight = false;
 		Self::try_grant(&mut inner);
 	}
 
-	/// If the slot is free and someone is waiting, give it to the lowest
-	/// `(tier, arrival)` — a higher tier jumps every call still waiting, never
-	/// the one already in flight.
+	/// Grant the slot to the lowest `(tier, arrival)` if free.
 	fn try_grant(inner: &mut Inner) {
 		if inner.in_flight {
 			return;

@@ -1,12 +1,28 @@
-//! A model whose replies the test writes.
+//! Bench `Model` — replies the test writes, not the wire.
 //!
-//! For testing the Harness rather than the model: the turn loop, the scheduler's
-//! ordering, the review's parsing, a Worker released from `await_result`. None of
-//! those questions need a real model, and asking one makes the answer slow,
-//! expensive and only mostly repeatable.
+//! Exercises the Harness (turn loop, scheduler ordering, review parsing,
+//! `await_result` release) without a real model: same queue, same tier,
+//! same one-call-at-a-time, only the answer is canned.
 //!
-//! A bench case measuring the model does not use this. A test measuring Sandman
-//! almost always should.
+//! Construct: [`ScriptedModel::new`] with ordered [`crate::domain::Completion`]s;
+//! helpers [`ScriptedModel::saying`] (text), [`ScriptedModel::calling`] (one tool),
+//! [`ScriptedModel::unreachable`] (transport error).
+//! Use: [`crate::model::Model::send`] clones the [`crate::domain::CallRequest`] into
+//! `seen` and returns the next queued reply FIFO; exhaustion is a transport error.
+//! Inspect via [`ScriptedModel::requests`] for prompts and offered schemas.
+//! Consumers: [`crate::bench::rig::RigBuilder`] via [`crate::bench::rig::ModelChoice::Scripted`]
+//! (`Models::uniform`) and unit tests driving a [`crate::session::SessionCtx`] directly.
+//!
+//! Seam — sits *under* the scheduler so queue and tier stay real:
+//! | Seam | Real | Bench |
+//! | --- | --- | --- |
+//! | `Model` | `OpenRouter` | `ScriptedModel` |
+//!
+//! Rules:
+//! - **One queue for every [`crate::model::Purpose`]** — a scripted case is not asking which model would have replied (`Models::uniform`).
+//! - **FIFO, no retry** — one `send` consumes one reply; `Transport` on empty or on queued `Err`.
+//! - **Zero-cost fixtures** — helpers set tokens and cost to zero; build [`crate::domain::Completion`] directly to override.
+//! - **Recording is a clone** — `requests()` returns a snapshot for system-prompt and tool-schema assertions.
 //!
 //! Defines: [`ScriptedModel`].
 
@@ -15,7 +31,9 @@ use async_trait::async_trait;
 use crate::domain::{CallRequest, Completion};
 use crate::model::{Model, ModelError};
 
-/// Answers from a list, in order.
+/// Replies written by the test, returned FIFO.
+///
+/// Records every [`crate::domain::CallRequest`] for later assertion.
 pub struct ScriptedModel {
 	replies: std::sync::Mutex<
 		std::collections::VecDeque<Result<Completion, String>>,
@@ -24,10 +42,9 @@ pub struct ScriptedModel {
 }
 
 impl ScriptedModel {
-	/// Answer these, in order.
+	/// Queue these completions for successive [`crate::model::Model::send`] calls.
 	///
-	/// Running out is a failure of the test, not of the code under test, and it
-	/// says so.
+	/// Exhaustion returns a transport error naming the shortage.
 	pub fn new(replies: Vec<Completion>) -> Self {
 		ScriptedModel {
 			replies: std::sync::Mutex::new(
@@ -37,7 +54,9 @@ impl ScriptedModel {
 		}
 	}
 
-	/// Reply with plain text, once. The commonest fixture.
+	/// Build a text [`crate::domain::Completion`] saying `text`.
+	///
+	/// Zero tokens and cost; the commonest fixture.
 	pub fn saying(text: &str) -> Completion {
 		Completion {
 			reply: crate::domain::Reply::Text(text.to_string()),
@@ -47,7 +66,9 @@ impl ScriptedModel {
 		}
 	}
 
-	/// Reply by calling one tool, once.
+	/// Build a [`crate::domain::Completion`] that calls one tool `name`.
+	///
+	/// Stringifies `arguments`; id is `call-0`.
 	pub fn calling(name: &str, arguments: serde_json::Value) -> Completion {
 		let call = crate::domain::ToolCall {
 			id: "call-0".to_string(),
@@ -65,15 +86,16 @@ impl ScriptedModel {
 		}
 	}
 
-	/// A call that fails on the wire, for testing what an unreachable model does
-	/// to a Worker, a Comms Session and a review.
+	/// Build a transport failure carrying `why`.
+	///
+	/// Queue as an `Err` reply to drive unreachable-model paths.
 	pub fn unreachable(why: &str) -> Result<Completion, String> {
 		Err(why.to_string())
 	}
 
-	/// Every request this model was sent, in order — so a test can assert on
-	/// what a Session actually put in front of the model, including the system
-	/// prompt it was given and the tools it was offered.
+	/// Return every [`crate::domain::CallRequest`] sent so far, in order.
+	///
+	/// Cloned snapshot including system prompt and offered tools.
 	pub fn requests(&self) -> Vec<CallRequest> {
 		self.seen.lock().expect("not poisoned").clone()
 	}

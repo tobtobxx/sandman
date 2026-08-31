@@ -1,25 +1,25 @@
-//! One Sandman under test, and everything needed to drive and read it.
+//! One Sandman under test — private Harness, Store, scheduler, Event stream and log.
 //!
-//! A Rig is a whole Harness: a private in-memory database, its own Event stream,
-//! its own scheduler, its own log file in a temporary directory that is removed
-//! with it. Nothing in it is process-global, which is why a case is a test rather
-//! than a process.
+//! Construct: `RigBuilder::default` → `RigBuilder::{model,clock,tools,drive,channel,timeout,config}` → `build() → Rig`.
+//! Use: seed state (`seed_task`, `seed_lesson`, `send`), drive (`until`, `idle_for`, `converse`, `await_task`) with tripwires, read (`tool_calls`, `transcript`, `tasks`, `spend`, `failed_calls`), end (`wind_down`, `save_to`).
+//! Consumers: `cases` via `Case::run`, `report::assemble` (winds down and reports), `bin/bench` and `tests/cases.rs`.
 //!
-//! What a case chooses is how much of it is real: real prompts, real model, real
-//! clock, unless it says otherwise in its own first lines. The tools are the
-//! exception — they are replaced in every case, because a bench is one Session's
-//! decisions and the interceptor is what keeps it to one.
+//! Seams — real unless replaced:
+//! | Seam | Real | Bench |
+//! | --- | --- | --- |
+//! | Model | OpenRouter (`Models::from_config`) | `ScriptedModel` / custom `Model` |
+//! | ToolRunner | `Registry` | `Interceptor` (always wrapped) |
+//! | Clock | `SystemClock` | `FixedClock` / `ManualClock` |
+//! | Embedder | `OpenRouterEmbedder` | test-supplied via config |
 //!
-//! Waiting is [`Rig::until`]: it follows the Event stream, re-checks the
-//! predicate whenever something changed, and evaluates every tripwire on the way
-//! past. A tripped wire comes back as [`Trip`], which a test propagates with `?`.
+//! Rules:
+//! - **One Rig is one Sandman** — private in-memory DB, Events, scheduler, log dir; nothing process-global.
+//! - **`Drive` controls what starts** — `Manual`/`CommsOnly`/`Full`; bench is one Session by construction.
+//! - **`until` is event-driven** — predicate and tripwires re-checked on each Event, no polling.
+//! - **Wind-down is mandatory** — `wind_down` cancels unfinished Tasks and waits for in-flight calls; `Drop` aborts drivers.
+//! - **Channels are bench transports** — `BenchChannel::send` is no-op, transcript lives in `Store`.
 //!
-//! Winding down is not optional and not the caller's problem to remember.
-//! [`Rig::wind_down`] cancels everything unfinished and waits for the last
-//! in-flight call so its cost reaches the record; `Drop` aborts the driver tasks
-//! as a backstop, so a case that panics cannot leave a Harness spending.
-//!
-//! Defines: [`Rig`], [`RigBuilder`], [`ModelChoice`], [`ClockChoice`], [`Watch`].
+//! Defines: `Rig`, `RigBuilder`, `ModelChoice`, `ClockChoice`, `Watch`.
 
 use std::sync::Arc;
 
@@ -39,37 +39,30 @@ use crate::scheduler::Scheduler;
 use crate::store::Store;
 use crate::tools::{Registry, ToolRunner};
 
-/// How long a Rig waits before a case trips on its own clock, unless a case
-/// says otherwise with [`RigBuilder::timeout`]. Generous for a real model over
-/// the wire, short enough that a hung case does not stall a whole bench run.
+/// Default per-case bound. Used when `RigBuilder::timeout` is not set.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Where the model's answers come from.
+/// Where model replies come from.
 pub enum ModelChoice {
-	/// The real model, over the real wire. What a bench case measures.
+	/// Real model over the wire.
 	Real,
-	/// Replies written by the test, in order. For exercising the Harness itself
-	/// — the turn loop, the scheduler, the review — without spending anything.
+	/// Replies in order, no spend.
 	Scripted(Vec<crate::domain::Completion>),
-	/// Anything else the test wants to supply.
+	/// Caller-supplied model.
 	Custom(Arc<dyn crate::model::Model>),
 }
 
 /// Where time comes from.
 pub enum ClockChoice {
-	/// The real clock. What a case asserting on the model's judgement of time
-	/// must use: faking it would bench a Sandman that does not exist.
+	/// Real system clock.
 	Real,
-	/// Stopped, so every timestamp in a run is the same and comparable.
+	/// Stopped clock, every timestamp equal.
 	Fixed(Timestamp),
-	/// Only moves when the test moves it. For a case that needs a scheduled Task
-	/// to actually fire — which is a case about the Harness, not the model, and
-	/// should say so.
+	/// Advances only when test advances it.
 	Manual(Arc<crate::domain::ManualClock>),
 }
 
-/// Builds a Rig. Everything defaults to real except the tools, which default to
-/// [`super::ToolsChoice::Deny`]: a case pays for what it asks for.
+/// Builds a Rig. Defaults to real except tools (`Deny`).
 pub struct RigBuilder {
 	model: ModelChoice,
 	tools: super::ToolsChoice,
@@ -78,9 +71,6 @@ pub struct RigBuilder {
 	channels: Vec<crate::domain::ChannelKind>,
 	timeout: Option<Duration>,
 	log: crate::log::Verbosity,
-	/// The human's own `config.toml` unless a case says otherwise. A case that
-	/// asks for the real model is asking for the real setup, and which model
-	/// that is has one answer per machine, not one per case.
 	config: Option<Arc<Config>>,
 }
 
@@ -89,10 +79,9 @@ pub struct Rig {
 	pub harness: Arc<Harness>,
 	pub store: Arc<Store>,
 	pub interceptor: Arc<super::Interceptor>,
-	/// What this Rig was built out of. The Harness holds it too; a grader is
-	/// not the Harness's and reads it from here.
+	/// Config this Rig was built from. Grader reads it here, not from Harness.
 	pub config: Arc<Config>,
-	/// The Channel a case's script speaks on, if it opened one.
+	/// Bench Channel the script speaks on, if opened.
 	pub channel: Option<ChannelId>,
 	events: tokio::sync::broadcast::Receiver<crate::event::Event>,
 	tripwires: Vec<Tripwire>,
@@ -102,27 +91,19 @@ pub struct Rig {
 	drivers: Vec<tokio::task::JoinHandle<()>>,
 }
 
-/// A condition evaluated continuously: "this must never happen".
+/// Condition evaluated on every Event. Trips the case when violated.
 struct Tripwire {
 	name: String,
 	pred: Box<dyn Fn(&Watch) -> CheckResult + Send + Sync>,
 }
 
-/// What a tripwire may look at.
-///
-/// The Store alone is not enough for a unit bench: a case that answers
-/// `create_task` itself leaves no row behind, so "a second Task spawning" can
-/// only be seen in the calls.
+/// Snapshot tripwires read: Store plus intercepted tool calls.
 pub struct Watch<'a> {
 	pub store: &'a Store,
 	pub calls: &'a [super::RecordedToolCall],
 }
 
-/// The bench's own Channel: a case's script, not a real transport.
-///
-/// `send` does nothing — the transcript already lives in the Store, and a case
-/// reads it back with [`Rig::transcript`] rather than watching a terminal or a
-/// socket.
+/// Bench Channel for case scripts. `send` is no-op; transcript lives in Store.
 struct BenchChannel {
 	id: std::sync::OnceLock<ChannelId>,
 	kind: ChannelKind,
@@ -164,7 +145,7 @@ impl RigBuilder {
 		self
 	}
 
-	/// Run against a configuration the case wrote, instead of the machine's.
+	/// Use given config instead of machine file.
 	pub fn config(mut self, config: Arc<Config>) -> Self {
 		self.config = Some(config);
 		self
@@ -180,28 +161,27 @@ impl RigBuilder {
 		self
 	}
 
-	/// How much the Harness starts by itself. A case wants the least that gets
-	/// its one Session running: [`Drive::CommsOnly`] for a Comms Session, and
-	/// [`Drive::Full`] for a seeded Task, whose children the interceptor answers
-	/// rather than lets run.
+	/// How much Harness starts by itself.
 	pub fn drive(mut self, drive: Drive) -> Self {
 		self.drive = drive;
 		self
 	}
 
-	/// Open a Channel a script can speak on.
+	/// Open a bench Channel the script can speak on.
 	pub fn channel(mut self, kind: crate::domain::ChannelKind) -> Self {
 		self.channels.push(kind);
 		self
 	}
 
-	/// The whole case must finish inside this, or it trips.
+	/// Bound for whole case. Trips when exceeded.
 	pub fn timeout(mut self, within: Duration) -> Self {
 		self.timeout = Some(within);
 		self
 	}
 
+	/// Build Rig with private DB, scheduler, Harness and log.
 	pub async fn build(self) -> Result<Rig, Trip> {
+		// Resolve config
 		let setup = |e: std::io::Error| Trip::Tripwire {
 			name: "setup".to_string(),
 			detail: e.to_string(),
@@ -218,6 +198,7 @@ impl RigBuilder {
 			},
 		};
 
+		// Resolve clock
 		let clock: Arc<dyn Clock> = match self.clock {
 			ClockChoice::Real => Arc::new(SystemClock),
 			ClockChoice::Fixed(at) => Arc::new(FixedClock(at)),
@@ -225,15 +206,19 @@ impl RigBuilder {
 		};
 		let now = clock.now();
 
+		// Create event stream
 		let events = Arc::new(Events::new(1024));
 		let subscription = events.subscribe();
 
+		// Create temp log
 		let dir = tempfile::TempDir::new().map_err(setup)?;
 		let log_path = dir.path().join("sandman.log");
 		let logger = Arc::new(
 			Logger::create(&log_path, self.log, Echo::Quiet).map_err(setup)?,
 		);
 		let mut drivers = Vec::new();
+
+		// Spawn log driver
 		{
 			let logger = logger.clone();
 			let events = events.clone();
@@ -242,8 +227,7 @@ impl RigBuilder {
 			));
 		}
 
-		// A scripted or supplied model answers every Purpose: a case that wrote
-		// the replies is not asking which model would have given them.
+		// Resolve models
 		let (models, model_name) = match self.model {
 			ModelChoice::Real => {
 				(Models::from_config(&config), config.for_all().model.clone())
@@ -260,19 +244,23 @@ impl RigBuilder {
 			},
 		};
 
+		// Open store
 		let store = Arc::new(
 			Store::open(Backing::Memory, events.clone(), &model_name, now)
 				.map_err(Trip::from)?,
 		);
 
+		// Build scheduler
 		let scheduler =
 			Arc::new(Scheduler::new(models, store.clone(), clock.clone()));
 
+		// Wrap tool runner
 		let registry: Arc<dyn ToolRunner> =
 			Arc::new(Registry::all(events.clone()));
 		let interceptor = Arc::new(Interceptor::new(registry, self.tools));
 		let tools: Arc<dyn ToolRunner> = interceptor.clone();
 
+		// Build harness
 		let embedder: Arc<dyn crate::memory::Embedder> = Arc::new(
 			crate::memory::OpenRouterEmbedder::from_spec(&config.embedding),
 		);
@@ -286,6 +274,7 @@ impl RigBuilder {
 			config.clone(),
 		);
 
+		// Attach bench channels
 		let mut channel = None;
 		for kind in self.channels {
 			let transport =
@@ -301,6 +290,7 @@ impl RigBuilder {
 			channel = Some(id);
 		}
 
+		// Spawn harness driver
 		{
 			let driven = harness.clone();
 			let drive = self.drive;
@@ -309,6 +299,7 @@ impl RigBuilder {
 			}));
 		}
 
+		// Assemble rig
 		let timeout = self.timeout.unwrap_or(DEFAULT_TIMEOUT);
 
 		Ok(Rig {
@@ -332,24 +323,19 @@ impl Rig {
 		RigBuilder::default()
 	}
 
-	/// When this Rig's clock started, for [`super::report::assemble`] to weigh
-	/// the run's wall time against.
+	/// Clock time when Rig started.
 	pub fn started_at(&self) -> Timestamp {
 		self.started_at
 	}
 
 	// --- Filling the state --------------------------------------------------
 
-	/// Put a Task on the queue as though the command line had.
-	///
-	/// An ordinary Store write through the ordinary path: nothing here reaches
-	/// around the Harness to plant a row.
+	/// Queue a Task as if from command line. Returns id.
 	pub fn seed_task(&self, new: NewTask) -> Result<TaskId, Trip> {
 		Ok(self.harness.create_task(new)?)
 	}
 
-	/// Write a lesson, so a case can test what the `memory` Role finds without
-	/// first making a swarm earn one.
+	/// Insert a lesson for `memory` tests. Returns id.
 	pub fn seed_lesson(
 		&self,
 		new: NewLesson,
@@ -358,7 +344,7 @@ impl Rig {
 		Ok(self.store.keep_lesson(new, now)?)
 	}
 
-	/// What the human on the bench Channel says.
+	/// Send text on bench Channel as human.
 	pub async fn send(&self, text: &str) {
 		let channel = self
 			.channel
@@ -370,7 +356,7 @@ impl Rig {
 
 	// --- Driving ------------------------------------------------------------
 
-	/// Add a condition that must hold for the whole run.
+	/// Add condition that must hold for whole run.
 	pub fn tripwire(
 		&mut self,
 		name: &str,
@@ -395,22 +381,20 @@ impl Rig {
 		Ok(())
 	}
 
-	/// Wait until something is true.
-	///
-	/// Follows the Event stream: the predicate is re-checked when something
-	/// changed, and every tripwire with it. No polling, and no clock involved
-	/// except the case's own bound.
+	/// Wait until predicate holds. Re-checks on each Event and evaluates tripwires.
 	pub async fn until(
 		&mut self,
 		what: &str,
 		pred: impl Fn(&Store) -> bool,
 	) -> Result<(), Trip> {
 		loop {
+			// Check tripwires and predicate
 			self.check_tripwires()?;
 			if pred(&self.store) {
 				return Ok(());
 			}
 
+			// Enforce deadline
 			let now = self.harness.now();
 			if let Some(deadline) = self.deadline {
 				if now >= deadline {
@@ -418,6 +402,7 @@ impl Rig {
 				}
 			}
 
+			// Wait for event or deadline
 			let wait = self.deadline.map(|d| now.until(d));
 			let sleep = tokio::time::sleep(match wait {
 				Some(d) => std::time::Duration::from_millis(d.0.max(1) as u64),
@@ -431,24 +416,24 @@ impl Rig {
 					if let Err(RecvError::Closed) = recv {
 						return Err(Trip::Timeout { what: what.to_string() });
 					}
-					// Ok(_) and Lagged both just mean "something happened, or
-					// might have" — either way the loop goes round and
-					// re-checks, which is what survives a Lagged.
+					// Re-check on any event
 				},
 			}
 		}
 	}
 
-	/// Wait for a fixed span, still watching tripwires. For the rare case that
-	/// has to let a Session keep going for a while.
+	/// Wait for span while still watching tripwires.
 	pub async fn idle_for(&mut self, span: Duration) -> Result<(), Trip> {
 		let target = self.harness.now().plus(span);
 		loop {
+			// Check tripwires
 			self.check_tripwires()?;
 			let now = self.harness.now();
 			if now >= target {
 				return Ok(());
 			}
+
+			// Enforce case bound
 			if let Some(deadline) = self.deadline {
 				if now >= deadline {
 					let seconds =
@@ -457,6 +442,7 @@ impl Rig {
 				}
 			}
 
+			// Wait for event or target
 			let remaining = now.until(target);
 			let sleep = tokio::time::sleep(std::time::Duration::from_millis(
 				remaining.0.max(1) as u64,
@@ -469,16 +455,13 @@ impl Rig {
 					if let Err(RecvError::Closed) = recv {
 						return Ok(());
 					}
+					// Re-check on any event
 				},
 			}
 		}
 	}
 
-	/// True when a Comms Session has finished answering: mail read, idle, and at
-	/// least one model call made since `since_calls`.
-	///
-	/// Take the count *before* sending, or it is true before the run has done
-	/// anything.
+	/// True when Comms Session is idle, has no mail, and made a call since baseline.
 	pub fn comms_idle(&self, since_calls: usize) -> Result<bool, Trip> {
 		let Some(channel) = self.channel else {
 			return Ok(false);
@@ -494,11 +477,9 @@ impl Rig {
 		Ok(idle && !has_mail && row.calls.len() > since_calls)
 	}
 
-	/// Say this on the bench Channel, and wait for the Comms Session to finish
-	/// answering it — mail read, idle, one more model call than before. The
-	/// ceremony every conversational case needs, written once here instead of
-	/// by hand in each one.
+	/// Send text and wait for Comms Session to finish replying.
 	pub async fn converse(&mut self, text: &str) -> Result<(), Trip> {
+		// Record baseline
 		let channel = self
 			.channel
 			.expect("a case that calls converse() opened a channel first");
@@ -512,6 +493,7 @@ impl Rig {
 			.map(|s| s.calls.len())
 			.unwrap_or(0);
 
+		// Send and wait
 		self.send(text).await;
 		self.until("the comms session finishes replying", move |store| {
 			let Ok(Some(row)) = store.session(session) else {
@@ -524,9 +506,7 @@ impl Rig {
 		.await
 	}
 
-	/// Wait for a seeded Task to reach a terminal Result, success or failure —
-	/// what a case that seeded one wants before reading [`Rig::tasks`] for the
-	/// outcome.
+	/// Wait for Task to reach terminal state.
 	pub async fn await_task(&mut self, task: TaskId) -> Result<(), Trip> {
 		self.until("the Task completes", move |store| {
 			matches!(
@@ -539,13 +519,12 @@ impl Rig {
 
 	// --- Reading ------------------------------------------------------------
 
-	/// Every tool call any Session made, in order, with what it answered. The
-	/// unit bench's whole point.
+	/// Every tool call in order, with answer.
 	pub fn tool_calls(&self) -> Vec<super::RecordedToolCall> {
 		self.interceptor.calls()
 	}
 
-	/// What the human on the bench Channel has seen and said.
+	/// Transcript of bench Channel.
 	pub fn transcript(&self) -> Result<Vec<Utterance>, Trip> {
 		let channel = self
 			.channel
@@ -561,9 +540,7 @@ impl Rig {
 		Ok(self.harness.spend()?)
 	}
 
-	/// Model calls that never came back, with the wire error — how an expired key
-	/// or a dead endpoint becomes visible without opening the log. The checks
-	/// alone would only say "no reply".
+	/// Model calls that never returned, with wire error.
 	pub fn failed_calls(
 		&self,
 	) -> Result<Vec<(CallId, SessionId, String)>, Trip> {
@@ -582,31 +559,27 @@ impl Rig {
 
 	// --- Ending -------------------------------------------------------------
 
-	/// Stop everything and make sure nothing can still spend.
-	///
-	/// Cancels every unfinished Task, then waits for the last in-flight call to
-	/// land so the cost record stays honest.
+	/// Cancel unfinished Tasks and wait for in-flight calls to settle.
 	pub async fn wind_down(&mut self) {
+		// Cancel tasks and settle calls
 		self.harness.wind_down(Duration::from_secs(30)).await;
 		let _ = self.store.end_run(self.harness.now());
+		// Abort drivers
 		for handle in self.drivers.drain(..) {
 			handle.abort();
 		}
 	}
 
-	/// Write the artifacts: `result.json`, `sandman.log` and `store.sqlite` —
-	/// the whole database of the run, with every Session's transcript and every
-	/// model call's request and reply, queryable afterwards with `sqlite3`.
-	///
-	/// Takes the directory rather than assuming the working one, which is what
-	/// lets several cases write artifacts from one process.
+	/// Write `store.sqlite` and `sandman.log` into dir.
 	pub fn save_to(&self, dir: &std::path::Path) -> std::io::Result<()> {
+		// Create dir and copy store
 		std::fs::create_dir_all(dir)?;
 		self.store
 			.save_copy(&dir.join("store.sqlite"))
 			.map_err(|e| {
 				std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
 			})?;
+		// Copy log if present
 		let log_path = self.dir.path().join("sandman.log");
 		if log_path.exists() {
 			std::fs::copy(&log_path, dir.join("sandman.log"))?;
@@ -616,9 +589,7 @@ impl Rig {
 }
 
 impl Drop for Rig {
-	/// The backstop. A case that panicked never reached `wind_down`, and a
-	/// driver task left running would keep spending against a Harness nothing
-	/// is watching.
+	/// Abort drivers if case panicked before `wind_down`.
 	fn drop(&mut self) {
 		for handle in self.drivers.drain(..) {
 			handle.abort();

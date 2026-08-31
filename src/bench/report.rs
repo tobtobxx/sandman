@@ -1,18 +1,27 @@
-//! What a bench run leaves behind, and what it prints.
+//! What a bench run leaves behind and prints.
 //!
-//! Three artifacts per run, in a directory the driver names — never the working
-//! directory, so several runs from one process cannot write over each other:
+//! Construct: `assemble(case, rig, found, graders) -> RunReport` — winds the
+//! rig down, turns a `Trip` into `tripped` rather than an early return, and
+//! grades only if every check passed.
+//! Use: `write_artifacts(report, rig, dir)` writes `result.json`/`store.sqlite`/`sandman.log`;
+//! `print_run`/`print_summary` render verdicts; `run_dir(root, stamp, case, k)` names the dir.
+//! Consumers: `cases::finish` (every case) and `bin/bench` (driver loop, summary, artifact root).
 //!
-//! - `result.json` — pass or fail, every check with what it saw, the trip that
-//!   ended it if one did, wall time, Spend, and the graders with their cost kept
-//!   apart from the swarm's.
-//! - `store.sqlite` — the run's whole database: every Task with its Result, every
-//!   Session with its full transcript and its metacognition, every model call
-//!   with its request and reply. This is what you open when a run fails and you
-//!   want to know why. `sqlite3` reads it.
-//! - `sandman.log` — the order, which the database cannot show.
+//! Artifacts per run — caller-named dir, never cwd, so parallel runs cannot collide:
 //!
-//! Defines: [`RunReport`], [`CaseSummary`], [`write_artifacts`], [`print_summary`].
+//! | file | contains | read when |
+//! |---|---|---|
+//! | `result.json` | pass, checks, tripped, wall time, Spend + grader cost apart | scanning results |
+//! | `store.sqlite` | Tasks/Results/Sessions/transcripts/calls with request/reply | run failed, need why |
+//! | `sandman.log` | ordered Events | order the DB cannot show |
+//!
+//! Rules:
+//! - **Trip is data, not control** — a tripped run still reports checks seen on the way there.
+//! - **Graders run only if checks passed** — nothing to judge on a countable failure.
+//! - **Grader cost never in Spend** — bench machinery, not swarm work; `Spend` is re-summed from the store.
+//! - **Wind down before snapshot** — no spend after grading starts; cost is honest.
+//!
+//! Defines: [`RunReport`], [`CaseSummary`], [`assemble`], [`write_artifacts`], [`print_run`], [`print_summary`], [`run_dir`].
 
 use crate::domain::{CallStatus, Cost, Spend};
 
@@ -52,39 +61,39 @@ pub struct CaseSummary {
 	pub total_cost: Cost,
 }
 
-/// Everything between what a case found and its report, done once rather than
-/// in each case.
+/// Assemble one run's report.
 ///
-/// Winds the Rig down first, so nothing can still spend while the graders run.
-/// A [`Trip`] becomes [`RunReport::tripped`] rather than an early return: a run
-/// that ended on a tripwire still reports what it saw on the way there. Graders
-/// run only if every check passed — there is nothing to judge about a run that
-/// already failed on something countable — and their cost is kept apart from
-/// Spend.
+/// Winds the rig down, grades only if every check passed, and records spend.
+/// A `Trip` becomes `tripped` rather than an early return.
 pub async fn assemble(
 	case: &super::Case,
 	rig: &mut super::Rig,
 	found: Result<Vec<CheckResult>, Trip>,
 	graders: Vec<Grader>,
 ) -> RunReport {
+	// Capture timestamps
 	let started_at = rig.started_at();
 	let finished_at = rig.harness.now();
 
+	// Classify outcome
 	let (checks, tripped) = match found {
 		Ok(checks) => (checks, None),
 		Err(trip) => (Vec::new(), Some(trip.to_string())),
 	};
 	let checks_passed = tripped.is_none() && checks.iter().all(|c| c.ok);
 
+	// Grade if clean
 	let mut grader_outcomes = Vec::new();
 	let mut grader_cost = Cost(0);
 	if checks_passed {
 		for grader in &graders {
 			match super::grader::run(grader, rig.config.for_grader()).await {
+				// Grader answered - collect cost
 				Ok(outcome) => {
 					grader_cost = grader_cost + outcome.cost;
 					grader_outcomes.push(outcome);
 				},
+				// Grader unreachable - record failure
 				Err(e) => grader_outcomes.push(GraderOutcome {
 					name: grader.name.clone(),
 					verdict: Verdict::Fail,
@@ -96,8 +105,10 @@ pub async fn assemble(
 		}
 	}
 
+	// Wind down rig
 	rig.wind_down().await;
 
+	// Collect snapshot data
 	let snapshot = rig.store.snapshot().ok();
 	let model = snapshot
 		.as_ref()
@@ -116,6 +127,7 @@ pub async fn assemble(
 		.collect();
 	let spend = rig.spend().unwrap_or_default();
 
+	// Build report
 	let pass = checks_passed
 		&& grader_outcomes.iter().all(|g| g.verdict == Verdict::Pass);
 
@@ -123,9 +135,6 @@ pub async fn assemble(
 		case: case.name.to_string(),
 		description: case.description.to_string(),
 		model,
-		// Nothing between here and the Model seam records what reasoning
-		// effort a real call asked for; `OpenRouter::from_env` always asks
-		// for none. Honest until a case needs to vary it.
 		reasoning_effort: "none".to_string(),
 		started_at: started_at.0,
 		finished_at: finished_at.0,
@@ -140,7 +149,7 @@ pub async fn assemble(
 	}
 }
 
-/// Write `result.json`, `store.sqlite` and `sandman.log` into a directory.
+/// Write `result.json`, `store.sqlite` and `sandman.log` into `dir`.
 pub fn write_artifacts(
 	report: &RunReport,
 	rig: &super::Rig,
@@ -154,9 +163,9 @@ pub fn write_artifacts(
 	Ok(())
 }
 
-/// One line per run, then a line per failed check. Colored so a scan of a long
-/// run finds the failures without reading every line.
+/// Print one run's verdict and failures, colored for scan.
 pub fn print_run(report: &RunReport) {
+	// Resolve verdict
 	let on = super::color::enabled();
 	let verdict = if report.pass {
 		super::color::green(on, "PASS")
@@ -171,6 +180,7 @@ pub fn print_run(report: &RunReport) {
 		report.description
 	);
 
+	// Print failures
 	let mark = super::color::red(on, "✗");
 	if let Some(trip) = &report.tripped {
 		println!("  {mark} tripped: {trip}");
@@ -196,20 +206,22 @@ pub fn print_run(report: &RunReport) {
 	}
 }
 
-/// Pass rate, mean wall time and total cost per case, aligned into a table,
-/// with a totals line underneath.
+/// Print pass rate, mean wall time and total cost per case as a table.
 pub fn print_summary(summaries: &[CaseSummary]) {
+	// Return if empty
 	if summaries.is_empty() {
 		return;
 	}
 	let on = super::color::enabled();
 	println!("\n{}", super::color::bold(on, "Summary"));
 
+	// Collect totals
 	let name_width = summaries.iter().map(|s| s.case.len()).max().unwrap_or(0);
 	let mut total_passed = 0;
 	let mut total_runs = 0;
 	let mut total_cost = Cost(0);
 
+	// Print per case
 	for summary in summaries {
 		println!(
 			"  {:<name_width$}  {} passed  mean {:>6}ms   total {}",
@@ -223,6 +235,7 @@ pub fn print_summary(summaries: &[CaseSummary]) {
 		total_cost = total_cost + summary.total_cost;
 	}
 
+	// Print totals
 	println!(
 		"  {} run(s) passed, total spent {}",
 		ratio(on, total_passed, total_runs),
@@ -230,8 +243,7 @@ pub fn print_summary(summaries: &[CaseSummary]) {
 	);
 }
 
-/// `passed/runs`, colored green if every run passed, red if none did, yellow
-/// otherwise.
+/// Format `passed/runs` colored by outcome.
 fn ratio(on: bool, passed: usize, runs: usize) -> String {
 	let text = format!("{passed}/{runs}");
 	if runs > 0 && passed == runs {

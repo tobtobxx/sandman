@@ -1,7 +1,16 @@
-//! A little color for the bench driver's terminal output.
+//! ANSI helpers for the bench driver's terminal output.
 //!
-//! Off whenever stdout is not a real terminal, or `NO_COLOR` is set — a
-//! redirected log or a CI runner should never see raw escape codes.
+//! `enabled()` is the gate — `NO_COLOR` unset and stdout is a TTY — checked
+//! on every call; callers pass that `on` to `bold`/`dim`/`red`/`green`/…
+//! which wrap via private `paint` only when on. No cache — a bench prints a
+//! handful of lines.
+//!
+//! Consumed only by `report::{print_run,print_summary,ratio}` for verdicts,
+//! ratios and dimmed metadata. No state, no config, no seam.
+//!
+//! Rules:
+//! - **Off when stdout is not a TTY or `NO_COLOR` is set** — logs and CI never see codes.
+//! - Callers decide once per run — `enabled()` then every painter with `on`.
 
 use std::io::IsTerminal;
 
@@ -13,8 +22,9 @@ const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const CYAN: &str = "\x1b[36m";
 
-/// Whether to paint at all. Checked once per call rather than cached: a bench
-/// run is a handful of prints, not a hot loop.
+/// Whether ANSI output is allowed.
+///
+/// Returns true only on a TTY without `NO_COLOR`.
 pub fn enabled() -> bool {
 	std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
 }

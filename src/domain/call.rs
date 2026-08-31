@@ -1,31 +1,56 @@
-//! The model call: one exchange with the model, belonging to a Session.
+//! One model exchange, visible from queue time to finish.
 //!
-//! A call exists from the moment it joins the scheduler's queue, not from when
-//! it is sent, so waiting for the model is as visible from outside as talking to
-//! it. Everything that is only true once a call has been sent — when it went out,
-//! when it came back, what came back, what it cost — lives inside
-//! [`CallStatus`]. A call that is `Done` therefore always has a reply and a
-//! usage record, and one that is `Queued` cannot pretend to have either.
+//! A call is recorded when it joins the scheduler, not when it is sent —
+//! waiting is as visible as talking. Data valid only after sending
+//! (`sent_at`, `reply`, `usage`, `cost`) lives inside [`CallStatus`], so a
+//! `Queued` call cannot carry a reply and a `Done` call always does.
 //!
-//! Defines: [`LlmCall`], [`CallStatus`], [`CallRequest`], [`NewCall`],
-//! [`Usage`].
+//! Construct via [`NewCall`] at [`crate::store::Store::queue_call`] — the Store
+//! mints [`CallId`] and stamps `queued_at` in the same transaction. The request
+//! is frozen at that instant (`messages` + `tools`), never updated as the
+//! Session's transcript grows afterwards.
+//!
+//! Use through [`crate::scheduler::Scheduler::request`] which drives the
+//! lifecycle and [`crate::model::Model::send`] which fills the reply:
+//! ```text
+//! queue_call(NewCall) → Queued → set InFlight {sent_at} → Model::send → Done|Failed
+//! recover (new Run)  → Dropped {at} for anything still Queued|InFlight
+//! ```
+//!
+//! Consumers handle the same [`CallStatus`] differently:
+//!
+//! | Status | Store | Scheduler | Model | Spend | Watchers/Events |
+//! | --- | --- | --- | --- | --- | --- |
+//! | `Queued` | persists `tier`+`request` | waits by `(Tier, arrival)` | — | ignored | `CallQueued` |
+//! | `InFlight` | records `sent_at` | holds the one slot | `send(&CallRequest)` | ignored | `CallStatusChanged` |
+//! | `Done` | records `reply`+`Usage` | releases slot | returns `Completion` | summed | `CallStatusChanged` |
+//! | `Failed` | records `error` | releases slot | returns `ModelError` | ignored | `CallStatusChanged` |
+//! | `Dropped` | set by `recover` on stale `Queued`/`InFlight` | — | — | ignored | `CallStatusChanged` |
+//!
+//! Rules / asymmetry:
+//!
+//! - **Tier is fixed at queue time and never changes.** `Tier` orders waiting calls; same-tier arrival order alternates workers.
+//! - **At most one `InFlight` across the whole Harness.** Scheduler grants by `(Tier, arrival)`; higher tier jumps waiting calls, never preempts the one in flight.
+//! - **`Done` always has `reply` and `Usage`; `Queued` never has `sent_at`.** `Dropped` has no `sent_at` either — it is not a `Failed` inventing one for a call never sent.
+//! - **Only `Done` contributes to [`crate::domain::Spend`].** `Dropped` costs nothing knowable; `Failed` is one attempt, no retry, with a path to a failed `TaskResult`.
+//! - **Metacognition has no Session.** Its calls are recorded against the Session judged, so cost lands where the work is.
+//! - **Store is the only writer; scheduler decides *when*, `Model` decides *how*.** `Model` sits under the scheduler so scripted benches still exercise the real queue.
+//!
+//! Defines: [`LlmCall`], [`CallStatus`], [`CallRequest`], [`NewCall`], [`Usage`].
 
 use super::ids::{CallId, RunId, SessionId};
 use super::message::{Message, Reply, ToolSchema};
 use super::time::{Cost, Timestamp};
 use crate::scheduler::Tier;
 
-/// One exchange with the model.
+/// One exchange with the model, owned by a Session.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LlmCall {
 	pub id: CallId,
 	pub run: RunId,
-	/// The Session this call belongs to. Metacognition has no Session of its
-	/// own, so its calls are recorded against the Session it judges — its cost
-	/// lands where the work is.
+	/// Session that pays; metacognition records against the judged Session.
 	pub session: SessionId,
-	/// Where this call waited. Set when it joins the queue and never changed, so
-	/// a Watcher can see what was prioritised over what.
+	/// Priority at queue time; never changes.
 	pub tier: Tier,
 	pub model: String,
 	pub request: CallRequest,
@@ -33,15 +58,16 @@ pub struct LlmCall {
 	pub status: CallStatus,
 }
 
-/// What was sent, recorded as it was sent rather than as the Session went on to
-/// accumulate afterwards.
+/// Frozen request sent to the model.
+///
+/// Captured at queue time so later transcript growth does not alter it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CallRequest {
 	pub messages: Vec<Message>,
 	pub tools: Vec<ToolSchema>,
 }
 
-/// Where a call is, and everything that depends on being there.
+/// Lifecycle of a call, and data valid in each state.
 #[derive(
 	Debug,
 	Clone,
@@ -54,31 +80,28 @@ pub struct CallRequest {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum CallStatus {
-	/// In the scheduler's queue, waiting for the one slot.
+	/// Waiting for the one scheduler slot.
 	Queued,
-	/// With the model. At most one call is ever here.
+	/// Out with the model.
 	InFlight { sent_at: Timestamp },
+	/// Succeeded with reply and usage.
 	Done {
 		sent_at: Timestamp,
 		finished_at: Timestamp,
 		reply: Reply,
 		usage: Usage,
 	},
-	/// One attempt, no retry: a failed call already has a full path to a failed
-	/// Result.
+	/// Failed after one attempt; no retry.
 	Failed {
 		sent_at: Timestamp,
 		finished_at: Timestamp,
 		error: String,
 	},
-	/// Left behind by a Run that died, still queued or still out. Its own
-	/// variant rather than a [`CallStatus::Failed`], which would have to invent
-	/// a `sent_at` that a queued call never had. Cost nothing that can be
-	/// known, so Spend ignores it.
+	/// Abandoned by a dead Run; ignored by Spend.
 	Dropped { at: Timestamp },
 }
 
-/// What one finished call consumed.
+/// Tokens and cost of one finished call.
 #[derive(
 	Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
 )]
@@ -87,8 +110,7 @@ pub struct Usage {
 	pub cost: Cost,
 }
 
-/// Everything needed to record a call as it joins the queue. The Store mints the
-/// id.
+/// Inputs to queue a call. Store mints the id.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NewCall {
 	pub session: SessionId,
@@ -98,7 +120,9 @@ pub struct NewCall {
 }
 
 impl CallStatus {
-	/// What this call consumed, if it finished successfully. Spend sums these.
+	/// Usage if this call finished successfully.
+	///
+	/// `Some` only for `Done`; used to sum [`crate::domain::Spend`].
 	pub fn usage(&self) -> Option<Usage> {
 		match self {
 			CallStatus::Done { usage, .. } => Some(*usage),
@@ -106,7 +130,9 @@ impl CallStatus {
 		}
 	}
 
-	/// Whether this call is still expected to produce something.
+	/// Whether this call still expects a result.
+	///
+	/// True for `Queued` and `InFlight`, false otherwise.
 	pub fn is_outstanding(&self) -> bool {
 		matches!(self, CallStatus::Queued | CallStatus::InFlight { .. })
 	}

@@ -1,14 +1,30 @@
-//! Rows to domain values, and back.
+//! Row <-> domain translation — the one spelling of domain types in SQLite.
 //!
-//! The one place that knows how a [`crate::domain`] type is spelled in SQLite.
-//! Everything else — the Store, the tools, the Watcher — works in domain types
-//! and never sees a column name.
+//! The Store speaks domain types; SQLite speaks columns. This module is the
+//! only place that knows both spellings, so a tag and its payload can never
+//! disagree.
 //!
-//! Sum types cross this boundary as a discriminant plus a JSON payload. The
-//! discriminant is what queries filter on; the payload is what the variant
-//! carries. Both are written here, together, so the pair cannot disagree.
+//! Build: nothing to build — free functions over `Row`, `Transaction` and
+//! `Tagged`.
+//! Use: `*_to_row` before a write, `*_from_row` / `read_*` after a read,
+//! `load_session` for the four-table join.
+//! Consumers: `store.rs` only — no other module imports `rows`. SQL outside
+//! Store means Store is missing a word.
 //!
-//! Defines: read and write helpers for every persisted entity.
+//! Seam — variant down, storage across:
+//!
+//! | Kind | On disk | Helpers | Filter |
+//! | TaskState, Schedule, CallStatus, ReflectionResult, LessonSubject, SessionStatus, Message | `tag TEXT` + `json TEXT` | `*_to_row` / `*_from_row` via `payload_of` / `from_tagged` | tag only, json is opaque |
+//! | ChannelKind, ReflectionKind, IncomingFrom, Who | bare `TEXT` (`strum`) | `variant_from_str` | whole value |
+//! | Tier | `INTEGER 1..=5` | `tier_from_i64` | whole value |
+//! | `Vec<f32>` | `BLOB` little-endian `f32` | `vector_to_blob` / `vector_from_blob` | never |
+//! | Whole rows | `SELECT *` | `read_run`, `read_task`, `read_session_head`, `load_session`, `read_call` … | `id` / `(session, idx)` |
+//!
+//! Rules:
+//! - **Tag and payload are written together.** One `Tagged` per call so they cannot diverge.
+//! - **Payload normalises serde external tagging.** Unit variant → `"null"`, else the single value under the variant key; rebuilt as `{tag: payload}` for `DeserializeOwned`.
+//! - **Session is split.** Head is one row; `load_session` appends messages, reflections, calls and unread mail in order.
+//! - **Vectors are opaque.** No caller interprets the blob; nothing outside this file reads `vectors.vector`.
 
 use rusqlite::{Row, Transaction};
 use strum::IntoDiscriminant;
@@ -22,24 +38,19 @@ use crate::domain::{
 };
 use crate::scheduler::Tier;
 
-/// A sum type as it is stored: the variant's name, and what it carries.
+/// A sum type as stored: discriminant plus JSON payload.
 ///
-/// Split rather than a single tagged JSON blob because the name is a column an
-/// index can use.
+/// Split so the discriminant is an indexed column and the payload stays opaque.
 pub struct Tagged {
 	pub tag: &'static str,
 	pub json: String,
 }
 
 // --- Generic tag + JSON payload helpers -------------------------------------
-//
-// Every sum type here derives `serde`'s default external tagging: a unit
-// variant serialises as a bare string, anything else as `{"variant": data}`.
-// `payload_of` normalises both to a JSON payload (`"null"` for the unit case),
-// and `from_tagged` reassembles `{tag: payload}` and lets serde do the
-// checking — a bad tag or a payload that does not fit the variant both land on
-// the one error a caller must handle.
 
+/// Extract the payload of a serde externally-tagged sum type.
+///
+/// Unit variant → `"null"`, otherwise the single value under the variant key.
 fn payload_of<T: serde::Serialize>(value: &T) -> Result<String, DbError> {
 	match serde_json::to_value(value)? {
 		serde_json::Value::Object(obj) => {
@@ -56,6 +67,9 @@ fn payload_of<T: serde::Serialize>(value: &T) -> Result<String, DbError> {
 	}
 }
 
+/// Reassemble `{tag: payload}` and deserialize the sum type.
+///
+/// Bad tag or mismatched payload both become `UnknownVariant`.
 fn from_tagged<T: serde::de::DeserializeOwned>(
 	what: &'static str,
 	tag: &str,
@@ -124,8 +138,9 @@ pub fn lesson_subject_from_row(
 	from_tagged("lesson subject", tag, json)
 }
 
-/// Not a persisted entity of its own, but `sessions.status`/`status_json` need
-/// the same treatment as the tagged pairs above.
+/// Encode/decode `SessionStatus` as tag + JSON.
+///
+/// Session has no separate table; its status column needs the same pair.
 pub fn session_status_to_row(
 	status: &SessionStatus,
 ) -> Result<Tagged, DbError> {
@@ -139,14 +154,14 @@ pub fn session_status_from_row(
 	from_tagged("session status", tag, json)
 }
 
-/// `messages.role`/`body_json`, for `append_message`.
+/// Encode `Message` as `role` + `body_json`.
 pub fn message_to_row(message: &Message) -> Result<Tagged, DbError> {
 	Ok(Tagged { tag: message.into(), json: payload_of(message)? })
 }
 
 // --- Small enums stored as a bare string, no payload ------------------------
 //
-// These have no payload to carry, so they are a column of their own rather than
+// These have no payload, so they are a column of their own rather than
 // a tag and a JSON blob. `strum` spells each one the same way it spells a tag.
 
 fn variant_from_str<T: std::str::FromStr>(
@@ -161,7 +176,7 @@ pub fn channel_kind_from_str(s: &str) -> Result<ChannelKind, DbError> {
 	variant_from_str("channel kind", s)
 }
 
-/// `calls.tier`, as [`Tier`]'s `repr` — the same 1..=5 a Watcher shows.
+/// Decode `calls.tier` from `INTEGER 1..=5`.
 fn tier_from_i64(n: i64) -> Result<Tier, DbError> {
 	u8::try_from(n)
 		.ok()
@@ -171,12 +186,12 @@ fn tier_from_i64(n: i64) -> Result<Tier, DbError> {
 		})
 }
 
-/// A `Vec<f32>` as bytes, for the `vectors` table. Little-endian, four bytes a
-/// float; nothing reads this column but this module.
+/// Encode `Vec<f32>` as little-endian bytes for `vectors.vector`.
 pub fn vector_to_blob(v: &[f32]) -> Vec<u8> {
 	v.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
+/// Decode little-endian bytes back to `Vec<f32>`.
 pub fn vector_from_blob(bytes: &[u8]) -> Vec<f32> {
 	bytes
 		.chunks_exact(4)
@@ -200,6 +215,7 @@ pub fn read_run(row: &Row<'_>) -> Result<Run, DbError> {
 }
 
 pub fn read_task(row: &Row<'_>) -> Result<Task, DbError> {
+	// Read columns
 	let id: i64 = row.get("id")?;
 	let run: i64 = row.get("run")?;
 	let title: String = row.get("title")?;
@@ -214,6 +230,7 @@ pub fn read_task(row: &Row<'_>) -> Result<Task, DbError> {
 	let created_by: String = row.get("created_by")?;
 	let created_at: i64 = row.get("created_at")?;
 
+	// Build task
 	Ok(Task {
 		id: TaskId(id as u32),
 		run: RunId(run as u32),
@@ -233,9 +250,11 @@ pub fn read_task(row: &Row<'_>) -> Result<Task, DbError> {
 	})
 }
 
-/// A Session without its messages, reflections or mail. Those are separate
-/// tables; [`load_session`] joins them.
+/// Read a session head without child tables.
+///
+/// Messages, reflections and mail live in separate tables.
 pub fn read_session_head(row: &Row<'_>) -> Result<Session, DbError> {
+	// Read common columns
 	let id: i64 = row.get("id")?;
 	let run: i64 = row.get("run")?;
 	let kind_tag: String = row.get("kind")?;
@@ -244,6 +263,7 @@ pub fn read_session_head(row: &Row<'_>) -> Result<Session, DbError> {
 	let started_at: i64 = row.get("started_at")?;
 	let ended_at: Option<i64> = row.get("ended_at")?;
 
+	// Decode kind
 	let kind = match kind_tag.as_str() {
 		"worker" => {
 			let task: i64 = row.get("task")?;
@@ -271,6 +291,7 @@ pub fn read_session_head(row: &Row<'_>) -> Result<Session, DbError> {
 		},
 	};
 
+	// Build session
 	Ok(Session {
 		id: SessionId(id as u32),
 		run: RunId(run as u32),
@@ -284,7 +305,7 @@ pub fn read_session_head(row: &Row<'_>) -> Result<Session, DbError> {
 	})
 }
 
-/// Run one query against a `session`-keyed table and read every row back.
+/// Run one query against a `session`-keyed table and collect every row.
 fn collect<T>(
 	tx: &Transaction<'_>,
 	sql: &str,
@@ -300,12 +321,14 @@ fn collect<T>(
 	Ok(out)
 }
 
-/// A whole Session: its head, then its messages, reflections and unread mail in
-/// order.
+/// Load a whole session: head plus ordered child tables.
+///
+/// Joins messages, reflections, calls and unread mail.
 pub fn load_session(
 	tx: &Transaction<'_>,
 	id: SessionId,
 ) -> Result<Option<Session>, DbError> {
+	// Load head
 	let mut session = {
 		let mut stmt = tx.prepare("SELECT * FROM sessions WHERE id = ?1")?;
 		let mut rows = stmt.query([id.0])?;
@@ -315,18 +338,21 @@ pub fn load_session(
 		}
 	};
 
+	// Collect messages
 	session.messages = collect(
 		tx,
 		"SELECT * FROM messages WHERE session = ?1 ORDER BY idx",
 		id.0,
 		read_message,
 	)?;
+	// Collect reflections
 	session.reflections = collect(
 		tx,
 		"SELECT * FROM reflections WHERE session = ?1 ORDER BY idx",
 		id.0,
 		read_reflection,
 	)?;
+	// Collect calls
 	session.calls = collect(
 		tx,
 		"SELECT id FROM calls WHERE session = ?1 ORDER BY id",
@@ -334,6 +360,7 @@ pub fn load_session(
 		|row| Ok(CallId(row.get::<_, i64>(0)? as u32)),
 	)?;
 
+	// Collect unread mail
 	if let SessionKind::Comms { mailbox, .. } = &mut session.kind {
 		*mailbox = collect(
 			tx,

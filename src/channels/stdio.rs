@@ -1,20 +1,36 @@
-//! The terminal Channel.
+//! Terminal Channel — stdin/stdout transport.
 //!
-//! The human types, and what the swarm says comes back on stdout. Only the
-//! conversation goes here — the trace goes to `sandman.log`, so the two never
-//! interleave.
+//! What the human types on stdin arrives as `IncomingFrom::Human` mail; what
+//! the swarm says comes back on stdout in cyan. The trace stays in
+//! `sandman.log`, so the two never interleave.
 //!
-//! Defines: [`Stdio`], [`attach`].
+//! Construct: [`attach`] creates `Stdio` with an empty `OnceLock`, registers
+//! it via `Harness::attach` (`Store::open_comms` mints `ChannelId`), then
+//! spawns the blocking stdin loop.
+//! Use: inbound `prompt` → `read_line` → `Harness::receive`; outbound
+//! `Channel::send` → cyan `println!` via `Harness::forward_said` on `Event::Said`.
+//! Consumers: `Harness` owns the transport; `comms::respond` never imports `channels`.
+//!
+//! | `Channel` | `Stdio` (this file) | `Web` (`channels::web`) |
+//! |---|---|---|
+//! | `send` | prints cyan to stdout | no-op — push carries transcript |
+//! | inbound | blocking stdin loop | browser → `Harness::receive` |
+//! | stop | `/quit` or EOF → `Harness::stop` | browser close |
+//!
+//! Rules: one Comms Session per `Channel`; **`Channel::send` is fire-and-forget**, delivery is the `Store`.
+//!
+//! Defines: [`Stdio`], [`attach`], [`prompt`].
 
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
 use crate::domain::{ChannelId, ChannelKind, IncomingFrom};
 
-/// The terminal, as a Channel.
+/// Terminal transport as a `Channel`.
+///
+/// Holds the `ChannelId` minted by the `Store`; `send` prints to stdout in cyan.
 pub struct Stdio {
-	/// Set once, right after the Store mints it — `attach` cannot know it any
-	/// earlier, since the Store is what mints it.
+	/// Minted `ChannelId`, set once by `attach` after `Harness::attach`.
 	id: OnceLock<ChannelId>,
 }
 
@@ -39,39 +55,44 @@ impl crate::comms::Channel for Stdio {
 const CYAN: &str = "\x1b[36m";
 const RESET: &str = "\x1b[0m";
 
-/// Open the terminal Channel and start reading lines from it.
+/// Open the terminal Channel and drive stdin.
 ///
-/// `/quit` leaves. Everything else is something the human said.
+/// Spawns a blocking loop that forwards lines to the `Harness`.
+/// Returns the minted `ChannelId`; `/quit` or EOF stops the `Harness`.
 pub async fn attach(
 	harness: Arc<crate::harness::Harness>,
 ) -> Result<ChannelId, crate::store::StoreError> {
+	// Register channel
 	let stdio = Arc::new(Stdio { id: OnceLock::new() });
 	let id = harness.attach(stdio.clone()).await?;
 	stdio.id.set(id).expect("attach runs once per Stdio");
 
+	// Spawn blocking reader
 	let runtime = tokio::runtime::Handle::current();
 	tokio::task::spawn_blocking(move || {
 		let stdin = std::io::stdin();
 		let mut line = String::new();
+		// Read input loop
 		loop {
+			// Prompt and read line
 			prompt();
 			line.clear();
 			match stdin.read_line(&mut line) {
-				// EOF (Ctrl-D) or a broken stdin both mean the terminal is
-				// gone, same as typing `/quit`: without this the harness
-				// would sit in its run loop forever with nothing left to
-				// stop it.
+				// EOF or error - stop harness
 				Ok(0) | Err(_) => {
 					harness.stop();
 					break;
 				},
+				// Line ready - continue
 				Ok(_) => {},
 			}
 			let text = line.trim_end_matches(['\r', '\n']);
+			// Check quit command
 			if text == "/quit" {
 				harness.stop();
 				break;
 			}
+			// Forward to harness
 			runtime.block_on(harness.receive(id, text, IncomingFrom::Human));
 		}
 	});
@@ -79,7 +100,9 @@ pub async fn attach(
 	Ok(id)
 }
 
-/// Draw the prompt the human types at.
+/// Draw the input prompt.
+///
+/// Writes `> ` to stdout and flushes.
 pub fn prompt() {
 	print!("> ");
 	let _ = std::io::stdout().flush();

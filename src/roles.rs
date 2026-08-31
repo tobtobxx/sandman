@@ -1,27 +1,36 @@
-//! The Role set, closed and living in code.
+//! Closed Role catalogue — prompt plus tool set per Task.
 //!
-//! A Role is a system prompt plus a set of tools, carried by a Task, which
-//! together decide how its Session approaches the problem. A Role is a property
-//! of work, never a kind of agent: every Worker is mechanically the same, and
-//! only the Role of its Task differs.
+//! A Role is a property of work, not a kind of agent. Every Worker runs the
+//! same loop; only its Task's Role changes the system prompt and the tools
+//! offered. Tools live in `tools/` independent of Roles; this file decides the
+//! assignment.
 //!
-//! Tools are independent of Roles, so more than one Role may hold the same tool.
+//! Construct: `RoleName` and `ToolName` variants (`strum` snake_case is the
+//! single string form; serde delegates to it so no second name exists).
+//! Use: `system_prompt(role) -> String` joins mechanics and Role text,
+//! `tools_for(role) -> &[ToolName]` returns the assignment, `schemas_for` builds
+//! per-Session schemas (`message_human` enumerates only open Channels).
+//! Consumers: `worker::new_worker_session` via `system_prompt`, `tools::Registry`
+//! via `schemas_for`, bench `intercept` via `ToolName`.
 //!
-//! [`RoleName`] is the single source of truth. `system_prompt` and `tools_for`
-//! match on it exhaustively, so a Role added without a prompt or without a tool
-//! set does not compile. In the prototype these were a hand-written map and the
-//! two could drift: a Role could vanish from `create_task`'s enum while the
-//! catalogue in the prompts still named it, and a Worker could argue with that
-//! contradiction for a whole run.
+//! | Role | system_prompt | tools_for |
+//! | --- | --- | --- |
+//! | Research | mechanics + research.md | create_task, create_research_task, await_result, web_search, web_fetch |
+//! | Planning | mechanics + planning.md | create_task, create_task_full, await_result, message_human |
+//! | Memory | mechanics + memory.md | create_task, await_result, search_lessons, search_tasks, view_session |
+//! | TaskManager | mechanics + task_manager.md | create_task_full, await_result, list_tasks, search_tasks, cancel_task |
+//! | Comms (`COMMS_SESSION_TOOLS`) | `prompts::COMMS_SESSION` (no mechanics) | create_task only |
 //!
-//! Every Role, in catalogue order, is `RoleName::VARIANTS`.
+//! Rules: **new Role without a prompt or tool set does not compile — exhaustive match.**
+//! **no second string form — serde uses strum.** **Comms has no Role and never produces a Result.**
+//! **tools independent of Roles — multiple Roles may share a tool.**
 //!
-//! Defines: [`RoleName`], [`ToolName`], [`system_prompt`], [`tools_for`],
-//! [`COMMS_SESSION_TOOLS`].
+//! Defines: [`RoleName`], [`ToolName`], [`COMMS_SESSION_TOOLS`], [`system_prompt`],
+//! [`tools_for`], [`SchemaCtx`], [`schemas_for`].
 
 use crate::domain::ToolSchema;
 
-/// Which kind of Worker does a Task.
+/// Closed set of Worker kinds. A Task carries one; its Session inherits the prompt and tools.
 #[derive(
 	Debug,
 	Clone,
@@ -38,18 +47,13 @@ use crate::domain::ToolSchema;
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum RoleName {
-	/// Finds things out in the world. Searches and reads the web, and answers
-	/// with the URLs it relied on.
+	/// Searches the web and answers with URLs.
 	Research,
-	/// Breaks work into pieces and creates a Task for each. The default: work
-	/// goes here when nothing else is plainly right. The only Role that can
-	/// reach a human, through `message_human`.
+	/// Splits work into Tasks; the default and only Role that can reach a human.
 	Planning,
-	/// Finds out what this swarm already did. Searches the Lessons and what past
-	/// Tasks asked and answered.
+	/// Searches lessons and past Tasks.
 	Memory,
-	/// Runs the swarm's queue. Lists and searches Tasks, and cancels the ones
-	/// that must not run.
+	/// Operates the queue — lists, searches and cancels Tasks.
 	TaskManager,
 }
 
@@ -69,16 +73,15 @@ pub enum RoleName {
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum ToolName {
-	/// Enqueue a planning Task. The common case, with no Role or timing to get
-	/// wrong.
+	/// Enqueue a planning Task without Role or timing.
 	CreateTask,
-	/// Enqueue a Task, choosing the Role, the timing and the priority.
+	/// Enqueue a Task, choosing Role, timing and priority.
 	CreateTaskFull,
 	/// Enqueue a research Task.
 	CreateResearchTask,
-	/// Block this turn until a Task completes, and return its answer.
+	/// Block this turn until a Task completes and return its answer.
 	AwaitResult,
-	/// Inject a message into the Comms Session on a named Channel.
+	/// Inject a message into the Comms Session on a Channel.
 	MessageHuman,
 	WebSearch,
 	WebFetch,
@@ -89,31 +92,19 @@ pub enum ToolName {
 	CancelTask,
 }
 
-/// The Comms Session is not a Worker and has no Role, but it still needs tools.
-/// It never ends, so it is never told to produce a Result.
+/// Tools for the standing Comms Session.
+/// Never ends and never produces a Result; only creates planning Tasks.
 pub const COMMS_SESSION_TOOLS: [ToolName; 1] = [ToolName::CreateTask];
 
-/// The system message a Worker Session starts with: the shared mechanics, then
-/// the Role's own text, joined and nothing else.
-///
-/// Nothing is assembled conditionally and nothing is interpolated. The cost is
-/// repetition — the Role catalogue is written out in several prompt files — and
-/// it is paid on purpose: a prompt that has to be assembled in the reader's head
-/// is a prompt whose contradictions are invisible.
+/// Build the Worker's system prompt for a Role.
+/// Joins shared mechanics and Role text with no templating.
+/// Delegates to `prompts::system_prompt`.
 pub fn system_prompt(role: RoleName) -> String {
 	crate::prompts::system_prompt(role)
 }
 
-/// Which tools a Role holds.
-///
-/// The three create-task tools are split so a Role that should not choose
-/// Roles only ever sees the narrow one: research can hand a detail to
-/// planning or to another researcher, but not pick an arbitrary Role, so it
-/// gets `create_task` and `create_research_task` only. Planning may target
-/// any Role, so it alone also gets `create_task_full`. The manager fills the
-/// queue as well as changing it, so it gets `create_task_full` too, to
-/// schedule and repeat work by Role. Memory only ever hands a follow-up to
-/// planning, so it gets the plain `create_task`.
+/// Return the tool set for a Role.
+/// Exhaustive match — adding a Role without tools does not compile.
 pub fn tools_for(role: RoleName) -> &'static [ToolName] {
 	match role {
 		RoleName::Research => &[
@@ -146,11 +137,7 @@ pub fn tools_for(role: RoleName) -> &'static [ToolName] {
 	}
 }
 
-// Each name is read by the model, stored in the database and put on the wire at
-// once, so there must be exactly one of it. `strum` derives that one — the
-// `snake_case` of the variant — and serde is written by hand on top of it rather
-// than derived, because a second derive would name the variant a second way and
-// nothing would catch the day the two disagreed.
+// Single string form — serde delegates to strum snake_case so names never diverge
 
 impl serde::Serialize for RoleName {
 	fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -186,42 +173,42 @@ impl<'de> serde::Deserialize<'de> for ToolName {
 	}
 }
 
-/// What a tool needs to know about the world to describe itself.
-///
-/// Schemas are built for each Session rather than declared once, because
-/// `message_human` must offer the Channels that are actually open — its
-/// `channel` enum should only ever name a Channel that exists.
+/// Context for building tool schemas for a Session.
+/// Carries open Channels so `message_human` enumerates only what exists.
 #[derive(Debug, Clone)]
 pub struct SchemaCtx {
 	pub open_channels:
 		Vec<(crate::domain::ChannelId, crate::domain::ChannelKind)>,
 }
 
-/// The schemas for a set of tools, as they go to the model.
-///
-/// The single implementation: [`crate::tools::Registry::schemas`] calls this
-/// rather than building its own, so the model is never offered two competing
-/// descriptions of the same tool.
+/// Build tool schemas for the model from a name set.
+/// Sole implementation — `Registry` delegates here so descriptions never diverge.
 pub fn schemas_for(names: &[ToolName], ctx: &SchemaCtx) -> Vec<ToolSchema> {
 	use crate::tools::{
 		await_result, create_task, message_human, queue, recall, web, Tool,
 	};
 
+	// Map names to schemas
 	names
 		.iter()
 		.map(|name| match name {
+			// create-task family
 			ToolName::CreateTask => create_task::CreateTask.schema(ctx),
 			ToolName::CreateTaskFull => create_task::CreateTaskFull.schema(ctx),
 			ToolName::CreateResearchTask => {
 				create_task::CreateResearchTask.schema(ctx)
 			},
+			// await and human
 			ToolName::AwaitResult => await_result::AwaitResult.schema(ctx),
 			ToolName::MessageHuman => message_human::MessageHuman.schema(ctx),
+			// web
 			ToolName::WebSearch => web::WebSearch.schema(ctx),
 			ToolName::WebFetch => web::WebFetch.schema(ctx),
+			// recall
 			ToolName::SearchLessons => recall::SearchLessons.schema(ctx),
 			ToolName::SearchTasks => recall::SearchTasks.schema(ctx),
 			ToolName::ViewSession => recall::ViewSession.schema(ctx),
+			// queue
 			ToolName::ListTasks => queue::ListTasks.schema(ctx),
 			ToolName::CancelTask => queue::CancelTask.schema(ctx),
 		})

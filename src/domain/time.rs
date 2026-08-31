@@ -1,20 +1,41 @@
-//! Time as the domain uses it, and money.
+//! Time and money as domain primitives — no logic.
 //!
-//! One instant type, epoch milliseconds, so a Timestamp means the same thing in
-//! the database, on the wire and in a Brief. Wall-clock reading itself is behind
-//! the [`Clock`] seam: production reads the system clock, and a bench can hold
-//! time still while a real model call decides what to do with it.
+//! One [`Timestamp`] (epoch millis) means the same in SQLite, on the wire and
+//! in a [`Brief`](super::text::Brief). [`Duration`] is millis, [`Cost`] is
+//! integer nano-USD so a [`Spend`] sums exactly where floats drift. Reading
+//! the wall clock is behind the [`Clock`] seam.
 //!
-//! [`Cost`] is an integer of nano-USD rather than a float. A run's Spend is a
-//! sum of several hundred fractions of a cent, and an integer sum is exact where
-//! a float sum drifts.
+//! Construct: `Timestamp(i64)` / `Duration::from_secs|millis` and `Cost(i64)`
+//! directly; `Spend` is never constructed — `Store::spend` re-sums `Done`
+//! calls; `Clock` via [`SystemClock`] (prod) or [`FixedClock`] /
+//! [`ManualClock`] (bench); [`stamp`] formats local weekday+date+time for
+//! model context.
+//! Use: `Clock::now() -> Timestamp` threaded as `Arc<dyn Clock>` in
+//! `SessionCtx`, `Harness` and `Scheduler`; `Timestamp::plus` / `until` for
+//! scheduling and interrupt counting; `Cost` / `Spend` summed from
+//! `LlmCall::Usage`.
+//! Consumers and how they match the seam:
+//!
+//! | Type | Store (only writer) | Scheduler / Harness / Session | Bench |
+//! | --- | --- | --- | --- |
+//! | `Timestamp` / `Duration` | persists `not_before`, `queued_at`, `started_at` | `next_pending(now)`, `next_due_in`, interrupt `msgs - last >= interval` | `FixedClock(at)` frozen, `ManualClock::advance` by hand |
+//! | `Clock` | — | `SystemClock` via `chrono::Utc` | `FixedClock` stopped, `ManualClock` moved by test |
+//! | `Cost` / `Spend` | re-sums `Done` calls' `Usage` on every `spend()` | `Model` returns `Usage{cost}`; `Spend` not accumulated | whatever cost a test wants |
+//! | `stamp` | — | injects time as text on `Brief` / mail, never as tool | — |
+//!
+//! Seam: `Clock` is the time seam — `Model`, `ToolRunner`, `Embedder` share
+//! it; bench swaps it to assert on scheduling without waiting. `Cost` / `Spend`
+//! have no seam — one integer type, re-summed.
+//!
+//! Rules: **one instant type — epoch millis everywhere.** **`Spend` re-summed, never accumulated — cannot drift.** **`Cost` integer nano-USD — exact sum, lossy `Display` to 6dp.** **`ManualClock` only moves via `advance`.** **`stamp` is local, not UTC; time enters Session as text.**
 //!
 //! Defines: [`Timestamp`], [`Duration`], [`Cost`], [`Spend`], [`Clock`],
 //! [`SystemClock`], [`FixedClock`], [`ManualClock`], [`stamp`].
 
 use std::fmt;
 
-/// An instant, as epoch milliseconds.
+/// Instant as epoch milliseconds.
+/// Single type for DB, wire and Brief.
 #[derive(
 	Debug,
 	Clone,
@@ -29,7 +50,8 @@ use std::fmt;
 )]
 pub struct Timestamp(pub i64);
 
-/// A span of time, in milliseconds. Always positive where the domain uses it.
+/// Span of time in milliseconds.
+/// Always positive where the domain uses it.
 #[derive(
 	Debug,
 	Clone,
@@ -44,9 +66,8 @@ pub struct Timestamp(pub i64);
 )]
 pub struct Duration(pub i64);
 
-/// Money, in nano-USD. Sums exactly; prints as six decimal places of a dollar —
-/// the last three digits are lost on the way out, so nothing prints a Cost and
-/// reads it back.
+/// Cost in nano-USD.
+/// Sums exactly; `Display` rounds to six decimals and is lossy.
 #[derive(
 	Debug,
 	Clone,
@@ -61,10 +82,8 @@ pub struct Duration(pub i64);
 )]
 pub struct Cost(pub i64);
 
-/// What a Run has cost so far.
-///
-/// Always derived by summing the model calls that finished, never accumulated in
-/// a counter, so it cannot drift from the calls it came from.
+/// Cost of a Run so far.
+/// Re-summed from `Done` calls on every read, never accumulated.
 #[derive(
 	Debug,
 	Clone,
@@ -82,45 +101,49 @@ pub struct Spend {
 }
 
 impl Timestamp {
-	/// This instant plus a span.
+	/// Add a span to this instant.
+	/// Returns the instant `d` after self.
 	pub fn plus(self, d: Duration) -> Timestamp {
 		Timestamp(self.0 + d.0)
 	}
 
-	/// How long from this instant to a later one. Saturates at zero.
+	/// Duration from self to `later`.
+	/// Saturates at zero if `later` is earlier.
 	pub fn until(self, later: Timestamp) -> Duration {
 		Duration((later.0 - self.0).max(0))
 	}
 }
 
 impl Duration {
+	/// Create from seconds.
 	pub const fn from_secs(s: i64) -> Duration {
 		Duration(s * 1_000)
 	}
 
+	/// Create from milliseconds.
 	pub const fn from_millis(ms: i64) -> Duration {
 		Duration(ms)
 	}
 }
 
-/// Where wall-clock time comes from.
-///
-/// The one seam that lets a bench assert on scheduled work without waiting for
-/// it. Production is [`SystemClock`] and nothing else; a case that swaps it is
-/// testing the Harness rather than the model, and should say so.
+/// Source of wall-clock time.
+/// Implementations decide whether time flows, stands still, or moves by hand.
 pub trait Clock: Send + Sync {
 	fn now(&self) -> Timestamp;
 }
 
-/// The real clock. What every Sandman run outside a test uses.
+/// System clock via `chrono::Utc`.
+/// Used by every production run.
 #[derive(Debug, Default)]
 pub struct SystemClock;
 
-/// A clock stopped at one instant. Every read returns the same time.
+/// Clock frozen at one instant.
+/// Every `now()` returns the same `Timestamp`.
 #[derive(Debug)]
 pub struct FixedClock(pub Timestamp);
 
-/// A clock that only moves when a test moves it.
+/// Clock that only advances on `advance()`.
+/// Tests move time explicitly between scheduler checks.
 #[derive(Debug)]
 pub struct ManualClock {
 	now: std::sync::Mutex<Timestamp>,
@@ -145,31 +168,32 @@ impl Clock for ManualClock {
 }
 
 impl ManualClock {
+	/// Create a manual clock at `t`.
 	pub fn starting_at(t: Timestamp) -> Self {
 		ManualClock { now: std::sync::Mutex::new(t) }
 	}
 
-	/// Move time forward. Anything waiting on the clock sees the new instant on
-	/// its next read.
+	/// Advance time by `by`.
+	/// Next `now()` reflects the new instant.
 	pub fn advance(&self, by: Duration) {
 		let mut now = self.now.lock().unwrap();
 		*now = now.plus(by);
 	}
 }
 
-/// One instant, written for a model to read: weekday, date and time of day.
-///
-/// Time enters a Session as text riding on whatever arrived — a Brief, a piece
-/// of mail — rather than as a tool. A Session that runs for a while needs "just
-/// now" and "earlier" to mean something.
+/// Format `at` for model context.
+/// Returns local weekday, date and time of day.
 pub fn stamp(at: Timestamp) -> String {
 	use chrono::TimeZone;
+	// Resolve local time
 	let local = chrono::Local.timestamp_millis_opt(at.0).unwrap();
+	// Format for model
 	local.format("%A, %Y-%m-%d %H:%M").to_string()
 }
 
 impl fmt::Display for Cost {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		// Split cost
 		let dollars = self.0 / 1_000_000_000;
 		let micros = (self.0 % 1_000_000_000) / 1_000;
 		write!(f, "${}.{:06}", dollars, micros)

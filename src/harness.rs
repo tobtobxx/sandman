@@ -1,23 +1,30 @@
-//! The Harness is Sandman itself: the whole of the code we write, within which
-//! agents run.
+//! Plain-code orchestrator that owns Tasks, Sessions and Channels through the Store.
 //!
-//! It owns every Task, Result, Session, model call, Channel and lesson — through
-//! the Store — and agents never manage that state themselves. If an agent seems
-//! to need somewhere to keep something, the Harness should keep it instead.
+//! Construct: `Harness::new(store, events, scheduler, tools, clock, embedder, config) -> Arc<Self>`;
+//! `attach(channel)` mints Channel and standing Comms Session; `ctx(id)` builds
+//! `SessionCtx` threaded through every Session and tool.
+//! Use: `step(drive)` starts one ready unit (Comms mail first, then next pending Task) → `bool`;
+//! `run(drive)` loops `step` and waits on `Events` or due timers; `run_until_idle(drive)`
+//! same until `!busy()`; `drive_worker`/`drive_comms` are the spawned loops.
+//! Consumers: `session::turn` via `SessionCtx`, `worker::work_turn` and `comms::respond`
+//! as driven policies, `channels::*` adapters via `attach`/`receive`/`forward_said`,
+//! `control::serve`, `bench::Rig`, `web::server`, `bin/sandman` (only site that builds a Harness).
+//! Seam: `Drive` selects what `step` may start:
 //!
-//! **Orchestration is plain code.** Nothing in the swarm decides what runs next.
-//! The Harness picks Tasks and creates Sessions mechanically, and that choice
-//! lives in one place so it can later become something else.
+//! | `Drive` | Comms mail | Pending Tasks |
+//! | --- | --- | --- |
+//! | `Manual` | no | no |
+//! | `CommsOnly` | yes | no |
+//! | `Full` | yes | yes |
 //!
-//! Scheduling here is not round-robin. Each live Session runs its own Turn loop
-//! concurrently with the rest, and every model call those loops make waits on the
-//! one scheduler. So this loop only *starts* work that is not yet in motion — a
-//! Pending Task whose time has come, or a Comms Session with mail — and the
-//! Sessions keep turning between starts.
-//!
-//! What the Harness still owns directly: the Task lifecycle, delivering an answer
-//! to whoever subscribed, releasing Sessions blocked in `await_result`, and
-//! keeping one respond alive per Channel.
+//! Call trace: `run → step → drive_comms → comms::respond → session::turn`
+//! and `step → drive_worker → worker::work_turn → session::turn`;
+//! `complete_task → deliver → waiters::resolve`; `cancel_task → chain_of → cancel_tasks → waiters::resolve`.
+//! Rules: **only Store touches the database; every mutation emits one Event.**
+//! **a Turn decides nothing; ending policy lives in worker.rs/comms.rs, never session.rs.**
+//! **one model call in flight, ordered by Tier then arrival.**
+//! **one respond per Channel (`comms_driving`), one Worker per Task (`driving`).**
+//! **scheduler and Events are broadcast; slow consumers lose Events, never block.**
 //!
 //! Defines: [`Harness`], [`Drive`], [`CancelOutcome`].
 
@@ -35,34 +42,34 @@ use crate::store::{Store, StoreError};
 use crate::tools::ToolRunner;
 use crate::waiters::Waiters;
 
-/// How much of the swarm the Harness is allowed to start.
+/// How much work `step` may start.
 ///
-/// A first-class parameter rather than something a caller reimplements. A bench
-/// case that only wants to know what a Comms Session *decides* runs
-/// [`Drive::CommsOnly`]: Tasks it creates sit on the queue and are never
-/// executed, so the case costs exactly what the Comms Session costs.
+/// Controls whether pending Tasks and Comms mail are driven. Bench uses
+/// `CommsOnly` to measure a Comms decision without executing Tasks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Drive {
-	/// Nothing starts by itself. The caller drives every step.
+	/// Nothing starts by itself.
 	Manual,
-	/// Channels with mail are answered; Pending Tasks are left alone.
+	/// Channels with mail are answered; pending Tasks stay queued.
 	CommsOnly,
-	/// Everything: Tasks are picked up, Workers run, the swarm behaves.
+	/// Tasks run and Channels with mail are answered.
 	Full,
 }
 
-/// What cancelling did, for the tool to put into words.
+/// Result of cancelling a Task.
+///
+/// Tells the caller which Tasks stopped and whether any was running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CancelOutcome {
 	NotFound,
-	/// Already finished; there was nothing to stop.
+	/// Already finished; nothing to stop.
 	Completed,
 	/// Already cancelled.
 	Already,
 	Cancelled {
-		/// The Tasks that stopped, the named one first, its chain after.
+		/// Tasks that stopped, named one first.
 		ids: Vec<TaskId>,
-		/// At least one of them was running.
+		/// At least one was running.
 		running: bool,
 	},
 }
@@ -76,23 +83,17 @@ pub struct Harness {
 	pub clock: Arc<dyn Clock>,
 	pub embedder: Arc<dyn crate::memory::Embedder>,
 	pub waiters: Arc<Waiters>,
-	/// What this Sandman was built out of. Here because tools reach it —
-	/// `search_lessons` and `web_search` both need something a human chose —
-	/// and a Session reaches it through the Harness like everything else.
+	/// Config this Sandman was built from.
 	pub config: Arc<crate::config::Config>,
 
-	/// The Comms Session on each open Channel, and its transport.
+	/// Comms Session and transport for each open Channel.
 	comms: Mutex<Vec<(ChannelId, Arc<dyn crate::comms::Channel>)>>,
-	/// Worker Sessions whose Turn loop is currently running. Ids, not Sessions:
-	/// a Session's state is in the Store, and holding the objects here is what
-	/// would make the Harness and its Sessions reference each other in a cycle.
+	/// Worker Sessions with a Turn loop in flight. Ids only, to avoid cycles.
 	driving: Mutex<HashSet<SessionId>>,
-	/// Channels whose respond loop is currently running. Only one respond is
-	/// ever in flight per Channel.
+	/// Channels with a respond in flight. One at a time per Channel.
 	comms_driving: Mutex<HashSet<ChannelId>>,
 	running: std::sync::atomic::AtomicBool,
-	/// Woken by [`Harness::stop`], so [`Harness::run`]'s wait does not sit out
-	/// its sleep or wait for an unrelated Event once nothing is left to do.
+	/// Woken by `stop` to interrupt `run` sleep.
 	woken: tokio::sync::Notify,
 }
 
@@ -131,10 +132,9 @@ impl Harness {
 		self.store.create_task(new, now)
 	}
 
-	/// Record a Task's Result and deliver it.
+	/// Record a Task's Result, deliver to subscriber and re-arm if repeating.
 	///
-	/// Resolves waiters and re-arms if repeating. The next occurrence is
-	/// anchored to the schedule, not to completion time.
+	/// Resolves waiters and creates the next occurrence when scheduled.
 	async fn complete_task(
 		&self,
 		id: TaskId,
@@ -144,7 +144,7 @@ impl Harness {
 		let now = self.clock.now();
 		self.store.complete_task(id, result, now)?;
 
-		// Deliver answer and resolve waiters
+		// Deliver answer
 		let task = self
 			.store
 			.task(id)?
@@ -169,10 +169,9 @@ impl Harness {
 		Ok(())
 	}
 
-	/// Stop a Task and its chain if it repeats.
+	/// Cancel a Task and its repeating chain.
 	///
-	/// Cancels every pending or running occurrence. Running Sessions end
-	/// at their next check; blocked waiters are released here.
+	/// Stops pending and running occurrences and releases blocked waiters.
 	pub async fn cancel_task(
 		&self,
 		id: TaskId,
@@ -216,7 +215,7 @@ impl Harness {
 
 	/// Hand a Task's answer to its subscriber.
 	///
-	/// Only Comms Sessions subscribe — Workers wait directly.
+	/// Only Comms Sessions subscribe; Workers wait directly.
 	async fn deliver(&self, task: TaskId) -> Result<(), StoreError> {
 		let Some(task) = self.store.task(task)? else {
 			return Ok(());
@@ -230,8 +229,9 @@ impl Harness {
 
 	// --- Channels ----------------------------------------------------------
 
-	/// Open a Channel: a transport, a Comms Session standing on it, and a
-	/// transcript.
+	/// Open a Channel with its standing Comms Session.
+	///
+	/// Mints both ids and tracks the transport.
 	pub async fn attach(
 		&self,
 		channel: Arc<dyn crate::comms::Channel>,
@@ -246,7 +246,9 @@ impl Harness {
 		Ok(id)
 	}
 
-	/// Something arrived on a Channel, from its human or from the swarm.
+	/// Enqueue text on a Channel's Comms Session.
+	///
+	/// Records human utterances in the transcript and always enqueues mail.
 	pub async fn receive(
 		&self,
 		channel: ChannelId,
@@ -257,20 +259,21 @@ impl Harness {
 			return;
 		};
 		let now = self.clock.now();
+		// Record transcript
 		if from == IncomingFrom::Human {
 			let _ = self.store.say(
 				channel,
 				Utterance { who: Who::Human, text: text.to_string(), at: now },
 			);
 		}
+		// Enqueue mail
 		let _ = self.store.receive_mail(
 			session,
 			Incoming { from, text: text.to_string(), at: now },
 		);
 	}
 
-	/// The open Channels, for the `message_human` schema, so the model can only
-	/// name one that exists.
+	/// List open Channels for schema generation.
 	pub fn open_channels(&self) -> Vec<(ChannelId, ChannelKind)> {
 		self.comms
 			.lock()
@@ -280,17 +283,17 @@ impl Harness {
 			.collect()
 	}
 
-	/// What this Run has cost so far.
+	/// Spend for this Run.
 	pub fn spend(&self) -> Result<Spend, StoreError> {
 		self.store.spend(self.store.run())
 	}
 
 	// --- Driving -----------------------------------------------------------
 
-	/// Try to start one piece of work.
+	/// Try to start one ready unit.
 	///
-	/// Answers mail first, then starts the next pending Task. Returns
-	/// whether anything started.
+	/// Tries Comms mail first, then the next pending Task. Returns whether
+	/// anything started.
 	pub async fn step(
 		self: &Arc<Self>,
 		drive: Drive,
@@ -299,7 +302,7 @@ impl Harness {
 			return Ok(false);
 		}
 
-		// Try comms with mail first
+		// Try comms first
 		let channels: Vec<ChannelId> = self
 			.comms
 			.lock()
@@ -326,7 +329,7 @@ impl Harness {
 			return Ok(false);
 		}
 
-		// Try next pending Task
+		// Try next Task
 		let now = self.clock.now();
 		let Some(task) = self.store.next_pending(now)? else {
 			return Ok(false);
@@ -343,18 +346,21 @@ impl Harness {
 		Ok(true)
 	}
 
-	/// Run until stopped. What an interactive Sandman does.
+	/// Run until stopped.
+	///
+	/// Starts ready work and waits on Events or due timers. Returns when
+	/// `stop` is called.
 	pub async fn run(self: &Arc<Self>, drive: Drive) -> Result<(), StoreError> {
 		let mut events = self.events.subscribe();
 		while self.running.load(Ordering::SeqCst) {
-			// Start all that can start
+			// Start ready work
 			while self.step(drive).await? {
 				if !self.running.load(Ordering::SeqCst) {
 					return Ok(());
 				}
 			}
 
-			// Wait for next wakeup
+			// Wait for wakeup
 			let now = self.clock.now();
 			let wait = self.store.next_due_in(now)?;
 			let sleep = tokio::time::sleep(match wait {
@@ -375,7 +381,7 @@ impl Harness {
 		Ok(())
 	}
 
-	/// Forward human-visible utterances to their transport.
+	/// Forward `Said` utterances to their transport.
 	fn forward_said(
 		&self,
 		event: Result<Event, tokio::sync::broadcast::error::RecvError>,
@@ -395,20 +401,24 @@ impl Harness {
 		}
 	}
 
-	/// Run until nothing is left to do. What a one-shot run does.
+	/// Drive until idle.
 	///
-	/// Blocked and scheduled Tasks count as busy.
+	/// Starts ready work and waits for Events or timers. Returns when no
+	/// Session, waiter or Task remains. Blocked and scheduled Tasks count as busy.
 	pub async fn run_until_idle(
 		self: &Arc<Self>,
 		drive: Drive,
 	) -> Result<(), StoreError> {
 		let mut events = self.events.subscribe();
 		loop {
+			// Start ready work
 			while self.step(drive).await? {}
+			// Check if idle
 			if !self.busy() {
 				return Ok(());
 			}
 
+			// Wait for wakeup
 			let now = self.clock.now();
 			let wait = self.store.next_due_in(now)?;
 			let sleep = tokio::time::sleep(match wait {
@@ -425,6 +435,7 @@ impl Harness {
 
 	/// Drive a Worker until it completes or aborts.
 	async fn drive_worker(self: &Arc<Self>, session: SessionId, task: TaskId) {
+		// Loop turns
 		let ctx = self.ctx(session);
 		loop {
 			match crate::worker::work_turn(&ctx).await {
@@ -436,11 +447,13 @@ impl Harness {
 				crate::worker::Worked::Aborted => break,
 			}
 		}
+		// Remove from driving
 		self.driving.lock().unwrap().remove(&session);
 	}
 
 	/// Drain a Channel's mailbox one respond at a time.
 	async fn drive_comms(self: &Arc<Self>, channel: ChannelId) {
+		// Drain mailbox
 		if let Ok(Some(session)) = self.store.channel_session(channel) {
 			let ctx = self.ctx(session);
 			loop {
@@ -451,6 +464,7 @@ impl Harness {
 				}
 			}
 		}
+		// Remove from driving
 		self.comms_driving.lock().unwrap().remove(&channel);
 	}
 
@@ -471,14 +485,16 @@ impl Harness {
 		}
 	}
 
-	/// Stop starting new work. Loops already running finish their turn.
+	/// Stop starting new work.
+	///
+	/// Running loops finish their current turn.
 	pub fn stop(&self) {
 		self.running.store(false, Ordering::SeqCst);
-		// Wake one waiter - keeps permit if not yet registered
+		// Wake waiter
 		self.woken.notify_one();
 	}
 
-	/// Stop everything and wait for spend to settle.
+	/// Stop new work, cancel remaining Tasks and wait for calls to settle.
 	pub async fn wind_down(self: &Arc<Self>, timeout: crate::domain::Duration) {
 		self.stop();
 
@@ -494,7 +510,7 @@ impl Harness {
 			}
 		}
 
-		// Wait for in-flight calls
+		// Wait for calls
 		let deadline = self.clock.now().plus(timeout);
 		loop {
 			let outstanding = self.scheduler.waiting().await > 0
@@ -506,7 +522,7 @@ impl Harness {
 		}
 	}
 
-	/// The context a Session and its tools run against.
+	/// Build a `SessionCtx` for the given Session.
 	pub fn ctx(
 		self: &Arc<Self>,
 		session: SessionId,
@@ -522,6 +538,7 @@ impl Harness {
 		}
 	}
 
+	/// Current time via the Harness clock.
 	pub fn now(&self) -> Timestamp {
 		self.clock.now()
 	}

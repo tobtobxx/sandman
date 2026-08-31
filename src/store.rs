@@ -1,28 +1,30 @@
-//! Everything the Harness owns, behind one vocabulary.
+//! SQLite as single source of truth, behind one vocabulary.
 //!
-//! The Store is the only thing that touches the database, and the only thing
-//! that emits state [`Event`]s. Its interface is domain-shaped — `start_task`,
-//! `complete_task`, `append_message` — rather than field-shaped, so a caller
-//! says what happened and the Store decides what that means in rows and in the
-//! trace.
-//!
-//! Two properties hold structurally rather than by discipline:
-//!
-//! **A change without an Event cannot be written.** The connection is private
-//! and there is no method that mutates without emitting. In the prototype the
-//! Watcher was kept in step by comparing JSON against a shadow twice a second,
-//! because announcing at the site of a change fails silently the first time
-//! someone forgets. Here there is no site to forget at.
-//!
-//! **A lock is never held across an await.** Every method takes `&self`, does
-//! its work, and returns; nothing hands a guard to a caller. The Mutex is
-//! `std::sync::Mutex` deliberately — if a future ever needed to be awaited
-//! inside one of these methods, it would not compile, which is the warning we
-//! want.
-//!
-//! Reads return owned values. A model call already carries a detached copy of
-//! the messages it was built from, so this is what the system did anyway.
-//!
+//! What it is: the only writer to SQLite — vocabulary calls like `create_task`,
+//! `start_session`, `queue_call` decide rows and emit one [`Event`].
+//! Construct: `Store::open(backing, events, model, now) -> Store` takes
+//! `db::Lock` (file) or none (memory), migrates via `db::open`, mints `Run`
+//! via `counters::take` and calls `recover` before returning.
+//! Use: vocabulary mutations each emit one `Event`; reads return owned values:
+//! tasks `create/start/complete/cancel/next_pending/chain_of/list`, sessions
+//! `start/append/messages/reflect/mail`, calls `queue/set/spend`, channels
+//! `open_comms/say/transcript`, lessons/vectors, `snapshot`/`save_copy`.
+//! Consumers: `Harness` owns `Arc<Store>` and threads via `SessionCtx` into
+//! `session::turn`, `worker::work_turn`, `comms::respond`, `tools`, `scheduler`,
+//! `channels`, `web`, `bench`; nothing else imports `rusqlite`.
+//! Seam: Store is the seam — private `std::sync::Mutex<Connection>`; every
+//! mutation emits on [`Events`]; [`Snapshot`] seeds Watchers, `Event` stream
+//! keeps them current (`log.rs`, `web::wire`, `bench::Rig`).
+//! | Entity | Writers | Readers | Event |
+//! | --- | --- | --- | --- |
+//! | `Task` | `create/start/complete/cancel` | `task/list/next_pending/chain_of` | `TaskCreated/TaskStateChanged` |
+//! | `Session` | `start/set/end/append/record` | `session/messages/last_reflection` | `SessionStarted/StatusChanged/MessageAppended/ReflectionRecorded` |
+//! | `LlmCall` | `queue/set/recover` | `call/spend/outstanding` | `CallQueued/CallStatusChanged` |
+//! | `Channel` | `open_comms/open/say/receive` | `channels/transcript/has_mail` | `ChannelOpened/Said/MailReceived` |
+//! Call trace: `open → Lock::take → db::open → counters::take(Run) → emit RunStarted → recover → emit cancels`
+//! · `create_task → subscriber_of → counters::take → insert → emit TaskCreated`
+//! · `snapshot → run/tasks/sessions/calls/channels/lessons`.
+//! Rules: **only Store touches the database; private `std::sync::Mutex` so await inside does not compile.** **no mutation without an Event.** **no lock across an await (`&self` everywhere).** **transcript is rows keyed `(session, idx)`, not a blob.** **sum types are discriminant + JSON, queue scan is index lookup.** **ids from `counters` inside the transaction using them.** **Spend is re-summed, never accumulated.**
 //! Defines: [`Store`], [`StoreError`], [`Snapshot`], [`ListFilter`].
 
 use std::sync::Arc;
@@ -40,7 +42,7 @@ use crate::domain::{
 };
 use crate::event::{Event, Events};
 
-/// All of Sandman's state.
+/// All of Sandman's state. Only writer to SQLite and sole emitter of `Event`s.
 pub struct Store {
 	conn: std::sync::Mutex<rusqlite::Connection>,
 	events: Arc<Events>,
@@ -55,7 +57,7 @@ pub struct Store {
 	_lock: Option<crate::db::Lock>,
 }
 
-/// What can go wrong asking the Store for something.
+/// Store failure. `Db` for SQLite/JSON, `NoSuch` for missing row, `NotRunning` guards double-complete.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
 	#[error(transparent)]
@@ -68,9 +70,7 @@ pub enum StoreError {
 	NotRunning { task: TaskId, state: TaskStateName },
 }
 
-/// A `rusqlite::Result` or a `serde_json::Result` on its way to becoming a
-/// [`StoreError`]. Both cross through [`DbError`] first, since that is the
-/// variant [`StoreError`] actually converts from.
+/// Convert SQLite/JSON errors into [`StoreError::Db`]. Keeps call sites as `.store()?`.
 trait IntoStoreError<T> {
 	fn store(self) -> Result<T, StoreError>;
 }
@@ -87,7 +87,7 @@ impl<T> IntoStoreError<T> for Result<T, serde_json::Error> {
 	}
 }
 
-/// Run a query expected to return exactly one row.
+/// Run query that must return one row. Maps via `read`. Fails if missing.
 fn read_required<T>(
 	conn: &rusqlite::Connection,
 	sql: &str,
@@ -97,7 +97,7 @@ fn read_required<T>(
 	Ok(conn.query_row(sql, params, |row| Ok(read(row))).store()??)
 }
 
-/// Run a query that may return no row.
+/// Run query that may return no row. Maps via `read`. Returns `None` if missing.
 fn read_optional<T>(
 	conn: &rusqlite::Connection,
 	sql: &str,
@@ -111,11 +111,7 @@ fn read_optional<T>(
 	Ok(row.transpose()?)
 }
 
-/// Which Channel is waiting on the work this Creator is enqueuing.
-///
-/// The Channel of a Comms Session, and nothing for anyone else. `sessions.channel`
-/// is written from [`SessionKind::Comms`] alone, so a Worker cannot resolve to
-/// one; a Creator with no Session cannot even ask.
+/// Resolve Channel awaiting Creator's Task. Reads `sessions.channel`. Returns `None` for non-Comms creators.
 fn subscriber_of(
 	conn: &rusqlite::Connection,
 	created_by: Creator,
@@ -141,8 +137,7 @@ fn task_state_columns(row: &Row<'_>) -> Result<TaskState, DbError> {
 	crate::db::rows::task_state_from_row(&tag, &json)
 }
 
-/// Every entity, for a Watcher's first frame. After this a Watcher follows the
-/// Event stream and never asks again.
+/// Every entity for Watcher's first frame. Afterwards Watchers follow `Event` stream.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
 	pub run: Run,
@@ -153,7 +148,7 @@ pub struct Snapshot {
 	pub lessons: Vec<Lesson>,
 }
 
-/// What `list_tasks` narrows the queue to.
+/// Filter for `list_tasks`. Optional state and limit.
 #[derive(Debug, Clone, Default)]
 pub struct ListFilter {
 	pub state: Option<TaskStateName>,
@@ -161,10 +156,7 @@ pub struct ListFilter {
 }
 
 impl Store {
-	/// Open a Store and start a new Run.
-	///
-	/// Takes the file lock first, then migrates. Everything written
-	/// afterwards belongs to this Run.
+	/// Open Store and start a new Run. Takes file lock, migrates, mints Run, recovers leftovers. Emits `RunStarted`.
 	pub fn open(
 		backing: Backing,
 		events: Arc<Events>,
@@ -209,15 +201,12 @@ impl Store {
 		Ok(store)
 	}
 
-	/// End what an earlier Run left open.
-	///
-	/// Cancels running Tasks, open Sessions and queued calls. Leaves
-	/// pending Tasks; requires the file lock.
+	/// Cancel leftovers from previous Run. Cancels running Tasks, open Sessions, queued calls. Leaves pending Tasks.
 	fn recover(&self, now: Timestamp) -> Result<(), StoreError> {
 		let mut conn = self.conn.lock().unwrap();
 		let tx = conn.transaction().store()?;
 
-		// Collect ids helper
+		// Collect ids
 
 		let ids = |sql: &str| -> Result<Vec<u32>, StoreError> {
 			let mut stmt = tx.prepare(sql).store()?;
@@ -293,19 +282,17 @@ impl Store {
 		Ok(())
 	}
 
-	/// The Run this Store is writing.
+	/// Return the `Run` this Store is writing.
 	pub fn run(&self) -> RunId {
 		self.run
 	}
 
-	/// `(from, to)` if opening this Store migrated the database, for a Logger
-	/// to note once at startup.
+	/// Return `Some((from, to))` if `open` migrated, else `None`.
 	pub fn migration(&self) -> Option<(u32, u32)> {
 		self.migration
 	}
 
-	/// Mark the Run finished. A Run whose process was killed simply never gets
-	/// this.
+	/// Mark this Run finished at `now`. Reads back `Run` and emits `RunEnded`. Fails if missing.
 	pub fn end_run(&self, now: Timestamp) -> Result<(), StoreError> {
 		let conn = self.conn.lock().unwrap();
 		let updated = conn
@@ -333,9 +320,7 @@ impl Store {
 
 	// --- Tasks -------------------------------------------------------------
 
-	/// Put a Task on the queue.
-	///
-	/// Derives the subscriber from the Creator.
+	/// Enqueue a Task. Mints id, derives subscriber, computes `not_before`. Emits `TaskCreated`.
 	pub fn create_task(
 		&self,
 		new: NewTask,
@@ -402,7 +387,7 @@ impl Store {
 		Ok(id)
 	}
 
-	/// Hand a Pending Task to the Session that will do it.
+	/// Move Task to `Running` for Session. Emits `TaskStateChanged`. Fails if missing.
 	pub fn start_task(
 		&self,
 		id: TaskId,
@@ -430,15 +415,14 @@ impl Store {
 		Ok(())
 	}
 
-	/// Record a Task's Result. Fails if the Task is not Running — which is what
-	/// stops a cancelled Task completing and a repeating chain re-arming after
-	/// it was stopped.
+	/// Complete a `Running` Task with `TaskResult`. Emits `TaskStateChanged`. Fails if not `Running`.
 	pub fn complete_task(
 		&self,
 		id: TaskId,
 		result: TaskResult,
 		now: Timestamp,
 	) -> Result<(), StoreError> {
+		// Check state
 		let conn = self.conn.lock().unwrap();
 		let current = read_optional(
 			&conn,
@@ -457,6 +441,7 @@ impl Store {
 			});
 		}
 
+		// Update state
 		let new_state = TaskState::Completed { result, at: now };
 		let row = crate::db::rows::task_state_to_row(&new_state)?;
 		conn.execute(
@@ -465,21 +450,22 @@ impl Store {
 		)
 		.store()?;
 		drop(conn);
+		// Emit event
 		self.events
 			.emit(Event::TaskStateChanged { task: id, to: new_state });
 		Ok(())
 	}
 
-	/// Stop Tasks. Cancelling is terminal: a pending Task never runs, a running
-	/// one ends at its Session's next decision point with no Result, and a
-	/// repeating one stops as a chain.
+	/// Cancel Tasks. Skips missing/terminal, emits per cancel. Terminal — no `Result`, ends repeating chain.
 	pub fn cancel_tasks(
 		&self,
 		ids: &[TaskId],
 		now: Timestamp,
 	) -> Result<(), StoreError> {
+		// Take lock
 		let conn = self.conn.lock().unwrap();
 		let mut cancelled = Vec::new();
+		// Cancel each
 		for &id in ids {
 			let current = read_optional(
 				&conn,
@@ -501,6 +487,7 @@ impl Store {
 			cancelled.push((id, state));
 		}
 		drop(conn);
+		// Emit events
 		for (task, to) in cancelled {
 			self.events.emit(Event::TaskStateChanged { task, to });
 		}
@@ -517,8 +504,7 @@ impl Store {
 		)
 	}
 
-	/// Just the state, for the cancellation check at the top of a turn — the
-	/// hottest read in the system.
+	/// Read `TaskState` by id. Fast path for cancellation check. Returns `None` if missing.
 	pub fn task_state(
 		&self,
 		id: TaskId,
@@ -532,11 +518,7 @@ impl Store {
 		)
 	}
 
-	/// The first Pending Task whose time has come.
-	///
-	/// Time is the one condition on being picked. Waiting on other work is not
-	/// here: a Session holds for another Session, through `await_result`, after
-	/// a Task has already started.
+	/// Return first `Pending` Task whose `not_before` has passed. Picks by time only; blocking is via `await_result`.
 	pub fn next_pending(
 		&self,
 		now: Timestamp,
@@ -554,7 +536,7 @@ impl Store {
 		)
 	}
 
-	/// How long until the earliest scheduled Task can run, if one is waiting.
+	/// Return duration until earliest `Pending` Task is due. `None` if empty.
 	pub fn next_due_in(
 		&self,
 		now: Timestamp,
@@ -571,8 +553,7 @@ impl Store {
 		Ok(earliest.map(|t| now.until(Timestamp(t))))
 	}
 
-	/// Every occurrence of one repeating chain that has not finished — so
-	/// cancelling one occurrence can stop the chain.
+	/// Collect unfinished ids in same repeating chain. Single id if not repeating. Fails if anchor missing.
 	pub fn chain_of(&self, id: TaskId) -> Result<Vec<TaskId>, StoreError> {
 		// Load anchor
 		let conn = self.conn.lock().unwrap();
@@ -590,7 +571,7 @@ impl Store {
 			return Ok(vec![id]);
 		};
 
-		// Find chain
+		// Scan candidates
 		let mut stmt = conn
 			.prepare(
 				"SELECT id, schedule, schedule_json FROM tasks
@@ -627,8 +608,10 @@ impl Store {
 		&self,
 		filter: ListFilter,
 	) -> Result<Vec<TaskSummary>, StoreError> {
+		// Take lock
 		let conn = self.conn.lock().unwrap();
 
+		// Build query
 		let mut sql = String::from(
 			"SELECT id, title, role, state, state_json, schedule,
 			        schedule_json, created_at
@@ -647,6 +630,7 @@ impl Store {
 			params.push(Box::new(count as i64));
 		}
 
+		// Query tasks
 		let mut stmt = conn.prepare(&sql).store()?;
 		let mut rows = stmt
 			.query(rusqlite::params_from_iter(
@@ -654,6 +638,7 @@ impl Store {
 			))
 			.store()?;
 
+		// Collect summaries
 		let mut summaries = Vec::new();
 		while let Some(row) = rows.next().store()? {
 			let id: i64 = row.get(0).store()?;
@@ -687,7 +672,7 @@ impl Store {
 		Ok(summaries)
 	}
 
-	/// Every Task in this Run, newest last. What a one-shot run prints.
+	/// List Tasks for Run ordered by id. For one-shot output.
 	pub fn tasks_of_run(&self, run: RunId) -> Result<Vec<Task>, StoreError> {
 		let conn = self.conn.lock().unwrap();
 		let mut stmt = conn
@@ -701,8 +686,7 @@ impl Store {
 		Ok(tasks)
 	}
 
-	/// Every Task ever, for a search by meaning. Not scoped to a Run: what the
-	/// swarm already asked and answered is worth finding whenever it happened.
+	/// List every Task across Runs ordered by id. For semantic search.
 	pub fn all_tasks(&self) -> Result<Vec<Task>, StoreError> {
 		let conn = self.conn.lock().unwrap();
 		let mut stmt = conn
@@ -723,6 +707,7 @@ impl Store {
 		new: NewSession,
 		now: Timestamp,
 	) -> Result<SessionId, StoreError> {
+		// Take lock and mint id
 		let mut conn = self.conn.lock().unwrap();
 		let tx = conn.transaction().store()?;
 		let id = SessionId(crate::db::counters::take(&tx, SessionId::COUNTER)?);
@@ -737,6 +722,7 @@ impl Store {
 		};
 		let status_row = crate::db::rows::session_status_to_row(&new.status)?;
 
+		// Insert session
 		tx.execute(
 			"INSERT INTO sessions (
 				id, run, kind, task, role, channel, status, status_json,
@@ -756,6 +742,7 @@ impl Store {
 		)
 		.store()?;
 
+		// Insert messages
 		for (idx, message) in new.messages.iter().enumerate() {
 			let row = crate::db::rows::message_to_row(message)?;
 			tx.execute(
@@ -768,6 +755,7 @@ impl Store {
 
 		tx.commit().store()?;
 
+		// Emit event
 		let session = Session {
 			id,
 			run: self.run,
@@ -837,7 +825,7 @@ impl Store {
 		Ok(())
 	}
 
-	/// Append one message and return its index in the conversation.
+	/// Append `Message` to Session transcript. Returns new index. Emits `MessageAppended`.
 	pub fn append_message(
 		&self,
 		id: SessionId,
@@ -871,7 +859,7 @@ impl Store {
 		Ok(index)
 	}
 
-	/// The whole conversation, as a model call needs it.
+	/// Read all `Message`s for Session ordered by idx.
 	pub fn messages(&self, id: SessionId) -> Result<Vec<Message>, StoreError> {
 		let conn = self.conn.lock().unwrap();
 		let mut stmt = conn
@@ -885,7 +873,7 @@ impl Store {
 		Ok(out)
 	}
 
-	/// How many messages this Session has. What the interrupt counts.
+	/// Count `Message`s for Session. For interrupt threshold.
 	pub fn message_count(&self, id: SessionId) -> Result<usize, StoreError> {
 		let conn = self.conn.lock().unwrap();
 		let count: i64 = conn
@@ -936,8 +924,7 @@ impl Store {
 		Ok(())
 	}
 
-	/// The most recent metacognition, whichever kind — what the interrupt counts
-	/// from.
+	/// Read latest `Reflection` for Session, if any. For interrupt baseline.
 	pub fn last_reflection(
 		&self,
 		id: SessionId,
@@ -963,11 +950,7 @@ impl Store {
 		Ok(session)
 	}
 
-	/// The Session that did a Task, if one ever ran it.
-	///
-	/// A Task carries no Session id once it is done — [`TaskState::Completed`]
-	/// has none — so this is the only way back from a `search_tasks` hit to the
-	/// conversation behind it.
+	/// Find Session that ran Task, if any. Bridges `search_tasks` hit to conversation.
 	pub fn session_for_task(
 		&self,
 		task: TaskId,
@@ -984,7 +967,7 @@ impl Store {
 		Ok(session.map(|v| SessionId(v as u32)))
 	}
 
-	/// Put something in a Comms Session's mailbox.
+	/// Enqueue `Incoming` in Comms mailbox. Emits `MailReceived`.
 	pub fn receive_mail(
 		&self,
 		id: SessionId,
@@ -1018,8 +1001,7 @@ impl Store {
 		Ok(())
 	}
 
-	/// Take everything unread from a mailbox, marking it read in the same
-	/// transaction. Post that lands mid-turn waits for the next one.
+	/// Drain unread `Incoming` from mailbox and mark read atomically. Mid-turn post waits.
 	pub fn take_mail(
 		&self,
 		id: SessionId,
@@ -1063,13 +1045,13 @@ impl Store {
 
 	// --- Model calls -----------------------------------------------------------
 
-	/// Record a call as it joins the scheduler's queue, before it is sent, so
-	/// waiting is as visible as working.
+	/// Queue a new `LlmCall` as `Queued`. Emits `CallQueued`. Waiting visible as working.
 	pub fn queue_call(
 		&self,
 		new: NewCall,
 		now: Timestamp,
 	) -> Result<CallId, StoreError> {
+		// Mint id
 		let mut conn = self.conn.lock().unwrap();
 		let tx = conn.transaction().store()?;
 		let id = CallId(crate::db::counters::take(&tx, CallId::COUNTER)?);
@@ -1078,6 +1060,7 @@ impl Store {
 		let status_row = crate::db::rows::call_status_to_row(&status)?;
 		let request_json = serde_json::to_string(&new.request).store()?;
 
+		// Insert call
 		tx.execute(
 			"INSERT INTO calls (
 				id, run, session, tier, model, request_json, status,
@@ -1098,6 +1081,7 @@ impl Store {
 		.store()?;
 		tx.commit().store()?;
 
+		// Emit event
 		let call = LlmCall {
 			id,
 			run: self.run,
@@ -1155,8 +1139,7 @@ impl Store {
 		)
 	}
 
-	/// What this Run has cost. Summed from the calls that finished, never
-	/// accumulated, so it cannot drift from them.
+	/// Sum `Spend` for Run from `Done` calls. Re-summed, not accumulated.
 	pub fn spend(&self, run: RunId) -> Result<Spend, StoreError> {
 		let conn = self.conn.lock().unwrap();
 		let (calls, tokens, cost): (i64, Option<i64>, Option<i64>) = conn
@@ -1174,8 +1157,7 @@ impl Store {
 		})
 	}
 
-	/// Whether any call is still queued or in flight — what a wind-down waits
-	/// for, so the last call's cost reaches the record.
+	/// Check if any calls are `Queued` or `InFlight` for this Run. For wind-down.
 	pub fn calls_outstanding(&self) -> Result<bool, StoreError> {
 		let conn = self.conn.lock().unwrap();
 		let count: i64 = conn
@@ -1191,9 +1173,7 @@ impl Store {
 
 	// --- Channels ----------------------------------------------------------
 
-	/// Open a Channel and Comms Session atomically.
-	///
-	/// Mints both ids in one transaction to break the cycle.
+	/// Open Channel and Comms Session atomically. Mints both ids in one transaction. Emits `SessionStarted` and `ChannelOpened`.
 	pub fn open_comms(
 		&self,
 		kind: ChannelKind,
@@ -1343,8 +1323,10 @@ impl Store {
 	}
 
 	pub fn channels(&self) -> Result<Vec<ChannelRecord>, StoreError> {
+		// Take lock
 		let conn = self.conn.lock().unwrap();
 		let mut heads = Vec::new();
+		// Load heads
 		{
 			let mut stmt = conn
 				.prepare(
@@ -1359,6 +1341,7 @@ impl Store {
 				heads.push(crate::db::rows::read_channel(row)?);
 			}
 		}
+		// Load transcripts
 		for ch in &mut heads {
 			let mut stmt = conn
 				.prepare(
@@ -1373,8 +1356,7 @@ impl Store {
 		Ok(heads)
 	}
 
-	/// One Channel, with its whole transcript, for a Watcher patching a single
-	/// entity — see [`crate::web::wire`].
+	/// Read Channel with full transcript by id. For Watcher patch.
 	pub fn channel(
 		&self,
 		id: ChannelId,
@@ -1399,7 +1381,7 @@ impl Store {
 		Ok(Some(head))
 	}
 
-	/// The Comms Session standing on a Channel.
+	/// Read Comms Session for Channel, if any.
 	pub fn channel_session(
 		&self,
 		channel: ChannelId,
@@ -1423,12 +1405,14 @@ impl Store {
 		new: NewLesson,
 		now: Timestamp,
 	) -> Result<LessonId, StoreError> {
+		// Mint id
 		let mut conn = self.conn.lock().unwrap();
 		let tx = conn.transaction().store()?;
 		let id = LessonId(crate::db::counters::take(&tx, LessonId::COUNTER)?);
 		let day = Day::today(now);
 		let about_row = crate::db::rows::lesson_subject_to_row(&new.about)?;
 
+		// Insert lesson
 		tx.execute(
 			"INSERT INTO lessons (
 				id, run, text, day, session, about, about_json, at
@@ -1447,6 +1431,7 @@ impl Store {
 		.store()?;
 		tx.commit().store()?;
 
+		// Emit event
 		let lesson = Lesson {
 			id,
 			run: self.run,
@@ -1461,7 +1446,7 @@ impl Store {
 		Ok(id)
 	}
 
-	/// Every lesson ever written, across every Run.
+	/// List every `Lesson` across Runs. For memory search.
 	pub fn all_lessons(&self) -> Result<Vec<Lesson>, StoreError> {
 		let conn = self.conn.lock().unwrap();
 		let mut stmt =
@@ -1474,8 +1459,7 @@ impl Store {
 		Ok(out)
 	}
 
-	/// A cached embedding, and where to put one. Kept out of the entity tables:
-	/// a vector is several hundred floats no human reads.
+	/// Read cached embedding for `key`/`model`. Returns `None` if missing.
 	pub fn vector(
 		&self,
 		key: &str,
@@ -1512,7 +1496,7 @@ impl Store {
 
 	// --- Watching --------------------------------------------------------------
 
-	/// Everything, for a Watcher's first frame.
+	/// Load full `Snapshot` for Watcher first frame. Reads run/tasks/sessions/calls/channels/lessons.
 	pub fn snapshot(&self) -> Result<Snapshot, StoreError> {
 		let mut conn = self.conn.lock().unwrap();
 
@@ -1615,8 +1599,7 @@ impl Store {
 		Ok(Snapshot { run, tasks, sessions, calls, channels, lessons })
 	}
 
-	/// Copy the whole database to a file while it is in use. How a bench case
-	/// keeps its artifact.
+	/// Copy database file via `VACUUM INTO`. For bench artifacts.
 	pub fn save_copy(&self, to: &std::path::Path) -> Result<(), StoreError> {
 		let conn = self.conn.lock().unwrap();
 		crate::db::save_copy(&conn, to)?;

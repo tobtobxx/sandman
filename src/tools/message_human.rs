@@ -1,19 +1,27 @@
-//! Reaching a human.
+//! Push path: swarm-initiated speech to a human.
 //!
-//! There is one route to a human and this is it. A Worker cannot address a Comms
-//! Session with a Task — every Task becomes a Worker Session — so a Worker that
-//! decides a human must know something creates a `planning` Task, and the
-//! planning Worker that runs it calls this. The message lands in the Comms
-//! Session's mailbox on the Channel it names, and that Session decides how to
-//! put it: word for word, or reworded with the context the human needs.
+//! The only tool that reaches a human without a Task. A Worker cannot address
+//! a Comms Session with a Task — every Task becomes a Worker — so a planning
+//! Worker that decides a human must know something calls this; the text lands
+//! as `IncomingFrom::Swarm` mail on the Channel it names, where that Session
+//! decides verbatim vs reworded.
 //!
-//! The `channel` enum is built from the Channels that are open right now, which
-//! is the reason tool schemas are built per Session rather than declared once.
+//! Construct: `MessageHuman` implements [`crate::tools::Tool`], created in
+//! `Registry::all` with no state; `schema` takes `SchemaCtx { open_channels }`.
+//! Use: `call(ctx, {channel, text}) -> String` parses `ChannelId`, validates
+//! open, then `harness.receive(channel, text, Swarm).await` → `Sent to …`.
+//! Consumers: `session::turn` via `ToolRunner::run` (only `RoleName::Planning`
+//! holds it — see `roles::tools_for`); `Harness::drive_comms` → `comms::respond`
+//! drains the mail and `say`s it through `Channel::send`.
 //!
-//! Known weak spot: with more than one Channel open, the Worker is choosing
-//! *which human to tell*, and it has nothing solid to choose with — a Task
-//! carries no record of where it came from, because a Brief stands alone. It
-//! reads the Brief and guesses. See TASKS.md.
+//! Call trace: `turn → tools.run(message_human) → harness.receive → store.receive_mail`
+//! `→ drive_comms → respond → say → Channel.send`.
+//!
+//! Rules: **only Planning has this tool — other Roles cannot push.**
+//! **channel enum is per-Session, built from open Channels, never global.**
+//! **Comms decides wording; this tool only injects mail.**
+//! **Brief carries no origin, so multi-Channel choice is a guess — see TASKS.md.**
+//! **failure returns a sentence for the model, never an `Err`.**
 //!
 //! Defines: [`MessageHuman`].
 
@@ -27,7 +35,7 @@ use crate::session::SessionCtx;
 
 use super::{Tool, ToolError};
 
-/// Inject a message into the Comms Session on a named Channel.
+/// Push text into the Comms mailbox on a named Channel.
 pub struct MessageHuman;
 
 #[async_trait]
@@ -36,19 +44,21 @@ impl Tool for MessageHuman {
 		ToolName::MessageHuman
 	}
 
-	/// The `channel` argument is an enum of the open Channels, each labelled
-	/// with its kind, so the model names one that exists.
+	/// Build per-Session schema; `channel` is the enum of open Channels.
 	fn schema(&self, ctx: &SchemaCtx) -> ToolSchema {
+		// Collect open ids
 		let ids: Vec<String> = ctx
 			.open_channels
 			.iter()
 			.map(|(id, _)| id.to_string())
 			.collect();
+		// Build display listing
 		let listing: Vec<String> = ctx
 			.open_channels
 			.iter()
 			.map(|(id, kind)| format!("{id} ({kind})"))
 			.collect();
+		// Build schema
 		ToolSchema {
 			name: self.name().to_string(),
 			description:
@@ -76,7 +86,11 @@ impl Tool for MessageHuman {
 		}
 	}
 
+	/// Parse `channel` and `text`, validate the Channel is open, then enqueue as swarm mail.
+	///
+	/// Returns `Sent to …` or an error sentence. Never fails as `Err`.
 	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String {
+		// Parse channel
 		let channel = match args.get("channel").and_then(|v| v.as_str()) {
 			None => return ToolError::Missing { field: "channel" }.to_string(),
 			Some(s) => match ChannelId::from_str(s) {
@@ -89,17 +103,20 @@ impl Tool for MessageHuman {
 				},
 			},
 		};
+		// Parse text
 		let text = match args.get("text").and_then(|v| v.as_str()) {
 			None => return ToolError::Missing { field: "text" }.to_string(),
 			Some(t) => t,
 		};
 
+		// Validate open
 		let open = ctx.harness.open_channels();
 		if !open.iter().any(|(id, _)| *id == channel) {
 			return ToolError::Rejected(format!("{channel} is not open."))
 				.to_string();
 		}
 
+		// Enqueue mail
 		ctx.harness
 			.receive(channel, text, IncomingFrom::Swarm)
 			.await;

@@ -1,22 +1,28 @@
-//! The one ordered trace of everything that happens.
+//! The one ordered trace. Every state change and every tool call goes onto
+//! [`Events`] as an [`Event`]; observers read that single broadcast instead of
+//! polling the Store.
 //!
-//! Every change the Store makes emits an [`Event`], and every consumer that
-//! needs to know what happened reads that one stream:
+//! Construct with [`Events::new`] (capacity per consumer). Use with
+//! [`Events::emit`] (never blocks, never fails) and [`Events::subscribe`]
+//! (from now on; past state needs a `Store::snapshot`).
 //!
-//! - `log.rs` writes one line per Event into `sandman.log` — the sequence, which
-//!   a view of current state cannot show.
-//! - `web/` turns each Event into a patch for a Watcher's browser.
-//! - the bench Rig waits on it, and evaluates tripwires against it, so a case
-//!   wakes exactly when something changed instead of polling.
+//! Consumers and what they read it for:
 //!
-//! The Store's fields are private and mutation only happens through its methods,
-//! so a change without an Event is not something to remember: it cannot be
-//! written. That is the whole reason state and trace are one mechanism here
-//! rather than two.
+//! | Consumer | Reads | What for |
+//! | --- | --- | --- |
+//! | `log.rs` | every `Event` | one line per event in `sandman.log` — order the DB cannot show |
+//! | `web/wire.rs` | `Task`/`Session`/`Call`/`Channel`/`Lesson` + `MessageAppended` | whole-entity `Patch`/`Appended` frames to Watchers |
+//! | `bench/rig.rs` | every `Event` | wake tripwires without polling |
 //!
-//! Tool calls are not state changes, so `tools/` holds its own handle on the
-//! stream and emits [`Event::ToolCalled`] and [`Event::ToolReturned`] itself.
-//! State and trace stay separately testable.
+//! Two emitters, one bus. `Store` emits state (`Run`/`Task`/`Session`/`Call`/
+//! `Channel`/`Lesson`/`Message`/`Mail`); `tools::Registry` emits `ToolCalled`/
+//! `ToolReturned` on its own handle because tool calls are not state changes.
+//! A slow consumer loses events and never slows the swarm; the database remains
+//! the durable state.
+//!
+//! Rules: **one Event per state change — no mutation without an emit.**
+//! **broadcast is lossy, not blocking.** **state and tools stay separately
+//! testable.**
 //!
 //! Defines: [`Event`], [`Events`].
 
@@ -28,12 +34,10 @@ use crate::domain::{
 use crate::roles::ToolName;
 use tokio::sync::broadcast;
 
-/// One thing that happened, in order.
+/// One ordered change in the trace.
 ///
-/// Events carry whole entities where a consumer would otherwise have to look one
-/// up, and ids where it would not — a Watcher merges a whole Task without
-/// knowing its shape, but does not need the whole Session to learn its status
-/// changed.
+/// Carries whole entities where a consumer would otherwise re-read and
+/// ids where it would not.
 #[derive(Debug, Clone)]
 pub enum Event {
 	RunStarted(Run),
@@ -93,42 +97,43 @@ pub enum Event {
 	},
 }
 
-/// The bus every Event goes onto.
+/// Broadcast bus for every [`Event`].
 ///
-/// A broadcast channel, so consumers are independent: a Watcher that
-/// disconnects, or a bench that stops listening, slows nothing down. A consumer
-/// that falls far enough behind loses events rather than blocking the swarm,
-/// which is the right trade for a trace — the database still holds the state.
+/// Independent per-consumer queues; a lagging consumer drops rather than
+/// blocks.
 #[derive(Debug)]
 pub struct Events {
 	tx: broadcast::Sender<Event>,
 }
 
 impl Events {
-	/// A new bus with room for `capacity` events per consumer before the slowest
-	/// one starts losing them.
+	/// Create a bus with room for `capacity` events per consumer.
+	///
+	/// A consumer that falls `capacity` behind starts losing events.
 	pub fn new(capacity: usize) -> Self {
 		let (tx, _rx) = broadcast::channel(capacity);
 		Events { tx }
 	}
 
-	/// Put one Event on the bus. Never fails and never blocks: an Event with no
-	/// listeners is simply dropped.
+	/// Emit one event onto the bus.
+	///
+	/// Never blocks or fails; dropped if no listeners are subscribed.
 	pub fn emit(&self, event: Event) {
 		let _ = self.tx.send(event);
 	}
 
-	/// Listen from now on. Events emitted before this returns are not replayed —
-	/// a consumer that needs the state so far asks the Store for a snapshot
-	/// first.
+	/// Subscribe to events from now on.
+	///
+	/// Past events are not replayed. Snapshot the Store first if needed.
 	pub fn subscribe(&self) -> broadcast::Receiver<Event> {
 		self.tx.subscribe()
 	}
 }
 
 impl Event {
-	/// The category this Event is logged under: `task`, `session`, `llm`,
-	/// `tool`, `meta`, `comms`, `run`.
+	/// Log category for this event.
+	///
+	/// Maps to `run|task|session|meta|comms|llm|tool`.
 	pub fn category(&self) -> &'static str {
 		match self {
 			Event::RunStarted(_) | Event::RunEnded(_) => "run",

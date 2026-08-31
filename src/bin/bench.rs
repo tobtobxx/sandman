@@ -1,39 +1,47 @@
-//! The bench driver: the reporting way to run the cases.
+//! bench — reporting driver for `sandman::bench` cases.
+//!
+//! What it is: the `cargo test -- --ignored` counterpart that runs each
+//! `Case` through a real model, keeps `N` runs per case, and persists
+//! artifacts under `bench/runs/<stamp>/` with pass rate and mean.
+//!
+//! Construct: `Cli` (clap) → `Args` via `parse()` (names resolved against `CASES`).
+//! Use: `main()` → `run_once(case, dir)` → `RunReport` → `report::write_artifacts` / `report::print_run`.
+//! Consumers: `report::print_run` per completed run, `report::print_summary` after all.
 //!
 //! ```text
 //! cargo run --bin bench                     all cases, once, in parallel
-//! cargo run --bin bench -- --list           the cases there are, and nothing else
-//! cargo run --bin bench -- --case hello     only the named case(s)
+//! cargo run --bin bench -- --list           list cases, run none
+//! cargo run --bin bench -- --case hello     only named case(s)
 //! cargo run --bin bench -- --times 5        each case N times, for variance
 //! cargo run --bin bench -- --serial         one at a time
 //! ```
 //!
-//! The same cases run under `cargo test -- --ignored`, where a failure reads as
-//! an ordinary test failure. This binary exists for what a test runner does not
-//! give: several runs of one case, a pass rate and a mean, and the artifacts
-//! kept under `bench/runs/<stamp>/`.
+//! Call trace:
+//! ```text
+//! main → parse(argv) → CASES / find(name)
+//!      → run_once → (case.run)() → report::write_artifacts
+//!      → summarize → report::print_summary
+//! ```
 //!
-//! Parallel runs hit the model concurrently, and rate limiting under load shows
-//! up as inflated wall time rather than as failures. Keep that in mind when
-//! reading variance across `--times`.
+//! Seams: none of its own — `Rig` owns the four (`Model`, `ToolRunner`,
+//! `Clock`, `Embedder`); ordering (`--serial` vs `JoinSet`) and artifact
+//! root (`--out`) are the only choices here.
 //!
-//! Every case builds its own [`sandman::bench::Rig`] — its own database, its own
-//! log, its own id counters — so running them together in one process is honest.
-//!
-//! Cases live in `sandman::bench::cases`, and the same table backs the
-//! `#[cfg(test)]` wrapper next to each one.
+//! Rules: one `Rig` per run (private DB/log/counters) so parallel runs are honest.
+//! Rate limiting surfaces as wall time, not failure. `--list` exits before
+//! any spend. Announce before await so silence does not read as hang.
 
 use sandman::bench::report::{self, CaseSummary, RunReport};
 use sandman::bench::{Case, CASES};
 
-/// What the driver was asked to do.
+/// Resolved driver arguments.
+///
+/// Cases validated against `CASES`; unknown `--case` is an error before
+/// any Rig is built or spend incurred.
 struct Args {
-	/// Resolved against `CASES` while parsing, so an unknown `--case` is an
-	/// error before anything is built or spent.
 	cases: Vec<&'static Case>,
 	times: usize,
 	serial: bool,
-	/// Where the artifacts go. `bench/runs` by default.
 	out: std::path::PathBuf,
 }
 
@@ -60,16 +68,21 @@ struct Cli {
 	out: std::path::PathBuf,
 }
 
+/// Parse CLI argv into `Args`.
+///
+/// Exits on `--list`; validates `--case` names against `CASES`.
 fn parse(argv: &[String]) -> Result<Args, String> {
+	// Parse CLI
 	use clap::Parser;
-
 	let cli = Cli::try_parse_from(argv).unwrap_or_else(|e| e.exit());
 
+	// Handle list flag
 	if cli.list {
 		list();
 		std::process::exit(0);
 	}
 
+	// Resolve cases
 	let cases: Vec<&'static Case> = if cli.case.is_empty() {
 		CASES.iter().collect()
 	} else {
@@ -88,6 +101,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
 			.collect::<Result<Vec<_>, String>>()?
 	};
 
+	// Build args
 	Ok(Args {
 		cases,
 		times: cli.times.max(1),
@@ -96,14 +110,15 @@ fn parse(argv: &[String]) -> Result<Args, String> {
 	})
 }
 
-/// Every case, one per line: the name `--case` takes, then what it asks.
+/// List every case.
 ///
-/// Names are padded to the widest before they are painted, not after: an escape
-/// code counts toward a format width and would throw the columns off by exactly
-/// its length.
+/// Prints padded name and dim description, one per line.
 fn list() {
+	// Measure width
 	let on = sandman::bench::color::enabled();
 	let width = CASES.iter().map(|c| c.name.len()).max().unwrap_or(0);
+
+	// Print cases
 	for case in CASES {
 		let name = format!("{:width$}", case.name);
 		println!(
@@ -114,15 +129,18 @@ fn list() {
 	}
 }
 
-/// Run one case once, write its artifacts, and report.
+/// Run one case and persist its artifacts.
 ///
-/// A case that could not build its Rig still reports; only writing the artifacts
-/// fails here.
+/// Executes `case.run()` and writes `result.json`/`store.sqlite`/`sandman.log`.
+/// Returns `RunReport`; only artifact write failure becomes `Err`.
 async fn run_once(
 	case: &Case,
 	dir: &std::path::Path,
 ) -> Result<RunReport, String> {
+	// Run case
 	let (rig, report) = (case.run)().await;
+
+	// Write artifacts
 	if let Some(rig) = rig {
 		report::write_artifacts(&report, &rig, dir).map_err(|e| {
 			format!("could not write artifacts to {}: {e}", dir.display())
@@ -131,9 +149,9 @@ async fn run_once(
 	Ok(report)
 }
 
-/// Say a run is starting, before it is awaited — the only reason to see this
-/// at all is that a real model call can take several seconds, and silence
-/// until the result reads like a hang.
+/// Announce a run before awaiting it.
+///
+/// Prevents silence that reads as hang while a real model call is in flight.
 fn announce(on: bool, case: &str, k: usize, times: usize) {
 	let what = if times > 1 {
 		format!("{case} (run {k}/{times})")
@@ -143,9 +161,11 @@ fn announce(on: bool, case: &str, k: usize, times: usize) {
 	println!("{} {what}", sandman::bench::color::cyan(on, "→"));
 }
 
-/// Pass rate, mean wall time and total cost — swarm Spend plus grader cost —
-/// per case, in the order cases were first seen.
+/// Summarize runs per case.
+///
+/// Computes pass count, mean wall time, and combined cost in first-seen order.
 fn summarize(reports: &[(String, RunReport)]) -> Vec<CaseSummary> {
+	// Group by case
 	let mut order: Vec<String> = Vec::new();
 	let mut by_case: std::collections::HashMap<String, Vec<&RunReport>> =
 		std::collections::HashMap::new();
@@ -159,6 +179,7 @@ fn summarize(reports: &[(String, RunReport)]) -> Vec<CaseSummary> {
 			.push(report);
 	}
 
+	// Summarize each case
 	order
 		.into_iter()
 		.map(|name| {
@@ -183,6 +204,7 @@ fn summarize(reports: &[(String, RunReport)]) -> Vec<CaseSummary> {
 
 #[tokio::main]
 async fn main() {
+	// Parse arguments
 	let argv: Vec<String> = std::env::args().collect();
 	let args = match parse(&argv) {
 		Ok(args) => args,
@@ -192,6 +214,7 @@ async fn main() {
 		},
 	};
 
+	// Build run context
 	let on = sandman::bench::color::enabled();
 	let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
 	let total = args.cases.len() * args.times;
@@ -207,16 +230,20 @@ async fn main() {
 		)
 	);
 
+	// Prepare collection
 	let mut reports: Vec<(String, RunReport)> = Vec::new();
 	let mut done = 0usize;
 
+	// Run cases
 	if args.serial {
+		// Run serially
 		for &case in &args.cases {
 			for k in 1..=args.times {
 				announce(on, case.name, k, args.times);
 				let dir = report::run_dir(&args.out, &stamp, case.name, k);
 				done += 1;
 				match run_once(case, &dir).await {
+					// Run succeeded - print and collect
 					Ok(report) => {
 						print!(
 							"{} ",
@@ -228,11 +255,13 @@ async fn main() {
 						report::print_run(&report);
 						reports.push((case.name.to_string(), report));
 					},
+					// Artifact write failed - report error
 					Err(e) => eprintln!("{}: {e}", case.name),
 				}
 			}
 		}
 	} else {
+		// Run in parallel
 		let mut set = tokio::task::JoinSet::new();
 		for &case in &args.cases {
 			for k in 1..=args.times {
@@ -243,9 +272,11 @@ async fn main() {
 				);
 			}
 		}
+		// Drain completions
 		while let Some(outcome) = set.join_next().await {
 			done += 1;
 			match outcome {
+				// Run succeeded - print and collect
 				Ok((name, Ok(report))) => {
 					print!(
 						"{} ",
@@ -257,11 +288,14 @@ async fn main() {
 					report::print_run(&report);
 					reports.push((name.to_string(), report));
 				},
+				// Artifact write failed - report error
 				Ok((name, Err(e))) => eprintln!("{name}: {e}"),
+				// Task panicked - report panic
 				Err(e) => eprintln!("a case task panicked: {e}"),
 			}
 		}
 	}
 
+	// Print summary
 	report::print_summary(&summarize(&reports));
 }

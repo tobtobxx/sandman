@@ -1,9 +1,26 @@
-//! Looking at the world. The `research` Role's two tools.
+//! Reaching the outside web. The `research` Role's two tools.
 //!
-//! Both are stateless and hold nothing: what they find goes into the Session's
-//! context and nowhere else. Neither needs a seam of its own — they are [`Tool`]
-//! implementations, so a bench that wants to answer them without touching the
-//! network intercepts them at the [`super::ToolRunner`] like any other.
+//! Construct: [`WebSearch`] and [`WebFetch`] are stateless [`Tool`]s built in
+//! `Registry::all` with no state; [`html_to_text`] is a pure `&str -> String`
+//! with no crate dependency.
+//! Use: `Tool::call(ctx, args) -> String` — `WebSearch` queries SearXNG at
+//! `config.tools.searxng_endpoint` and renders hits; `WebFetch` GETs one
+//! `http(s)` URL and strips it via `html_to_text`.
+//! Consumers: `roles.rs` assigns both to `Research` only; `Registry`
+//! dispatches via [`ToolRunner`], bench wraps it to script answers without
+//! touching the network.
+//!
+//! | Tool | Input | Effect |
+//! | --- | --- | --- |
+//! | [`WebSearch`] | `query` | GET `searxng_endpoint?q=&format=json` → titles/URLs/snippets + `unresponsive_engines` note |
+//! | [`WebFetch`] | `url` (http(s) only) | GET URL → [`html_to_text`] (tags/scripts/styles removed, entities decoded) |
+//!
+//! Rules: **stateless — answers enter the Session transcript and nowhere else.**
+//! **no HTTP seam — intercepted at [`ToolRunner`] like any other tool.**
+//! **answers in words, always — network/HTTP/parse failures are sentences.**
+//! **http(s) only — other schemes rejected.** **scripts never run —
+//! [`html_to_text`] strips rather than executes.** **rate limit told apart
+//! from empty — `unresponsive_engines` surfaces in render.**
 //!
 //! Defines: [`WebSearch`], [`WebFetch`], [`html_to_text`].
 
@@ -15,10 +32,10 @@ use crate::session::SessionCtx;
 
 use super::{Tool, ToolError};
 
-/// Search the web. Returns titles, URLs and snippets.
+/// Search the web via SearXNG. Returns titles, URLs and snippets.
 pub struct WebSearch;
 
-/// Fetch one page over http(s) and return its readable text.
+/// Fetch one http(s) page as readable text. Strips markup, scripts and styles.
 pub struct WebFetch;
 
 #[async_trait]
@@ -47,15 +64,17 @@ impl Tool for WebSearch {
 		}
 	}
 
-	/// Reads `unresponsive_engines` off the response, so a rate limit can be
-	/// told apart from an empty web — the two look identical in the results and
-	/// mean opposite things to whoever reads them.
+	/// Search via SearXNG and render results.
+	///
+	/// Reads `query`; returns titles/URLs/snippets or a sentence on failure.
 	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String {
+		// Validate query
 		let query = match args.get("query").and_then(|v| v.as_str()) {
 			None => return ToolError::Missing { field: "query" }.to_string(),
 			Some(q) => q,
 		};
 
+		// Send search request
 		let response = match reqwest::Client::new()
 			.get(&ctx.harness.config.tools.searxng_endpoint)
 			.query(&[("q", query), ("format", "json")])
@@ -70,6 +89,7 @@ impl Tool for WebSearch {
 			},
 		};
 
+		// Read response body
 		let status = response.status();
 		let text = match response.text().await {
 			Ok(t) => t,
@@ -79,12 +99,14 @@ impl Tool for WebSearch {
 				);
 			},
 		};
+		// Check HTTP status
 		if !status.is_success() {
 			return format!(
 				"Error: the search engine answered HTTP {status}: {text}"
 			);
 		}
 
+		// Parse and render
 		let parsed: SearxResponse = match serde_json::from_str(&text) {
 			Ok(p) => p,
 			Err(e) => {
@@ -122,12 +144,16 @@ impl Tool for WebFetch {
 		}
 	}
 
-	/// http(s) only, and scripts are never run: the page is stripped to words.
+	/// Fetch one URL and strip it to readable text.
+	///
+	/// Reads `url`; http(s) only; returns words or a sentence on failure.
 	async fn call(&self, _ctx: &SessionCtx, args: serde_json::Value) -> String {
+		// Validate URL
 		let url = match args.get("url").and_then(|v| v.as_str()) {
 			None => return ToolError::Missing { field: "url" }.to_string(),
 			Some(u) => u,
 		};
+		// Check scheme
 		if !(url.starts_with("http://") || url.starts_with("https://")) {
 			return ToolError::Rejected(format!(
 				"`{url}` is not an http(s) URL."
@@ -135,24 +161,28 @@ impl Tool for WebFetch {
 			.to_string();
 		}
 
+		// Send request
 		let response = match reqwest::Client::new().get(url).send().await {
 			Ok(r) => r,
 			Err(e) => return format!("Error: could not reach {url}: {e}"),
 		};
+		// Read response body
 		let status = response.status();
 		let text = match response.text().await {
 			Ok(t) => t,
 			Err(e) => return format!("Error: could not read {url}: {e}"),
 		};
+		// Check HTTP status
 		if !status.is_success() {
 			return format!("Error: {url} answered HTTP {status}.");
 		}
 
+		// Strip to text
 		html_to_text(&text)
 	}
 }
 
-// --- The wire shape ----------------------------------------------------------
+// Wire shape
 
 #[derive(serde::Deserialize)]
 struct SearxResponse {
@@ -170,10 +200,11 @@ struct SearxResult {
 	content: String,
 }
 
-/// Titles, URLs and snippets, then a note about any engine that did not
-/// answer — a rate limit and an empty web look identical in the results
-/// alone.
+/// Render SearXNG response to the model's next read.
+///
+/// Joins titles/URLs/snippets; appends note for `unresponsive_engines`.
 fn render_results(response: &SearxResponse) -> String {
+	// Render hits
 	let mut out = if response.results.is_empty() {
 		"No results.".to_string()
 	} else {
@@ -185,6 +216,7 @@ fn render_results(response: &SearxResponse) -> String {
 			.join("\n\n")
 	};
 
+	// Append rate-limit note
 	if !response.unresponsive_engines.is_empty() {
 		let engines: Vec<String> = response
 			.unresponsive_engines
@@ -199,17 +231,18 @@ fn render_results(response: &SearxResponse) -> String {
 	out
 }
 
-/// HTML to the words a model should read: markup, scripts and styles removed,
-/// whitespace collapsed.
+/// Strip HTML to readable text.
 ///
-/// Hand-rolled rather than pulled in from a crate: this only has to be good
-/// enough for a model to read, not a browser-grade parser.
+/// Removes tags/scripts/styles, collapses whitespace, decodes entities.
 pub fn html_to_text(html: &str) -> String {
+	// Prepare lowercase copy
 	let lower = html.to_ascii_lowercase();
 	let mut out = String::with_capacity(html.len());
 	let mut i = 0;
 
+	// Walk HTML
 	while i < html.len() {
+		// Copy text outside tags
 		if html.as_bytes()[i] != b'<' {
 			let ch = html[i..].chars().next().expect("i is a char boundary");
 			out.push(ch);
@@ -217,6 +250,7 @@ pub fn html_to_text(html: &str) -> String {
 			continue;
 		}
 
+		// Skip script and style blocks
 		let skip_tag = ["<script", "<style"]
 			.iter()
 			.find(|tag| lower[i..].starts_with(**tag));
@@ -239,6 +273,7 @@ pub fn html_to_text(html: &str) -> String {
 			continue;
 		}
 
+		// Skip tag
 		match html[i..].find('>') {
 			Some(gt) => i += gt + 1,
 			None => i = html.len(),
@@ -246,11 +281,12 @@ pub fn html_to_text(html: &str) -> String {
 		out.push(' ');
 	}
 
+	// Decode and collapse
 	let out = decode_entities(&out);
 	out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The handful of HTML entities that actually show up in body text.
+/// Decode the handful of HTML entities that appear in body text.
 fn decode_entities(s: &str) -> String {
 	s.replace("&nbsp;", " ")
 		.replace("&amp;", "&")

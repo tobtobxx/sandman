@@ -1,23 +1,29 @@
-//! Verification a model has to do.
+//! Model judgement about model judgement, for what counts cannot decide.
 //!
-//! **Rare, and warranted.** A grader is a model judgement about a model
-//! judgement: it costs a call, it varies between runs, and it can be wrong in
-//! both directions. Reach for one only when nothing countable answers the
-//! question. That exactly one `create_task` call was made is a count; that it
-//! carries *the Brief that was wanted* — that it kept the greeting, kept the
-//! delay, and added nothing — is a judgement.
+//! A grader exists because some questions have no countable answer — whether a
+//! Brief kept the greeting, kept the delay, added nothing. That is a judgement,
+//! not a count; it costs a call that varies between runs and can be wrong both
+//! ways. Reach for one only when nothing countable answers the question.
 //!
-//! A grader runs against `[bench].grader`, which should be stronger than the
-//! one the swarm uses: a judge no better than what it judges is not a judge. It
-//! is bench machinery and not part of the swarm: the call goes straight to the
-//! model, not through the scheduler and not through [`crate::model::Models`],
-//! and what it costs is reported separately and never counts as Spend.
+//! Construct: `Grader { name, input, judge }` — built by the case from the run's
+//! state and its `RecordedToolCall`s; `judge` defaults to [`default_judge`].
+//! Use: `run(grader, spec)` → [`GraderOutcome`]; `spec` is `config.for_grader()`.
+//! A `Fail` verdict is a normal outcome, only transport returns `Err`.
+//! Consume: `report::assemble` drives graders after tripwires and goal checks
+//! have passed; cases supply them via `cases::finish`'s `graders` vec.
 //!
-//! Graders run only after every goal check has passed. There is nothing to judge
-//! about a run that already failed on something countable.
+//! **Seam — swarm call vs grader call:**
 //!
-//! **A reply with no verdict in it is a FAIL.** An unparseable judgement must
-//! never quietly pass.
+//! | | Swarm | Grader |
+//! |---|---|---|
+//! | path | `Models` → `Scheduler` → `Model::send` | `OpenRouter::from_spec` → `Model::send` direct |
+//! | cost | `Spend` | `Cost` kept apart, never in `Spend` |
+//! | model | `config.for_all` / `for_role` / `for_comms` | `[bench].grader` — strictly stronger than the swarm's |
+//!
+//! Rules: **graders run only after every check passes** — nothing to judge on a
+//! run that already failed countably. **No verdict is a Fail** — an unparseable
+//! reply must never quietly pass. **Bench machinery, not swarm** — a grader call
+//! never touches the scheduler or [`crate::model::Models`].
 //!
 //! Defines: [`Grader`], [`GraderOutcome`], [`Verdict`], [`run`], [`default_judge`].
 
@@ -60,19 +66,19 @@ pub struct GraderOutcome {
 	pub cost: Cost,
 }
 
-/// Run one grader.
+/// Send one grader request and judge its reply.
 ///
-/// Fails only on transport trouble; a `fail` verdict is a normal outcome, not an
-/// error.
+/// Builds the request from `GRADER_SYSTEM` and the grader's input, waits on the
+/// model, and parses the verdict. Returns an outcome on any reply; fails only
+/// on transport.
 pub async fn run(
 	grader: &Grader,
 	spec: &ModelSpec,
 ) -> Result<GraderOutcome, crate::model::ModelError> {
-	// How much the grader may think is the configuration's to say, and one
-	// grader model refuses to have reasoning disabled outright (HTTP 400:
-	// "Reasoning is mandatory for this endpoint") where the swarm's own is
-	// happy without it. That is why `effort` is per model and not per swarm.
+	// Build grader model
 	let model = OpenRouter::from_spec(spec);
+
+	// Build request
 	let request = CallRequest {
 		messages: vec![
 			Message::System { content: GRADER_SYSTEM.to_string() },
@@ -80,17 +86,25 @@ pub async fn run(
 		],
 		tools: Vec::new(),
 	};
+
+	// Send request
 	let completion = model.send(&request).await?;
 
+	// Extract reply text
 	let text = match &completion.reply {
+		// Only text — use directly
 		Reply::Text(text) => text.clone(),
+		// Tool calls — use preamble
 		Reply::Calls { preamble, .. } => preamble.clone().unwrap_or_default(),
 	};
+
+	// Judge verdict
 	let (verdict, detail) = match &grader.judge {
 		Some(judge) => judge(&text),
 		None => default_judge(&text),
 	};
 
+	// Build outcome
 	Ok(GraderOutcome {
 		name: grader.name.clone(),
 		verdict,
@@ -100,9 +114,10 @@ pub async fn run(
 	})
 }
 
-/// Look for `<verdict>pass</verdict>` or `<verdict>fail</verdict>`.
+/// Parse a verdict tag from a grader reply.
 ///
-/// No tag is a FAIL.
+/// Looks for `<verdict>pass</verdict>` or `<verdict>fail</verdict>`.
+/// No tag is a `Fail`.
 pub fn default_judge(reply: &str) -> (Verdict, String) {
 	let lower = reply.to_lowercase();
 	if lower.contains("<verdict>pass</verdict>") {

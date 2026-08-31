@@ -1,35 +1,57 @@
-//! Sandman: an agent swarm.
+//! Sandman: one queue, one database, one Event stream, two Session shapes.
 //!
-//! Agents talk to a human, and complete or investigate work. They coordinate
-//! through a shared queue rather than through a command hierarchy.
+//! The bet: **nothing waits on a queue.** One Task kind, one Worker kind. A
+//! Worker needing another's answer holds inside `await_result`; the answer
+//! returns as that call's result, same Turn. A Comms Session never re-runs —
+//! it subscribes and gets mail. Workers start fresh and see only the Brief, so
+//! every piece of context must be written down by whoever created the Task.
 //!
-//! The vocabulary is in `CONTEXT.md` and the shape of the thing is in
-//! `ARCHITECTURE.md`. Read the first before the code: the words there are exact,
-//! and this crate uses them.
+//! Vocabulary in `CONTEXT.md` is exact; `ARCHITECTURE.md` is the shape.
 //!
-//! The bet: **nothing waits on a queue.** There is one kind of work — a Task —
-//! and one kind of Worker. A Worker that needs an answer does not park and get
-//! rebuilt; it holds inside a tool call and carries on where it stopped. Because
-//! a Worker starts fresh and sees only its Brief, every piece of context has to
-//! be written down by whoever created the Task.
+//! Construct: `Config::load(path)` once at start (`default-config.toml` is the
+//! doc); `Store::open(Backing, Events, model, now)` mints `Run` and recovers
+//! leftovers; `Harness::new(store, events, scheduler, tools, clock, embedder,
+//! config)` → `Arc<Harness>`; `harness.attach(channel)` opens `Channel` +
+//! standing Comms Session; `harness.ctx(SessionId)` builds `SessionCtx` passed
+//! down every layer into `session::turn` and every tool.
+//! Use: `Harness::run(drive)` / `run_until_idle` → `step` → `drive_comms` |
+//! `drive_worker` → `session::turn(ctx, tier) → Turn` → `worker`/`comms`
+//! decide; `store.create_task(NewTask, now)` enqueues; `reflect` interrupts
+//! inside the turn, fail-open.
+//! Consumers — **a Turn decides nothing**, policy lives above it:
 //!
-//! Where to start reading:
+//! | `Turn` | `worker::work_turn` | `comms::respond` |
+//! | --- | --- | --- |
+//! | `Text` | Review writes Result | said to human |
+//! | `Silent` | Review; nothing to say loops | legitimate end |
+//! | `Unreachable` | Task failed without Review | idle |
+//! | `Cancelled` | ends, no Result | unreachable: no Task |
 //!
-//! - [`domain`] — every definition, and no logic. The states this system cannot
-//!   be in are the ones you cannot write down.
-//! - [`store`] — all the state, behind one domain-shaped vocabulary. Emits
-//!   [`event::Event`], which is the only trace there is.
-//! - [`harness`] — the Task lifecycle, and the loops that start work.
-//! - [`session`] — the Turn, which both shapes of Session run and which decides
-//!   nothing.
-//! - [`worker`] and [`comms`] — one policy each, on top of that Turn.
-//! - [`reflect`] — metacognition, which is harness machinery and not an agent.
-//! - [`bench`] — a Sandman under test, with four seams to make unreal.
+//! Call trace:
+//! ```text
+//! Harness::run → step
+//!   ├ drive_comms(channel) → comms::respond → session::turn(ctx, Comms)
+//!   │     └ session::tell (mail → next turn)
+//!   └ drive_worker(session) → worker::work_turn → session::turn(ctx, Tier)
+//!         └ reflect::interrupt (top of loop) / reflect::reflect (Worker end)
+//! ```
 //!
-//! Four traits are the seams worth knowing: [`model::Model`],
-//! [`tools::ToolRunner`], [`domain::Clock`] and [`memory::Embedder`]. Each has a
-//! real adapter and a bench adapter, which is what makes them seams rather than
-//! hypothetical ones.
+//! Seams — each real + bench adapter, `Model` sits under `Scheduler` so bench
+//! still exercises queue, Tier ordering and one-call-at-a-time:
+//!
+//! | Trait | Real | Bench | Note |
+//! | --- | --- | --- |
+//! | `Model` | OpenRouter | scripted replies | one `Models` adapter per spec |
+//! | `ToolRunner` | registry | recorder + closure | `web_search`/`fetch` need no HTTP seam |
+//! | `Clock` | system | fixed/manual | |
+//! | `Embedder` | service | stub | lazy index, first search batches |
+//!
+//! Rules: **nothing but `store.rs` touches the database — no method mutates
+//! without emitting an `Event`.** **worker and comms never reference each
+//! other.** **one model call in flight; `Tier` orders waiting, never aborts
+//! in-flight.** **one Task concept; one Comms Session per Channel; Brief is
+//! the parent/child boundary.** **Spend re-summed on read, never
+//! accumulated.**
 
 pub mod bench;
 pub mod channels;

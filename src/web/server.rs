@@ -1,17 +1,28 @@
-//! Serves the Watcher UI and holds its sockets open.
+//! Transport for the Watcher UI: static files and one WebSocket per browser.
 //!
-//! Static files, one WebSocket per browser, and the Event stream turned into
-//! frames. A Watcher that disconnects or falls behind costs the swarm nothing:
-//! the stream is broadcast, and a browser that reconnects gets a fresh `init`.
+//! Construct: `AppState { harness: Arc<Harness>, channel: Option<ChannelId> }` where
+//! `None` means `[channels].web` is off — UI still watches, chat has nowhere to send;
+//! `serve(state, addr, port)` binds axum, serves `web/` and upgrades `/ws`.
+//! Use: browser loads `/` or `/chat` (same `index.html`) then `ws_handler → watch`
+//! sends one `Frame::Init` then one `Frame` per [`crate::event::Event`]; inbound
+//! `ClientMessage::Say | Find` are the only writes (`on_message → Harness::receive`,
+//! `on_search → memory::rank`).
+//! Consumers: browser JS is the only external consumer; internally `Harness` supplies
+//! `Events` + `Store::snapshot`, `wire::{init_frame,patch_for}` supplies `Frame`s.
+//! Seam: `wire` owns `Event` → `Frame`; `server` owns sockets, broadcast handling,
+//! and the two writes — never ranking or patch translation.
 //!
-//! Two writes reach here, and both are deliberate exceptions to "a Watcher only
-//! reads":
+//! | `ClientMessage` | handler | effect |
+//! | --- | --- | --- |
+//! | `Say` | `on_message` | `Harness::receive` on own `Channel` — dropped if `None` |
+//! | `Find` | `on_search` | `memory::rank` with same `Embedder` as `memory` tool |
 //!
-//! - a message on the browser's own Channel, which is that human talking;
-//! - a Lessons search, which is a read that costs an embedding call. It is
-//!   ranked here rather than in the browser so that a score a human sees is the
-//!   score a `memory` Worker would see — a ranking from a different embedding
-//!   would not mean the same thing.
+//! Call trace: `serve → ws_handler → watch → init → send(Init)` then
+//! `select! { events.recv → patch_for → send; rx.next → Say | Find → send(Ranked) }`
+//! — subscribed before snapshot so gap is duplicated, never lost.
+//! Rules: **one `Init` then `Patch`/`Appended`; `Init` is fresh on every connect or `Lagged`.**
+//! **broadcast is lossy — Watcher that falls behind loses `Event`s, never slows the swarm.**
+//! **read-only except `Say` on own `Channel` and `Find` via `memory::rank`.**
 //!
 //! Defines: [`serve`], [`AppState`].
 
@@ -29,21 +40,23 @@ use crate::harness::Harness;
 
 use super::wire::Frame;
 
-/// What every request handler reaches.
+/// State threaded into every handler.
+///
+/// Carries the `Harness` for `Store` + `Events` and the browser's own `Channel`.
+/// `None` when `[channels].web` is off — UI still watches, chat is disabled.
 #[derive(Clone)]
 pub struct AppState {
 	pub harness: Arc<Harness>,
-	/// The browser's own Channel, if it has one. `None` when
-	/// `[channels].web` is off: the UI is still served and still watches
-	/// everything, and only its chat window has nowhere to send.
 	pub channel: Option<crate::domain::ChannelId>,
 }
 
 /// How many hits a Lessons search returns.
 const FIND_LIMIT: usize = 10;
 
-/// One request from a browser. `say` is the human talking; `find` is the
-/// Lessons search box. There is nowhere else a browser writes.
+/// One write from a browser.
+///
+/// `Say` is the human talking on own `Channel`; `Find` is the Lessons search box.
+/// No other browser write exists.
 #[derive(serde::Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 enum ClientMessage {
@@ -51,12 +64,10 @@ enum ClientMessage {
 	Find { query: String },
 }
 
-/// Start the Watcher UI where `[sandman]` says.
+/// Bind the Watcher UI.
 ///
-/// Serves `web/` as static files, and upgrades `/ws` to a socket that gets one
-/// `init` and then a patch per Event. `/chat` is the same page as `/` — one
-/// `index.html`, which picks its layout from the path — so a chat window can
-/// be its own link without a second page to keep in step.
+/// Serves `web/` as static files and upgrades `/ws` to Watcher sockets.
+/// `/chat` serves the same `index.html` as `/` so a chat window has its own link.
 pub async fn serve(
 	state: AppState,
 	address: std::net::IpAddr,
@@ -73,6 +84,9 @@ pub async fn serve(
 	axum::serve(listener, app).await
 }
 
+/// Upgrade a request to a Watcher socket.
+///
+/// Hands the socket to `watch` after the handshake.
 async fn ws_handler(
 	ws: WebSocketUpgrade,
 	State(state): State<AppState>,
@@ -80,52 +94,62 @@ async fn ws_handler(
 	ws.on_upgrade(move |socket| watch(state, socket))
 }
 
-/// One browser: send the snapshot, then follow the stream.
+/// Drive one browser connection.
 ///
-/// Subscribed before the snapshot is taken, so an Event landing in the gap is
-/// merely sent twice — once inside `init`, once as a Patch — rather than lost.
-/// A consumer that falls behind loses Events per [`crate::event::Events`]; the
-/// fix here is the same one a reconnect gets, a fresh `init`.
+/// Sends `Init` then follows `Events` with `Patch`/`Appended` and answers `Say`/`Find`.
+/// Returns when the socket closes or `Events` is closed; `Lagged` re-sends `Init`.
 async fn watch(state: AppState, socket: WebSocket) {
+	// Subscribe before snapshot
 	let mut events = state.harness.events.subscribe();
 	let (mut tx, mut rx) = socket.split();
 
+	// Send snapshot
 	let Some(first) = init(&state) else { return };
 	if send(&mut tx, &first).await.is_err() {
 		return;
 	}
 
+	// Follow events and input
 	loop {
 		tokio::select! {
 			event = events.recv() => {
+				// Map event to frame
 				let frame = match event {
+					// Event — patch for watcher
 					Ok(event) => super::wire::patch_for(&state.harness.store, &event),
+					// Lagged — resend fresh init
 					Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
 						init(&state)
 					},
+					// Closed — end watch
 					Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
 				};
+				// Send frame
 				if let Some(frame) = frame {
 					if send(&mut tx, &frame).await.is_err() {
 						return;
 					}
 				}
 			},
-			// Axum answers a Ping with a Pong on its own, but still hands both
-			// to the caller, along with any Binary or Close frame a client
-			// sends — none of which is a browser talking, so only Text is
-			// read, and only a closed or broken socket ends the watch.
 			incoming = rx.next() => {
+				// Read inbound text
 				let text = match incoming {
+					// Text — browser talking
 					Some(Ok(Message::Text(text))) => text,
+					// Non-text — ignore
 					Some(Ok(_)) => continue,
+					// Closed or broken — end watch
 					Some(Err(_)) | None => return,
 				};
+				// Parse client message
 				let Ok(msg) = serde_json::from_str::<ClientMessage>(&text) else {
 					continue;
 				};
+				// Dispatch write
 				match msg {
+					// Say — enqueue on channel
 					ClientMessage::Say { text } => on_message(&state, &text).await,
+					// Find — rank and reply
 					ClientMessage::Find { query } => {
 						let frame = on_search(&state, &query).await;
 						if send(&mut tx, &frame).await.is_err() {
@@ -138,15 +162,20 @@ async fn watch(state: AppState, socket: WebSocket) {
 	}
 }
 
-/// The snapshot, as an `init` Frame. `None` only if the Store itself cannot
-/// be read, which is not a state a Watcher can do anything about.
+/// Build the opening `Init` frame.
+///
+/// Reads `Store::snapshot` and `Harness::spend`. Returns `None` if the `Store`
+/// cannot be read.
 fn init(state: &AppState) -> Option<Frame> {
 	let snapshot = state.harness.store.snapshot().ok()?;
 	let spend = state.harness.spend().unwrap_or_default();
 	Some(super::wire::init_frame(&snapshot, spend))
 }
 
-/// Put one Frame on the wire as a text message.
+/// Send one `Frame` as a text message.
+///
+/// Serializes the `Frame` and writes it to the socket. Returns `Err` if the
+/// send fails.
 async fn send(
 	tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
 	frame: &Frame,
@@ -155,11 +184,9 @@ async fn send(
 	tx.send(Message::Text(text)).await
 }
 
-/// A message the human typed in the browser.
+/// Enqueue a human message from the browser.
 ///
-/// Dropped when there is no Channel to put it on. The browser already shows
-/// that window as turned off, so this is the case of a socket that was open
-/// before anyone read the configuration, not something a human is waiting on.
+/// Drops the text when no `Channel` is configured. Records via `Harness::receive`.
 async fn on_message(state: &AppState, text: &str) {
 	let Some(channel) = state.channel else {
 		return;
@@ -170,11 +197,15 @@ async fn on_message(state: &AppState, text: &str) {
 		.await;
 }
 
-/// Rank the Lessons for the search box, with the same call the `memory` Role's
-/// tools make.
+/// Rank `Lesson`s for a search query.
+///
+/// Uses the same `memory::rank` call as the `memory` tool so scores match.
+/// Returns a `Ranked` frame with at most `FIND_LIMIT` hits.
 async fn on_search(state: &AppState, query: &str) -> Frame {
+	// Load lessons
 	let hits = match state.harness.store.all_lessons() {
 		Ok(lessons) => {
+			// Rank by meaning
 			let corpus = crate::memory::lesson_corpus(lessons);
 			crate::memory::rank(
 				&state.harness.store,
@@ -189,6 +220,7 @@ async fn on_search(state: &AppState, query: &str) -> Frame {
 		Err(_) => Vec::new(),
 	};
 
+	// Build ranked frame
 	Frame::Ranked {
 		query: query.to_string(),
 		hits: hits

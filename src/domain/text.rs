@@ -1,25 +1,41 @@
-//! Text that has been checked once, so nothing downstream checks it again.
+//! Checked-once text — `Title`, `Brief`, and `Day` validate once at the edge.
 //!
-//! A Title and a Brief both have a rule the whole system depends on — a Title is
-//! one line a human can scan, a Brief must stand alone because it is everything
-//! a Worker gets — and in the prototype those rules were re-tested at every tool
-//! that built one. Here they are `TryFrom<String>`, so the check happens at the
-//! edge where a model's argument becomes a domain value, and every reader after
-//! that point is spared it.
+//! A `Title` that wraps no longer scans and a `Brief` that assumes context
+//! leaves a Worker stranded; the prototype re-checked both at every tool.
+//! Here the check is `TryFrom<String>` at the edge and `#[serde(try_from =
+//! "String")]` on DB read — no second way in, no downstream re-validation.
+//! A newtype serialises as the bare string it wraps.
 //!
-//! Reading one back off a database row goes through the same check:
-//! `#[serde(try_from = "String")]`, so there is no second way in. Writing one out
-//! is the bare string — a newtype serialises as what it wraps.
+//! Construct: `TryFrom<String>` + `TextError` at the model/control/bin edge;
+//! `Display`/`Serialize` as bare `String`; `Deserialize` via `try_from`;
+//! `Day::today` from `Timestamp` via `chrono::Local`.
+//! Use: carried as typed fields in `Task { title, brief }` and `Lesson
+//! { day, title in subject }`; read as `&str` via `as_str`/`Display` after.
+//! Consumers: every `create_task` path validates, `store`/`db::rows` re-checks
+//! on read, `task`/`lesson`/`memory`/`recall` carry without re-checking.
+//!
+//! | Type | Rule | Transform | Stored as | Carries |
+//! | --- | --- | --- | --- | --- |
+//! | `Title` | non-empty | `split_whitespace` collapsed to single spaces | bare `String` | queue scan label |
+//! | `Brief` | non-empty after `trim` | none — interior whitespace preserved | bare `String` | Worker's sole context |
+//! | `Day` | `YYYY-MM-DD` via `NaiveDate` | none | bare `String` | lesson search hit date |
+//!
+//! Seam: domain is the data seam — `Model`/`ToolRunner`/`Embedder` exchange
+//! these types untouched; `TextError` wording is model-facing tool output,
+//! `DbError::Corrupt` is the store's corruption signal on re-check failure.
+//!
+//! Rules: **checked once — no downstream re-validation.** **one way in —
+//! `TryFrom` or `try_from` serde, no direct `Title(String)`.** **`Title`
+//! collapses, `Brief` does not.** **`Day` is local, not UTC.** **`TextError`
+//! is for the model; `Corrupt` is for the log.**
 //!
 //! Defines: [`Title`], [`Brief`], [`Day`], [`TextError`].
 
 use std::fmt;
 
-/// A Task's one-line description. It exists so a human can scan the queue; no
-/// Session depends on it, and the Brief still has to stand alone.
+/// One-line queue label a human scans.
 ///
-/// Non-empty, and newlines are collapsed on the way in — a Title that wraps is
-/// a Title that no longer scans.
+/// Non-empty; contiguous whitespace collapsed to single spaces on `TryFrom`.
 #[derive(
 	Debug,
 	Clone,
@@ -34,10 +50,10 @@ use std::fmt;
 #[serde(try_from = "String")]
 pub struct Title(String);
 
-/// The instructions a Task carries.
+/// Sole instructions a Worker receives.
 ///
-/// A Session starts fresh and sees nothing of the work that led to it, so this
-/// must stand alone: it is the only thing the Worker gets. Non-empty.
+/// Must stand alone — the only context the Session gets.
+/// Non-empty after `trim`; interior whitespace preserved.
 #[derive(
 	Debug,
 	Clone,
@@ -52,10 +68,9 @@ pub struct Title(String);
 #[serde(try_from = "String")]
 pub struct Brief(String);
 
-/// A local calendar day, `YYYY-MM-DD`.
+/// Local calendar day `YYYY-MM-DD` as a human reads it on a lesson hit.
 ///
-/// Local rather than UTC, because this is a date a human reads off a search hit
-/// for a lesson.
+/// Validated by `NaiveDate`; local, not UTC.
 #[derive(
 	Debug,
 	Clone,
@@ -70,10 +85,9 @@ pub struct Brief(String);
 #[serde(try_from = "String")]
 pub struct Day(String);
 
-/// Why a piece of text could not become the domain value it was offered as.
+/// Why text could not become its domain type.
 ///
-/// This is worded for a model to read: it comes back as a tool result when a
-/// Worker calls `create_task` with an empty Brief.
+/// Wording is model-facing — returned as tool output on `create_task`.
 #[derive(Debug, thiserror::Error)]
 pub enum TextError {
 	#[error("a {what} cannot be empty")]
@@ -83,27 +97,28 @@ pub enum TextError {
 }
 
 impl Title {
-	/// The Title as written. Borrowed, because most readers only print it.
+	/// Borrowed view of the title string.
 	pub fn as_str(&self) -> &str {
 		&self.0
 	}
 }
 
 impl Brief {
-	/// The Brief as written.
+	/// Borrowed view of the brief string.
 	pub fn as_str(&self) -> &str {
 		&self.0
 	}
 }
 
 impl Day {
-	/// Today, in the local zone.
+	/// Today in the local timezone from epoch millis.
 	pub fn today(now: super::time::Timestamp) -> Self {
 		use chrono::TimeZone;
 		let local = chrono::Local.timestamp_millis_opt(now.0).unwrap();
 		Day(local.format("%Y-%m-%d").to_string())
 	}
 
+	/// Borrowed view of the day string `YYYY-MM-DD`.
 	pub fn as_str(&self) -> &str {
 		&self.0
 	}

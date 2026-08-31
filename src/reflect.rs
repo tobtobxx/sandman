@@ -1,39 +1,31 @@
-//! Metacognition. Two of them, sharing everything but the question they ask.
+//! Metacognition — two bare model calls that judge a Session.
 //!
-//! A **review** runs when a Worker Session ends its turn without calling a tool
-//! — prose or silence. It reads the whole conversation and decides what that turn
-//! meant for the Task. Its `<summary>` is the Task's answer.
+//! Review judges a finished turn; interrupt judges a running one. Neither is an
+//! agent, has a Role, or holds tools — both share `metacognise`, which builds a
+//! sandwiched `CallRequest` (`META_SYSTEM` + transcript with `System→User` +
+//! question) and sends it via `Scheduler::request` at `Tier::Metacognition` /
+//! `Purpose::Metacognition`.
 //!
-//! An **interrupt** runs mid-turn, on a message count, and decides nothing about
-//! the Task. It exists for the failure a review structurally cannot see: a Worker
-//! that never stops calling tools never produces a plain-text turn, so it is
-//! never reviewed and can grind on one dead end until something else stops it. It
-//! reaches Comms Sessions too, which are never reviewed at all — it is the only
-//! metacognition they ever see.
+//! Construct: nothing to build — `SessionCtx` in (`Harness::ctx(id)` builds it).
+//! Use: `reflect(ctx) → Outcome` after a Worker `Text`/`Silent`; `interrupt(ctx) → Nudge`
+//! mid-turn from `session::turn` when `msgs - last_reflection >= interrupt_interval`;
+//! `section(content, name)` extracts `<name>…</name>` with next-section truncation.
+//! Consumers and how they handle the same output differently:
 //!
-//! Neither is an agent. Both are bare model calls the Harness makes: no Role, no
-//! identity, no tools of any kind. Each writes tagged sections and the Harness
-//! reads them. Modelling either as a swarm member would make its outcome
-//! asynchronous and hold a Task's answer hostage on a pending review.
+//! | Kind | When | Caller | Returns | May complete `Task`? |
+//! | --- | --- | --- | --- | --- |
+//! | `Review` | after Worker `Text`/`Silent` | `worker::review` | `Outcome::{Complete,Feedback,Nothing}` | yes — `Complete` writes `TaskResult` |
+//! | `Interrupt` | mid-turn, counted from last metacognition | `session::check_in` inside `turn` | `Nudge::{Feedback,Nothing}` | never — `Nudge` has no `Complete` |
 //!
-//! The sections either may write, and nothing else:
+//! Rules: **both are bare calls, not agents — no Role, no tools, synchronous.**
+//! **both fail open — `FailedOpen` or `Store` error is `Nothing` and never wedges a run.**
+//! **interrupt cannot complete a Task — enforced by `Nudge` having no `Complete`.**
+//! **only `Feedback` re-enters context via `tell`; `Reflection` and `Lesson` never do.**
+//! **lessons outlive the Session, anchored by `LessonSubject`, found later by meaning.**
+//! **review is Worker-only; interrupt is the only metacognition Comms ever sees and the guard for a Worker that never stops calling tools.**
+//! **sections are `<summary>`, `<feedback>`, `<lessons>`; next-section truncation handles missing `</>`.**
 //!
-//! - `<summary>` — the Task's answer. A review only.
-//! - `<feedback>` — correction, injected into the Session's context as a message
-//!   of its own; it takes another turn on it.
-//! - `<lessons>` — what is worth keeping for whoever does this kind of work next.
-//!   It outlives the Session it judged, and nothing reads it automatically.
-//!
-//! **Both fail open, always.** A call that cannot be made is recorded as having
-//! found nothing and the Session carries on. This matters most for the interrupt,
-//! which runs mid-turn on a Session that is otherwise fine: broken metacognition
-//! must never be what wedges a run.
-//!
-//! That an interrupt cannot complete a Task is a fact about its signature, not a
-//! check: [`interrupt`] returns [`Nudge`], which has no completing variant.
-//!
-//! Defines: [`reflect`], [`interrupt`], [`due_for_interrupt`], [`INTERRUPT_EVERY`],
-//! [`section`].
+//! Defines: [`reflect`], [`interrupt`], [`section`], [`SECTIONS`].
 
 use crate::domain::{
 	CallRequest, LessonSubject, Message, NewLesson, Nudge, Outcome, Reflection,
@@ -42,14 +34,13 @@ use crate::domain::{
 use crate::scheduler::{SchedulerError, Tier};
 use crate::session::SessionCtx;
 
-/// Every section metacognition may write. A section ends where the next begins.
+/// Sections metacognition may write. Next section truncates an unclosed one.
 pub const SECTIONS: [&str; 3] = ["summary", "feedback", "lessons"];
 
-/// Review one Worker Session.
+/// Review a Worker's finished turn.
 ///
-/// Reads the whole conversation and decides what the turn meant. If there's
-/// feedback, summary is discarded. Nothing means the caller falls back
-/// to the Worker's own text.
+/// Reads the full transcript and parses tagged sections. Returns `Complete`,
+/// `Feedback`, or `Nothing`; `Feedback` takes precedence over `summary`.
 pub async fn reflect(ctx: &SessionCtx) -> Outcome {
 	metacognise(
 		ctx,
@@ -60,10 +51,10 @@ pub async fn reflect(ctx: &SessionCtx) -> Outcome {
 	.await
 }
 
-/// Interrupt a Session mid-turn.
+/// Check a running Session mid-turn.
 ///
-/// Asks whether the run still goes somewhere. Drops any summary — only
-/// feedback matters. Nothing is the expected outcome.
+/// Reads the full transcript and parses tagged sections. Returns `Feedback` or
+/// `Nothing`; any `<summary>` is discarded and `Nothing` is the expected outcome.
 pub async fn interrupt(ctx: &SessionCtx) -> Nudge {
 	match metacognise(
 		ctx,
@@ -78,10 +69,10 @@ pub async fn interrupt(ctx: &SessionCtx) -> Nudge {
 	}
 }
 
-/// One metacognitive call, whichever it is.
+/// Run one metacognitive call.
 ///
-/// Builds a sandwiched request, sends via Metacognition tier, and records
-/// the reflection. Fails open — a broken call still lets the Session continue.
+/// Builds a sandwiched request, sends at `Metacognition` tier, and records the
+/// `Reflection`. Fails open on model or store error.
 async fn metacognise(
 	ctx: &SessionCtx,
 	kind: ReflectionKind,
@@ -121,7 +112,7 @@ async fn metacognise(
 		)
 		.await
 	{
-		// Call succeeded - parse sections and record
+		// Call succeeded - parse and record
 		Ok((call, completion)) => {
 			let content = match completion.reply {
 				Reply::Text(text) => text,
@@ -185,18 +176,17 @@ async fn metacognise(
 			);
 			Outcome::Nothing
 		},
-		// Store failed - nothing to record, fail open
+		// Store failed - fail open
 		Err(SchedulerError::Store(_)) => Outcome::Nothing,
 	}
 }
 
-/// Keep what a metacognition thought was worth keeping.
+/// Persist `<lessons>` if present and non-empty.
 ///
-/// An empty `<lessons>` section is normal, and for an interrupt it is the
-/// expected answer; either way it writes nothing. A lesson never re-enters the
-/// conversation it came from — the Session still cannot see what was written
-/// about it.
+/// Anchors the lesson by `SessionKind` for later meaning search. Never
+/// re-enters the judged Session's context.
 async fn keep_lessons(ctx: &SessionCtx, session: SessionId, content: &str) {
+	// Extract lessons
 	let Some(lessons) = section(content, "lessons") else {
 		return;
 	};
@@ -204,9 +194,13 @@ async fn keep_lessons(ctx: &SessionCtx, session: SessionId, content: &str) {
 	if text.is_empty() {
 		return;
 	}
+
+	// Load session
 	let Ok(Some(loaded)) = ctx.store.session(session) else {
 		return;
 	};
+
+	// Resolve subject
 	let about = match loaded.kind {
 		SessionKind::Worker { task, role } => {
 			let Ok(Some(t)) = ctx.store.task(task) else {
@@ -218,30 +212,34 @@ async fn keep_lessons(ctx: &SessionCtx, session: SessionId, content: &str) {
 			LessonSubject::Conversation { channel }
 		},
 	};
+
+	// Persist lesson
 	let _ = ctx.store.keep_lesson(
 		NewLesson { text: text.to_string(), session, about },
 		ctx.clock.now(),
 	);
 }
 
-/// Read one `<name>…</name>` section out of what the metacognition wrote.
+/// Extract one tagged section from model output.
 ///
-/// Small models drop the closing tag. Everything up to the next section is still
-/// meant as this one's text, so a section stops there rather than at the end of
-/// the reply — otherwise an unclosed `<lessons>` swallows the summary written
-/// after it.
+/// Handles self-closing `<name/>` and missing `</name>` via next-section
+/// truncation. Returns trimmed text or `None` if absent.
 pub fn section(content: &str, name: &str) -> Option<String> {
+	// Find opening tag
 	let tag_start = format!("<{name}");
 	let idx = content.find(&tag_start)?;
 	let rest = content[idx + tag_start.len()..].trim_start();
 
+	// Handle self-closing
 	if let Some(after_self) = rest.strip_prefix("/>") {
 		let _ = after_self;
 		return Some(String::new());
 	}
 
+	// Require open tag close
 	let after_open = rest.strip_prefix('>')?;
 
+	// Find closing bound
 	let close_tag = format!("</{name}>");
 	let mut end = after_open.find(&close_tag).unwrap_or(after_open.len());
 

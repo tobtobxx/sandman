@@ -1,23 +1,18 @@
-//! The SQLite schema, and the migrations that reach it.
+//! SQLite schema and migrations — the only place that names tables or columns.
 //!
-//! Two rules shape the tables.
+//! No type to construct: [`SCHEMA_VERSION`] and [`MIGRATIONS`] are constants, [`apply`] mutates a `Connection` in place.
+//! Use via `db::open`, which calls [`apply`] after pragmas; [`version_of`] reads `meta.schema_version` without writing.
+//! Only `db::open` calls it — `Store` never writes SQL, `rows.rs` never sees DDL, and nothing else imports this module.
 //!
-//! **A transcript is a query, not a blob.** Messages, mail, utterances and
-//! reflections each get a row per item, keyed `(owner, idx)`. Appending is one
-//! insert; reading a whole conversation is one ordered scan. Rewriting a
-//! Session's entire history on every message — which is what a JSON column would
-//! mean — would make the cost of a long-running Comms Session quadratic.
+//! ```text
+//! db::open → schema::apply(conn) → version_of(conn) → execute_batch per migration → update meta.schema_version
+//!                                → refuse if found > SCHEMA_VERSION
+//! ```
 //!
-//! **Sum types are stored as a discriminant plus JSON.** `tasks.state` holds
-//! `'pending' | 'running' | 'completed' | 'cancelled'` as its own column so the
-//! queue scan stays an index lookup, and `tasks.state_json` holds the payload
-//! that variant carries. The same pattern covers `CallStatus`, `Schedule`,
-//! `ReflectionResult` and `LessonSubject`. Nothing that a query filters on hides
-//! inside JSON.
-//!
-//! Migrations are ordered statements applied under `meta.schema_version`.
-//! Opening a database written by a newer binary is a clean error rather than a
-//! partial read.
+//! Rules:
+//! - **Transcript is a query, not a blob.** `(owner, idx)` rows; append is one insert, read is one ordered scan.
+//! - **Sum types are discriminant plus JSON.** Filter column stays indexable, payload stays opaque.
+//! - **Migrations are forward-only and idempotent.** Apply from empty or twice ends at `SCHEMA_VERSION`; newer database is refused.
 //!
 //! Defines: [`MIGRATIONS`], [`SCHEMA_VERSION`], [`apply`], [`version_of`].
 
@@ -26,10 +21,8 @@ use rusqlite::{Connection, OptionalExtension};
 /// The schema version this binary writes and expects.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// Every migration, oldest first. Index + 1 is the version it produces.
-///
-/// As this is a prototype for now, you are allowed to always rewrite
-/// the first migration. Do ask the user first however.
+/// Every migration, oldest first. Index `i` produces version `i + 1`.
+/// `v1` may be rewritten while prototype — ask first.
 pub const MIGRATIONS: &[&str] = &[
 	// v1 — the initial schema.
 	r#"
@@ -167,30 +160,28 @@ pub const MIGRATIONS: &[&str] = &[
     "#,
 ];
 
-/// Bring a connection up to [`SCHEMA_VERSION`], or say why it cannot be.
-///
-/// Applying from empty and applying twice both end in the same place. A database
-/// at a version this binary does not know is refused, not read.
-///
-/// Returns `(from, to)` if a migration actually ran, or `None` if the database
-/// was already current — the one thing worth a log line, and the only place
-/// that knows it: [`version_of`] afterwards would just report [`SCHEMA_VERSION`]
-/// either way.
+/// Bring `conn` to [`SCHEMA_VERSION`].
+/// Returns `Some((from, to))` if migrations ran, `None` if already current. Errors if the database is newer.
 pub fn apply(conn: &Connection) -> Result<Option<(u32, u32)>, super::DbError> {
+	// Check current version
 	let found = version_of(conn)?;
+	// Refuse newer database
 	if found > SCHEMA_VERSION {
 		return Err(super::DbError::SchemaVersion {
 			found,
 			expected: SCHEMA_VERSION,
 		});
 	}
+	// Skip if current
 	if found == SCHEMA_VERSION {
 		return Ok(None);
 	}
 
+	// Apply migrations
 	for migration in &MIGRATIONS[found as usize..] {
 		conn.execute_batch(migration)?;
 	}
+	// Record new version
 	conn.execute(
 		"INSERT INTO meta (key, value) VALUES ('schema_version', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -199,8 +190,10 @@ pub fn apply(conn: &Connection) -> Result<Option<(u32, u32)>, super::DbError> {
 	Ok(Some((found, SCHEMA_VERSION)))
 }
 
-/// The version a database is currently at. Zero for an empty one.
+/// Read `meta.schema_version` from `conn`.
+/// Returns `0` for an empty database. Errors if the stored value is not a number.
 pub fn version_of(conn: &Connection) -> Result<u32, super::DbError> {
+	// Check for meta table
 	let has_meta: bool = conn.query_row(
 		"SELECT EXISTS (
              SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'
@@ -212,6 +205,7 @@ pub fn version_of(conn: &Connection) -> Result<u32, super::DbError> {
 		return Ok(0);
 	}
 
+	// Read stored version
 	let version: Option<String> = conn
 		.query_row(
 			"SELECT value FROM meta WHERE key = 'schema_version'",

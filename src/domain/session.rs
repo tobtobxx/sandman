@@ -1,16 +1,34 @@
-//! The Session: a live agent context the Harness owns.
+//! The Session: live agent context as data, not loop.
 //!
-//! A Session comes in two shapes, and they differ in what they are attached to
-//! rather than in how they run. A Worker Session is created from a Task and ends
-//! when that Task does. A Comms Session stands on a Channel, keeps the
-//! conversation across messages, and never ends. [`SessionKind`] holds what is
-//! true of one shape and not the other, so a Worker has no mailbox to read and a
-//! Comms Session has no Task to complete.
+//! Two shapes, one record: [`SessionKind::Worker`] holds Task+Role and ends
+//! with it; [`SessionKind::Comms`] stands on a Channel with a mailbox and
+//! never ends. [`SessionStatus`] tracks where the loop is; [`Reflection`]
+//! keeps metacognition for inspection, never in context.
 //!
-//! This file is the record. The loop that drives a Session lives in
-//! `session.rs`, `worker.rs` and `comms.rs` — the data is in the Store because
-//! its whole life has to be watchable while it happens, and a loop that awaits
-//! cannot hold it.
+//! Construct: `Store` mints `SessionId` from [`NewSession`] via
+//! `db::counters::take` inside the inserting transaction; transcript grows via
+//! `Store::append_message` (one row per [`Message`] at `(owner, idx)`); `calls`
+//! and `reflections` appended by `session::turn` and `reflect` without holding
+//! the Session.
+//! Use: `session::turn(ctx: &SessionCtx, tier: Tier) -> Turn` loops until
+//! `Reply::Text` or cancellation; `session::tell` injects mail/answers/feedback
+//! as `Message::User`; [`SessionCtx`] (Store, Events, Scheduler, ToolRunner,
+//! Clock, Harness as `Arc`) threads through all layers.
+//!
+//! Consumers and how they match the same types differently:
+//!
+//! | Type | `Store` (only writer) | `session::turn` (loop) | `worker.rs` / `comms.rs` (policy) | `reflect` |
+//! | --- | --- | --- | --- | --- |
+//! | `SessionKind` | persists `Worker{task,role}` vs `Comms{channel,mailbox}` | `Worker` → `Purpose::Work(role)` vs `Comms` → `Purpose::Comms`; tool schemas differ | never cross-reference | — |
+//! | `SessionStatus` | persists `Waiting/Thinking/Tools/Reflecting` → `Finished/Failed/Cancelled` | sets `Thinking`/`Tools`/`Reflecting` per phase | `Worker: Waiting` between Turns vs `Comms: Idle`; `Cancelled` ends with no `TaskResult` | `Reflecting` while judging, recorded on judged Session |
+//! | `Turn` | — | reports `Text/Silent/Unreachable/Cancelled` | `Worker` reviews `Text`/`Silent`, fails on `Unreachable`; `Comms` says `Text` to human | — |
+//! | `ReflectionKind`/`Outcome`/`Nudge` | persists `Reflection` | fires Interrupt when `msgs - last >= interval` | `Review` may `Complete` a Task; `Interrupt` only `Feedback`/`Nothing` via `Nudge→Outcome` | `Outcome::Complete` vs `Nudge` asymmetry enforced by type |
+//!
+//! Rules: **data only — loop lives in `session.rs`, policy in `worker.rs`/`comms.rs`.**
+//! **a Turn decides nothing — it reports, caller decides.** **Worker ends with its Task; Comms never ends.**
+//! **one `Comms` per `Channel`; `Worker` has no mailbox, `Comms` has no `Task`.**
+//! **transcript is a query per row, not a blob.** **reflections never enter context; only `Feedback` reaches it via `tell`.**
+//! **metacognition fails open — `FailedOpen` never wedges a run.**
 //!
 //! Defines: [`Session`], [`SessionKind`], [`SessionStatus`], [`NewSession`],
 //! [`Incoming`], [`IncomingFrom`], [`Reflection`], [`ReflectionKind`],
@@ -21,27 +39,24 @@ use super::message::Message;
 use super::time::Timestamp;
 use crate::roles::RoleName;
 
-/// One live agent context.
+/// One live agent context. Holds transcript, reflections and call history.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Session {
 	pub id: SessionId,
 	pub run: RunId,
 	pub kind: SessionKind,
 	pub status: SessionStatus,
-	/// The whole conversation, oldest first. Persisted message by message, so a
-	/// transcript is a query rather than a rewritten blob.
+	/// Transcript, oldest first. One row per entry via `Store::append_message`.
 	pub messages: Vec<Message>,
-	/// Every metacognition this Session passed through, oldest first. Kept for
-	/// inspection: the Session cannot see what was written about it, and only
-	/// the feedback ever reaches the conversation, as a message of its own.
+	/// Metacognitions in order, for inspection. Never in context; only `Feedback` reaches it via `tell`.
 	pub reflections: Vec<Reflection>,
-	/// The model calls this Session made, newest last.
+	/// Model calls made, newest last.
 	pub calls: Vec<CallId>,
 	pub started_at: Timestamp,
 	pub ended_at: Option<Timestamp>,
 }
 
-/// Which shape of Session this is, and what only that shape has.
+/// Which shape this Session is. Carries what only that shape has.
 #[derive(
 	Debug,
 	Clone,
@@ -55,16 +70,12 @@ pub struct Session {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum SessionKind {
-	/// Created from a Task, ends when that Task completes. It sees the Brief and
-	/// nothing of the work that led to it.
+	/// Created from a Task; ends with it. Sees only its Brief.
 	Worker { task: TaskId, role: RoleName },
-	/// Standing on a Channel, one per Channel. It is never created from a Task,
-	/// never reviewed, and never completes.
+	/// Standing on a Channel, one per Channel. Never from a Task, never reviewed, never ends.
 	Comms {
 		channel: ChannelId,
-		/// What has arrived and has not been read yet. Post that lands while
-		/// the Session is mid-turn waits here until the next one, so nothing
-		/// arrives in the middle of its thinking.
+		/// Unread post. Drains at next Turn, never mid-thinking.
 		mailbox: Vec<Incoming>,
 	},
 }
@@ -87,31 +98,26 @@ pub enum SessionStatus {
 	Thinking,
 	/// Running tool calls.
 	Tools,
-	/// Under metacognition: a Worker being reviewed on its last reply, or any
-	/// Session being interrupted mid-turn.
+	/// Under metacognition. Review after Worker's text or Interrupt mid-turn.
 	Reflecting,
-	/// A Worker between Turns.
+	/// Worker between Turns.
 	Waiting,
-	/// A Comms Session between Turns. Workers never reach this.
+	/// Comms between Turns. Workers never idle.
 	Idle,
-	/// Done. A Worker finishes when its review submits an answer; kept in the
-	/// database for inspection.
+	/// Done. Worker finished when review submitted answer.
 	Finished,
-	/// Stopped by something that could not be recovered from — in practice, a
-	/// model that could not be reached.
+	/// Stopped unrecoverably. In practice, model unreachable.
 	Failed { reason: String },
-	/// Left behind by a Run that died. A Session is a live agent context and
-	/// nothing resumes one: the next start finds it still open and ends it here.
+	/// Abandoned by dead Run. Next `Store::open` ends still-open Sessions here.
 	Cancelled,
 }
 
-/// Everything needed to start a Session. The Store mints the id.
+/// Inputs to start a Session. `Store` mints `SessionId`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewSession {
 	pub kind: SessionKind,
 	pub status: SessionStatus,
-	/// The system prompt and whatever the Session starts knowing — for a Worker,
-	/// its Brief.
+	/// Initial transcript: system prompt plus Brief for Workers.
 	pub messages: Vec<Message>,
 }
 
@@ -123,7 +129,7 @@ pub struct Incoming {
 	pub at: Timestamp,
 }
 
-/// Who sent a piece of post: the human on the Channel, or the swarm.
+/// Who sent post to a Comms Session.
 #[derive(
 	Debug,
 	Clone,
@@ -145,31 +151,19 @@ pub enum IncomingFrom {
 
 // --- Metacognition ---------------------------------------------------------
 
-/// One metacognition of a Session, kept for inspection.
-///
-/// It is never part of the Session's context. The Session cannot see what was
-/// written about it, and only the feedback it produced ever reaches the
-/// conversation, as a message of its own.
+/// One metacognition kept for inspection. Never in Session context.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Reflection {
 	pub kind: ReflectionKind,
-	/// The model call that produced it, so its full request can be opened. Not
-	/// optional: the call is recorded the moment it joins the queue, before
-	/// anything is awaited.
+	/// Model call that produced it. Recorded at queue time, before await.
 	pub call: CallId,
-	/// Where in the Session's messages this ran, so a Watcher can put it back in
-	/// order.
+	/// Message index it ran after. Lets watchers order it.
 	pub after_message: usize,
 	pub at: Timestamp,
 	pub result: ReflectionResult,
 }
 
-/// Which metacognition this was.
-///
-/// A review runs after a Worker's plain-text turn and may write the Task's
-/// answer. An interrupt runs mid-turn, on a message count, and never can — the
-/// Session it is watching has not offered an answer. That rule is enforced at
-/// the seam by [`Nudge`]; the record itself stays one shape.
+/// Which metacognition. `Review` may complete the Task; `Interrupt` never may.
 #[derive(
 	Debug,
 	Clone,
@@ -204,14 +198,13 @@ pub enum ReflectionKind {
 #[strum(serialize_all = "snake_case")]
 pub enum ReflectionResult {
 	Ran {
-		/// The metacognition's own reasoning, when the model exposes it.
+		/// Metacognition reasoning, when exposed.
 		reasoning: Option<String>,
-		/// What it wrote, whole: its summary, feedback and lessons sections.
+		/// Full output: summary, feedback and lessons sections.
 		content: String,
 		outcome: Outcome,
 	},
-	/// The call could not be made. Metacognition fails open, always: broken
-	/// metacognition must never be what wedges a run.
+	/// Call could not be made. Fails open — never wedges a run.
 	FailedOpen { error: String },
 }
 
@@ -219,18 +212,15 @@ pub enum ReflectionResult {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
-	/// The Task's answer, as the review's `<summary>` wrote it.
+	/// Task answer from review's `<summary>`.
 	Complete(String),
-	/// Correction, injected into the Session's context; it takes another turn.
+	/// Correction injected via `tell`. Takes another Turn.
 	Feedback(String),
-	/// Nothing actionable. The expected outcome of an interrupt.
+	/// Nothing actionable. Expected from interrupts.
 	Nothing,
 }
 
-/// What an interrupt may come back with.
-///
-/// A separate type from [`Outcome`], not a subset checked at runtime: an
-/// interrupt that cannot return a completion cannot be asked to.
+/// What an interrupt may return. Separate from `Outcome` so `Complete` is unaskable.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Nudge {
@@ -248,7 +238,7 @@ impl From<Nudge> for Outcome {
 }
 
 impl SessionKind {
-	/// The Task this Session holds, if it is a Worker.
+	/// Task this Session holds, if Worker.
 	pub fn task(&self) -> Option<TaskId> {
 		match self {
 			SessionKind::Worker { task, .. } => Some(*task),
@@ -256,7 +246,7 @@ impl SessionKind {
 		}
 	}
 
-	/// The Channel this Session stands on, if it is a Comms Session.
+	/// Channel this Session stands on, if Comms.
 	pub fn channel(&self) -> Option<ChannelId> {
 		match self {
 			SessionKind::Comms { channel, .. } => Some(*channel),
@@ -264,7 +254,7 @@ impl SessionKind {
 		}
 	}
 
-	/// The Role of the Task this Session holds, if it is a Worker.
+	/// Role of this Worker's Task, if Worker.
 	pub fn role(&self) -> Option<RoleName> {
 		match self {
 			SessionKind::Worker { role, .. } => Some(*role),
@@ -274,6 +264,7 @@ impl SessionKind {
 }
 
 impl SessionStatus {
+	/// Whether this status is terminal. No further transitions.
 	pub fn is_terminal(&self) -> bool {
 		matches!(
 			self,

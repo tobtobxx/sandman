@@ -1,26 +1,33 @@
-//! The swarm's own history, searchable by meaning.
+//! The swarm's memory — text to vectors and ranking by meaning.
 //!
-//! Two things live here: turning text into a vector, and ranking a corpus
-//! against a query. The `memory` Role's tools are a thin layer of formatting
-//! over this file.
+//! Brute-force cosine over Lessons and Tasks. Right for tens of thousands;
+//! wrong beyond and never indexed approximately.
+//! **Indexing is lazy** — nothing embedded at creation; first `rank` embeds
+//! uncached rows in one batch with the query riding along. A cached vector is
+//! never stale: corpus is write-once and keyed by `Embedder::model` so spaces
+//! cannot mix.
 //!
-//! Search is by meaning rather than by keyword, and by brute force over every
-//! vector. That is the right shape: the corpus is the Lessons and the Tasks, and
-//! an approximate index would be solving a problem this system does not have. It
-//! stops being right somewhere in the tens of thousands of entries.
+//! Construct: `OpenRouterEmbedder::from_spec(&Embedding)` from
+//! `Config::embedding`; bench supplies its own `Embedder`.
+//! Use: `lesson_corpus(lessons) -> Vec<(key, text, Lesson)>` plus
+//! `rank(store, embedder, query, corpus, n) -> Vec<Hit<T>>` best first;
+//! `cosine(a, b)` in -1..1.
+//! Consumers: `tools/recall::{SearchLessons, SearchTasks}` and
+//! `web::server::on_search` share `rank` so Worker and Watcher see same scores.
 //!
-//! **Indexing is lazy.** Nothing is embedded when a Task or a lesson is created —
-//! that would put a network call on the path of `create_task`, which is
-//! synchronous and should stay that way. The first search embeds what is not
-//! cached in one batch, with the query riding along. A cached vector is never
-//! stale, because nothing in the corpus is edited after it is written; the cache
-//! is in the database now, so it survives a restart along with everything else.
+//! Seam: `Embedder` — text in, vectors out, model-qualified cache in
+//! `store::vector` / `put_vector`.
 //!
-//! [`Embedder`] is a seam: a bench that wants a deterministic ranking supplies
-//! its own rather than paying for one.
+//! | Trait | Real | Bench |
+//! | --- | --- | --- |
+//! | `Embedder` | `OpenRouterEmbedder` (skips scheduler, never Spend) | deterministic stub |
+//!
+//! Rules: **embedder never goes through scheduler** — no queue, no Spend, no
+//! Session turn. **truncate at `max_input_chars`** — one runaway Brief cannot
+//! fail a batch. **brute force, no index** — `rank` scans every vector.
 //!
 //! Defines: [`Embedder`], [`OpenRouterEmbedder`], [`EmbedError`], [`cosine`],
-//! [`rank`].
+//! [`rank`], [`lesson_corpus`], [`search_failed`].
 
 use async_trait::async_trait;
 
@@ -29,32 +36,19 @@ use crate::config::Embedding;
 /// Text to vectors.
 #[async_trait]
 pub trait Embedder: Send + Sync {
-	/// The model these vectors come from. Cached vectors are keyed on it, so
-	/// changing the model does not silently mix two vector spaces.
+	/// Model that produced these vectors — cache key so spaces never mix.
 	fn model(&self) -> &str;
 
-	/// How much of one text is embedded. Long inputs cost more and embed worse —
-	/// a vector of a whole page is a vector of nothing in particular — and the
-	/// cap is here so one runaway Brief cannot fail a whole batch.
+	/// Max chars per input — caps cost and keeps vectors meaningful.
 	fn max_input_chars(&self) -> usize;
 
 	/// Embed a batch, order preserved.
-	async fn embed(
-		&self,
-		texts: &[String],
-	) -> Result<Vec<Vec<f32>>, EmbedError>;
+	async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError>;
 }
 
-/// The real embedder.
+/// Real embedder — calls the embedding service directly.
 ///
-/// It deliberately does not go through the scheduler. A model call belongs to a
-/// Session, carries a conversation, and waits in a queue so a human can follow
-/// the run line by line. An embedding is none of that, and putting it in that
-/// queue would show it in the UI as work being done and hold it behind whatever
-/// the swarm is currently saying.
-///
-/// The cost of that choice is honest: an embedding is not a model call, so what
-/// it spends never reaches Spend. See TASKS.md.
+/// Bypasses the scheduler; not a Session turn and never counted as Spend.
 pub struct OpenRouterEmbedder {
 	client: reqwest::Client,
 	endpoint: String,
@@ -74,7 +68,7 @@ pub enum EmbedError {
 }
 
 impl OpenRouterEmbedder {
-	/// The embedding service, as the configuration describes it.
+	/// Build from `Config::embedding`.
 	pub fn from_spec(spec: &Embedding) -> Self {
 		OpenRouterEmbedder {
 			client: reqwest::Client::new(),
@@ -96,12 +90,11 @@ impl Embedder for OpenRouterEmbedder {
 		self.max_input_chars
 	}
 
-	async fn embed(
-		&self,
-		texts: &[String],
-	) -> Result<Vec<Vec<f32>>, EmbedError> {
+	async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+		// Build request
 		let body = EmbedRequest { model: &self.model, input: texts };
 
+		// Send request
 		let response = self
 			.client
 			.post(&self.endpoint)
@@ -112,11 +105,14 @@ impl Embedder for OpenRouterEmbedder {
 			.map_err(|e| EmbedError::Transport(e.to_string()))?;
 
 		let status = response.status();
+
+		// Read body
 		let text = response
 			.text()
 			.await
 			.map_err(|e| EmbedError::Transport(e.to_string()))?;
 
+		// Check status
 		if !status.is_success() {
 			return Err(EmbedError::Status {
 				status: status.as_u16(),
@@ -124,6 +120,7 @@ impl Embedder for OpenRouterEmbedder {
 			});
 		}
 
+		// Parse response
 		let mut parsed: EmbedResponse = serde_json::from_str(&text)
 			.map_err(|e| EmbedError::Malformed(e.to_string()))?;
 		parsed.data.sort_by_key(|d| d.index);
@@ -131,7 +128,7 @@ impl Embedder for OpenRouterEmbedder {
 	}
 }
 
-// --- The wire shape ---------------------------------------------------------
+// Wire shapes
 
 #[derive(serde::Serialize)]
 struct EmbedRequest<'a> {
@@ -162,9 +159,9 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 	}
 }
 
-/// The Lessons as a corpus for [`rank`]: keyed by id, searched by their text.
-/// Shared by the `memory` Role's `search_lessons` tool and the Watcher's
-/// search box, so a score one sees is the score the other would.
+/// Build a Lesson corpus for [`rank`].
+///
+/// Keyed by `lesson/{id}`, searched by `text`. Shared by tool and Watcher.
 pub fn lesson_corpus(
 	lessons: Vec<crate::domain::Lesson>,
 ) -> Vec<(String, String, crate::domain::Lesson)> {
@@ -174,17 +171,15 @@ pub fn lesson_corpus(
 		.collect()
 }
 
-/// Cut text down to what this embedder takes, so one runaway Brief cannot fail
-/// a whole batch.
+/// Truncate to `cap` chars so one long Brief cannot fail a batch.
 fn truncated(text: &str, cap: usize) -> String {
 	text.chars().take(cap).collect()
 }
 
-/// Rank a corpus against a query, best first.
+/// Rank a corpus against a query by cosine, best first.
 ///
-/// Embeds whatever the Store has no vector for, caches what comes back, and
-/// scores everything by cosine. The query rides in the same batch, so one search
-/// is one call.
+/// Lazily embeds uncached entries in one batch; caches and scores all.
+/// Query rides in same batch — one search, one call.
 pub async fn rank<T: Clone>(
 	store: &crate::store::Store,
 	embedder: &dyn Embedder,
@@ -200,6 +195,7 @@ pub async fn rank<T: Clone>(
 			.map_err(|e| EmbedError::Malformed(format!("database: {e}")))
 	};
 
+	// Check cache
 	let mut vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(corpus.len());
 	let mut missing_idx = Vec::new();
 	let mut batch = Vec::new();
@@ -215,9 +211,11 @@ pub async fn rank<T: Clone>(
 	}
 	batch.push(truncated(query, cap));
 
+	// Embed missing plus query
 	let mut embedded = embedder.embed(&batch).await?;
 	let query_vector = embedded.pop().expect("the query was just appended");
 
+	// Cache new vectors
 	for (idx, vector) in missing_idx.into_iter().zip(embedded) {
 		let key = &corpus[idx].0;
 		store
@@ -226,6 +224,7 @@ pub async fn rank<T: Clone>(
 		vectors[idx] = Some(vector);
 	}
 
+	// Score and rank
 	let mut hits: Vec<crate::domain::Hit<T>> = corpus
 		.iter()
 		.zip(vectors)
@@ -249,10 +248,7 @@ pub async fn rank<T: Clone>(
 	Ok(hits)
 }
 
-/// What a tool says when a search could not be made.
-///
-/// A sentence the model can act on, not a stack trace: the tool that called this
-/// has to answer its Session either way.
+/// Tool-visible error when a search could not be made.
 pub fn search_failed(what: &str, err: &EmbedError) -> String {
 	format!("Could not search {what}: {err}")
 }

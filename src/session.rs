@@ -1,23 +1,20 @@
-//! The Turn: model calls and tool calls, until the model replies with plain text.
+//! The Turn loop — both Session shapes run it; policy lives elsewhere.
 //!
-//! Both shapes of Session run this one loop. In the prototype a Session was one
-//! class holding both its data and its loop; here the data is in the Store —
-//! because its whole life has to be watchable while it happens, and a loop that
-//! awaits cannot hold it — and the loop is a function over [`SessionCtx`].
+//! Construct: `Harness::ctx(id)` builds `SessionCtx` (Store, Events, Scheduler, ToolRunner, Clock, Harness as `Arc`s; Session owns nothing, state in Store so loop stays watchable while awaiting).
+//! Use: `turn(ctx, tier) → Turn` loops until plain text; `tell(ctx, text)` enqueues for next iteration (mail, child answers, interrupt feedback all arrive as `tell`).
+//! Consumers and seam — `Turn` reported here, decided in `worker.rs` vs `comms.rs` (neither references the other):
 //!
-//! **A turn decides nothing.** It reports how it ended — text, silence, an
-//! unreachable model, or a Task that was cancelled underneath it — and the caller
-//! says what that means. This is the seam worth protecting: the two shapes of
-//! Session differ by almost nothing else, and they once ran as two copies of one
-//! loop until they quietly drifted apart. Ending policy belongs in `worker.rs`
-//! or `comms.rs`, never here.
+//! | `Turn` | `worker.rs` | `comms.rs` |
+//! | --- | --- | --- |
+//! | `Text` | `reflect` → `Done` or `Continue` | `say` to human |
+//! | `Silent` | `reflect`; `Nothing` → `Continue` | legitimate end → `Idle` |
+//! | `Unreachable` | `Failed` without review | `Idle`, nothing said |
+//! | `Cancelled` | `Aborted`, no Result | unreachable (no Task) |
 //!
-//! The single exception is the metacognitive interrupt, which fires between two
-//! model calls in this loop. It has to: a caller only ever sees turns that
-//! finished, and a Worker grinding on tool calls never finishes one — which is
-//! exactly the failure the interrupt exists to catch. The top of the loop is
-//! where it goes, because there every tool call already has its result and a
-//! pushed message cannot split the two.
+//! Call trace per iteration inside `turn`:
+//! `cancelled? → Cancelled` · `msgs - last_reflection ≥ interrupt_interval → reflect::interrupt → tell` · `scheduler.request(Tier from caller, Purpose by SessionKind) → Reply::Calls → tools.run → loop | Reply::Text → Text/Silent` · `reflect::reflect` only after `turn` returns (Worker only).
+//!
+//! Rules: **a Turn decides nothing — ending policy lives in `worker.rs`/`comms.rs`, never here.** **the interrupt fires inside `turn` between model calls — a Worker grinding on tools never returns a `Turn`.** **one `scheduler.request` in flight, ordered Tier then arrival; Tier from caller (`Task` priority vs `Tier::Comms`), `Purpose` from `SessionKind`.** **Session owns nothing.** **worker and comms never reference each other.**
 //!
 //! Defines: [`SessionCtx`], [`Turn`], [`turn`], [`tell`].
 
@@ -35,12 +32,9 @@ use crate::scheduler::{Scheduler, SchedulerError, Tier};
 use crate::store::Store;
 use crate::tools::ToolRunner;
 
-/// What a running Session and its tools need to reach.
+/// What a running Session and its tools need.
 ///
-/// Everything here is an [`Arc`], and none of it is the Session's own state: a
-/// Session owns nothing. The Harness is here because tools reach it — creating a
-/// Task, waiting on one, messaging a human — and the reference is safe because
-/// the Harness holds Session *ids*, never Sessions, so nothing is cyclic.
+/// All `Arc`s; Session owns nothing, state lives in `Store`. Built by `Harness::ctx(id)`.
 #[derive(Clone)]
 pub struct SessionCtx {
 	pub id: SessionId,
@@ -54,8 +48,7 @@ pub struct SessionCtx {
 
 /// How a turn ended.
 ///
-/// None of these is a success or a failure on its own; reading that is the
-/// caller's job.
+/// Reading success or failure is the caller's job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Turn {
 	/// The model replied with plain text and called no tool.
@@ -71,8 +64,7 @@ pub enum Turn {
 
 /// Run one turn to completion.
 ///
-/// Sends requests, processes tools and conducts metacog interrupts.
-/// Loops until no more tools. Returns if cancelled or done.
+/// Sends requests, runs tools and fires interrupt. Loops on `Calls` until `Text`, `Silent`, `Cancelled` or `Unreachable`.
 pub async fn turn(ctx: &SessionCtx, tier: Tier) -> Turn {
 	loop {
 		// Check if cancelled
@@ -87,7 +79,7 @@ pub async fn turn(ctx: &SessionCtx, tier: Tier) -> Turn {
 			}
 		}
 
-		// Check if due for interrupt
+		// Check interrupt due
 		if let Ok(count) = ctx.store.message_count(ctx.id) {
 			let after = ctx
 				.store
@@ -187,26 +179,26 @@ pub async fn turn(ctx: &SessionCtx, tier: Tier) -> Turn {
 	}
 }
 
-/// Put something in the context for the next turn to see.
+/// Enqueue text for the next turn to see.
 ///
-/// The only way anything reaches a Session from outside: mail, a child's answer,
-/// and the feedback metacognition wrote all arrive as one of these.
+/// The only path into a Session — mail, child answers and interrupt feedback all arrive here.
 pub async fn tell(ctx: &SessionCtx, content: &str) {
 	let _ = ctx
 		.store
 		.append_message(ctx.id, Message::User { content: content.to_string() });
 }
 
-/// The interrupt, fired from the top of the loop.
+/// Run interrupt and enqueue feedback if any.
 ///
-/// Records what it found either way. An interrupt that found nothing wrong is
-/// the normal outcome — and a run where none ever fired and a run where they all
-/// passed would otherwise look identical from outside.
+/// Records outcome on the judged Session; `Nothing` is the expected case.
 async fn check_in(ctx: &SessionCtx) {
+	// Mark reflecting
 	let _ = ctx.store.set_status(ctx.id, SessionStatus::Reflecting);
+	// Run interrupt
 	if let crate::domain::Nudge::Feedback(text) =
 		crate::reflect::interrupt(ctx).await
 	{
+		// Enqueue feedback
 		tell(ctx, &text).await;
 	}
 }

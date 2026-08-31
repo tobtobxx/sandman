@@ -1,53 +1,34 @@
-//! Sandman's entry point. Three ways in.
+//! Process boundary and wiring. Only place that builds a Harness.
 //!
+//! What it is: argv and config in, Harness or control-socket request out.
+//! Wiring lives here and only here — which `Model`, `ToolRunner`, `Clock` and
+//! `Embedder` is chosen here; everything below receives `Arc`s. Bench reuses
+//! the same Harness with different pieces through these seams.
+//!
+//! Construct: `parse` reads argv → `Config` → `Paths`+`Command`; `assemble`
+//! builds `Arc<Harness>` from `Paths`+`Config` (Store, Events, Logger,
+//! Scheduler/Models, Registry, Embedder).
+//!
+//! Use: `main` matches `Command` and delegates:
+//!
+//! | Command | Builds Store | Talks to | Drives |
+//! |---|---|---|---|
+//! | Interactive | yes | Channels + web UI + socket | `harness.run` until quit |
+//! | Run | yes | — | `create_task` then `run_until_idle`, print results |
+//! | Task / List / Spend | no | `control::send` to running Harness | print reply |
+//!
+//! Call trace (interactive):
 //! ```text
-//! sandman
-//!     Interactive. Two Channels at once — the terminal, and a browser on
-//!     :8080 that also watches everything the Harness owns, live. A control
-//!     socket is opened so another process can put work in.
-//!
-//! sandman run --role planning --title "..." --brief "..."
-//!            [--at 600] [--every 86400] [--priority high|normal|low]
-//!     One Task, run until nothing is left, then print the Results and what it
-//!     cost. Its own Harness; no socket, no browser.
-//!
-//! sandman task --role planning --title "..." --brief "..."
-//!             [--at 600] [--every 86400] [--priority high|normal|low]
-//!     Put a Task into a Sandman that is already running, through its control
-//!     socket, and print the id. This is how anything that is not a Channel —
-//!     cron, an RSS script, a mail watcher — gets work in.
-//!
-//! sandman list [--state pending|running|completed|cancelled] [--count N]
-//!     List a running Sandman's queue, over the control socket.
-//!
-//! sandman spend
-//!     What a running Sandman has spent, over the control socket.
+//! main → parse → assemble → attach stdio/web → spawn web::serve + control::serve
+//!      → harness.run → wind_down → end_run → remove socket
 //! ```
 //!
-//! Common flags: `--config <path>`, `--verbose`, `--break-lock`.
-//!
-//! Everything else is `config.toml` — see [`sandman::config`]. Where the
-//! database, the trace and the socket live is in there and nowhere else; a flag
-//! for each would be a second place to say it and a second place to get it
-//! wrong. Naming another configuration says all three at once. There is no
-//! fallback under the configuration either: a Sandman that finds none writes
-//! the default one and stops, because there is nothing sensible to run before a
-//! human has read it.
-//!
-//! One Sandman per database. `sandman` and `sandman run` each open their own,
-//! and the second to start on a database is refused rather than allowed to
-//! cancel the first one's work — see [`sandman::db::Lock`]. `task`, `list` and
-//! `spend` open nothing: they go through the control socket, which is how you
-//! reach a Sandman that is already running.
-//!
-//! Wiring lives here and only here: which [`sandman::model::Model`], which
-//! [`sandman::tools::ToolRunner`], which [`sandman::domain::Clock`]. Everything
-//! below takes what it needs and builds nothing itself, which is what lets the
-//! bench assemble the same Harness with different pieces.
-//!
-//! Interactive mode opens three ways in: the terminal Channel, the browser
-//! Channel with its Watcher UI on [`sandman::web::PORT`], and the control
-//! socket.
+//! Rules:
+//! - **One Sandman per database** — second `sandman`/`run` on same db is refused by `db::Lock`; `task`/`list`/`spend` never open the DB.
+//! - **No second writer** — cross-process entry is `control::Request` via socket; it goes through `Store` and emits `Event`s.
+//! - **No flag for a path** — db, log, socket come from `config.toml` together, selected by `--config`.
+//! - **No fallback config** — missing file writes default and stops.
+//! - **No signal handler** — Ctrl+C aborts; half-written state is cleaned by `Store::open` on next start; graceful exit is `/quit`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -85,22 +66,19 @@ struct TaskArgs {
 	priority: Option<String>,
 }
 
-/// Where the state, the trace and the socket live, and how to open the first.
+/// Where the state, trace and socket live and how to open them.
 ///
-/// All three come from `config.toml` and none has a flag. Reaching a second
-/// Sandman is `--config`, which names all three together and cannot name one
-/// Sandman's socket beside another's database.
+/// All three come from `config.toml` together, selected by `--config`.
+/// `break_lock` clears a stale `db::Lock` before opening.
 struct Paths {
 	db: std::path::PathBuf,
 	log: std::path::PathBuf,
 	socket: std::path::PathBuf,
-	/// Take the database's lock however it looks. See `--break-lock`.
+	/// Clear a stale lock before opening. See `--break-lock`.
 	break_lock: bool,
 }
 
-/// The argv shape, read by `clap`. Kept private to `parse`: everywhere else in
-/// this file works in terms of [`Command`], [`TaskArgs`] and [`Paths`], which
-/// say what Sandman does rather than how the flags spelled it.
+/// Clap argv shape. Private to `parse`; rest of file uses `Command`/`TaskArgs`/`Paths`.
 #[derive(clap::Parser)]
 #[command(
 	name = "sandman",
@@ -174,23 +152,23 @@ impl From<TaskFlags> for TaskArgs {
 	}
 }
 
-/// Read the argv and the configuration it names, and settle what beats what.
+/// Parse argv and load the config it names.
 ///
-/// The configuration is read for every command, including the three that only
-/// talk to a socket: where that socket is, is in it.
+/// Returns command, paths and verbosity for `main` to dispatch.
+/// Reads config for every command, including socket-only ones.
 fn parse(
 	argv: &[String],
 ) -> Result<(Command, Paths, Arc<Config>, sandman::log::Verbosity), String> {
 	use clap::Parser;
 
-	// `Error::exit` prints to the right stream (stdout for `--help` and
-	// `--version`, stderr otherwise) and leaves with the matching code, so a
-	// bad or absent argv never reaches the rest of this function.
+	// Parse argv or exit
 	let cli = Cli::try_parse_from(argv).unwrap_or_else(|e| e.exit());
 
+	// Load config
 	let path = Config::path(cli.config).map_err(|e| e.to_string())?;
 	let config = Config::load(&path).map_err(|e| e.to_string())?;
 
+	// Build paths and verbosity
 	let paths = Paths {
 		db: config.sandman.sqlite_path.clone(),
 		log: config.sandman.log_path.clone(),
@@ -202,6 +180,8 @@ fn parse(
 	} else {
 		sandman::log::Verbosity::Terse
 	};
+
+	// Map to command
 	let command = match cli.command {
 		None => Command::Interactive,
 		Some(Cmd::Run(flags)) => Command::Run(flags.into()),
@@ -215,8 +195,9 @@ fn parse(
 	Ok((command, paths, Arc::new(config), verbosity))
 }
 
-/// Build a whole Sandman: database, Event stream, logger, models, embedder,
-/// tools, scheduler, Harness.
+/// Assemble a full Harness from config.
+///
+/// Opens Store, Events, Logger, Scheduler and registry. Returns `Arc<Harness>`.
 async fn assemble(
 	paths: &Paths,
 	config: Arc<Config>,
@@ -232,18 +213,19 @@ async fn assemble(
 	use sandman::store::Store;
 	use sandman::tools::Registry;
 
+	// Create clock and events
 	let clock: Arc<dyn Clock> = Arc::new(SystemClock);
 	let now = clock.now();
-
 	let events = Arc::new(Events::new(1024));
 
-	// With no terminal Channel nothing else is using stdout, and a trace
-	// nobody can see is worse than one that scrolls past.
+	// Choose echo target
 	let echo = if config.channels.stdio {
 		Echo::Quiet
 	} else {
 		Echo::Stdout
 	};
+
+	// Start logger
 	make_room_for(&paths.log)?;
 	let logger =
 		Arc::new(Logger::create(&paths.log, verbosity, echo).map_err(|e| {
@@ -255,6 +237,7 @@ async fn assemble(
 		tokio::spawn(async move { logger.follow(&events).await });
 	}
 
+	// Open store
 	if paths.break_lock {
 		sandman::db::Lock::clear(&paths.db).map_err(|e| {
 			format!("could not clear the lock on {}: {e}", paths.db.display())
@@ -271,6 +254,8 @@ async fn assemble(
 		)
 		.map_err(|e| format!("could not open {}: {e}", paths.db.display()))?,
 	);
+
+	// Log start and migration
 	logger.note(
 		"sandman",
 		&sandman::log::banner(&format!(
@@ -282,6 +267,7 @@ async fn assemble(
 		logger.note("db", &format!("migrated schema v{from} to v{to}"));
 	}
 
+	// Build scheduler and tools
 	let scheduler = Arc::new(Scheduler::new(
 		Models::from_config(&config),
 		store.clone(),
@@ -291,13 +277,13 @@ async fn assemble(
 	let embedder: Arc<dyn Embedder> =
 		Arc::new(OpenRouterEmbedder::from_spec(&config.embedding));
 
+	// Build harness
 	Ok(Harness::new(
 		store, events, scheduler, tools, clock, embedder, config,
 	))
 }
 
-/// Make the directory a configured path lives in, so naming somewhere that does
-/// not exist yet is a configuration choice rather than a failure to start.
+/// Ensure parent directory of a configured path exists.
 fn make_room_for(path: &std::path::Path) -> Result<(), String> {
 	let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
 	else {
@@ -307,26 +293,26 @@ fn make_room_for(path: &std::path::Path) -> Result<(), String> {
 		.map_err(|e| format!("could not make {}: {e}", parent.display()))
 }
 
-/// The Channels the configuration opens, a Watcher, and a control socket,
-/// running until the human leaves.
+/// Run interactive mode until the human quits.
 ///
-/// The Watcher is served whether or not its chat window is a Channel: watching
-/// is not talking, and a Sandman with no Channel at all is still worth
-/// following. It does mean `[channels].stdio = false` leaves no `/quit` — a
-/// signal is then the way out, which is what it already is for `sandman run`.
+/// Attaches configured Channels, serves web UI and control socket,
+/// then drives Harness.
 async fn interactive(
 	paths: Paths,
 	config: Arc<Config>,
 	verbosity: sandman::log::Verbosity,
 ) -> Result<(), String> {
+	// Assemble harness
 	let harness = assemble(&paths, config.clone(), verbosity).await?;
 
+	// Attach terminal channel
 	if config.channels.stdio {
 		sandman::channels::stdio::attach(harness.clone())
 			.await
 			.map_err(|e| format!("could not open the terminal: {e}"))?;
 	}
 
+	// Attach browser channel
 	let web_channel = if config.channels.web {
 		Some(
 			sandman::channels::web::attach(harness.clone())
@@ -338,6 +324,8 @@ async fn interactive(
 	} else {
 		None
 	};
+
+	// Spawn web server
 	let web_state = sandman::web::server::AppState {
 		harness: harness.clone(),
 		channel: web_channel,
@@ -352,6 +340,7 @@ async fn interactive(
 		}
 	});
 
+	// Spawn control socket
 	let socket_harness = harness.clone();
 	let socket_path = paths.socket.clone();
 	tokio::spawn(async move {
@@ -362,13 +351,10 @@ async fn interactive(
 		}
 	});
 
-	// No signal handler, deliberately. Ctrl+C and a kill both mean *abort*:
-	// the process dies where it stands, in-flight model calls with it. What
-	// that leaves half-written in the database — Tasks marked running,
-	// Sessions still open, calls still out — the next start ends, in
-	// `Store::open`. Leaving is `/quit` or Ctrl+D, which is the path below.
+	// Drive harness to quit
 	harness.run(Drive::Full).await.map_err(|e| e.to_string())?;
 
+	// Wind down
 	harness.wind_down(Duration::from_secs(30)).await;
 	let _ = harness.store.end_run(harness.now());
 	let _ = std::fs::remove_file(&paths.socket);
@@ -376,16 +362,19 @@ async fn interactive(
 	Ok(())
 }
 
-/// One Task in its own Harness, until nothing is left. Prints every Task's
-/// Result and what the run spent.
+/// Run one Task to completion in its own Harness.
+///
+/// Creates the Task, drains to idle, prints results and spend.
 async fn one_shot(
 	args: TaskArgs,
 	paths: Paths,
 	config: Arc<Config>,
 	verbosity: sandman::log::Verbosity,
 ) -> Result<(), String> {
+	// Assemble harness
 	let harness = assemble(&paths, config, verbosity).await?;
 
+	// Parse role and fields
 	let role = args
 		.role
 		.parse::<RoleName>()
@@ -406,6 +395,7 @@ async fn one_shot(
 		harness.now(),
 	);
 
+	// Create task
 	let new = NewTask {
 		title,
 		brief,
@@ -416,17 +406,20 @@ async fn one_shot(
 	};
 	harness.create_task(new).map_err(|e| e.to_string())?;
 
+	// Drain to idle
 	harness
 		.run_until_idle(Drive::Full)
 		.await
 		.map_err(|e| e.to_string())?;
 
+	// Print results
 	let tasks = harness
 		.store
 		.tasks_of_run(harness.store.run())
 		.map_err(|e| e.to_string())?;
 	for task in &tasks {
 		match &task.state {
+			// Completed - print result
 			TaskState::Completed { result, .. } => {
 				println!(
 					"{} \"{}\": {}",
@@ -435,27 +428,32 @@ async fn one_shot(
 					result.content()
 				);
 			},
+			// Cancelled - note it
 			TaskState::Cancelled { .. } => {
 				println!("{} \"{}\": cancelled.", task.id, task.title);
 			},
+			// Pending or running - unreachable after drain
 			TaskState::Pending | TaskState::Running { .. } => {},
 		}
 	}
 
+	// Print spend
 	let spend = harness.spend().map_err(|e| e.to_string())?;
 	println!(
 		"Spent {} call(s), {} token(s), {}",
 		spend.calls, spend.tokens, spend.cost
 	);
 
+	// Wind down
 	harness.wind_down(Duration::from_secs(30)).await;
 	let _ = harness.store.end_run(harness.now());
 
 	Ok(())
 }
 
-/// One Task into a running Sandman, over the control socket.
+/// Send a Task into a running Sandman via the control socket.
 async fn into_running(args: TaskArgs, paths: Paths) -> Result<(), String> {
+	// Build request
 	let request = sandman::control::Request::CreateTask {
 		role: args.role,
 		title: args.title.unwrap_or_else(|| args.brief.clone()),
@@ -464,34 +462,43 @@ async fn into_running(args: TaskArgs, paths: Paths) -> Result<(), String> {
 		repeat_seconds: args.every_seconds,
 		priority: args.priority,
 	};
+
+	// Send request
 	let response = sandman::control::send(&paths.socket, &request)
 		.await
 		.map_err(|e| e.to_string())?;
 
+	// Handle response
 	match response {
+		// Created - print id
 		sandman::control::Response::Created { id } => {
 			println!("{id}");
 			Ok(())
 		},
+		// Error - propagate message
 		sandman::control::Response::Error { message } => Err(message),
+		// Unexpected - wrong shape
 		_ => Err("the control socket answered a CreateTask with something \
 		          else."
 			.to_string()),
 	}
 }
 
-/// A running Sandman's queue, over the control socket.
+/// List a running Sandman's queue via the control socket.
 async fn list(
 	state: Option<String>,
 	count: Option<usize>,
 	paths: Paths,
 ) -> Result<(), String> {
+	// Send request
 	let request = sandman::control::Request::ListTasks { state, count };
 	let response = sandman::control::send(&paths.socket, &request)
 		.await
 		.map_err(|e| e.to_string())?;
 
+	// Handle response
 	match response {
+		// Tasks - print each
 		sandman::control::Response::Tasks { tasks } => {
 			if tasks.is_empty() {
 				println!("No Tasks match.");
@@ -504,15 +511,18 @@ async fn list(
 			}
 			Ok(())
 		},
+		// Error - propagate message
 		sandman::control::Response::Error { message } => Err(message),
+		// Unexpected - wrong shape
 		_ => Err("the control socket answered a ListTasks with something \
 		          else."
 			.to_string()),
 	}
 }
 
-/// What a running Sandman has spent, over the control socket.
+/// Print what a running Sandman has spent via the control socket.
 async fn spend(paths: Paths) -> Result<(), String> {
+	// Send request
 	let response = sandman::control::send(
 		&paths.socket,
 		&sandman::control::Request::Spend,
@@ -520,12 +530,16 @@ async fn spend(paths: Paths) -> Result<(), String> {
 	.await
 	.map_err(|e| e.to_string())?;
 
+	// Handle response
 	match response {
+		// Spent - print totals
 		sandman::control::Response::Spent { calls, tokens, cost } => {
 			println!("Spent {calls} call(s), {tokens} token(s), {cost}");
 			Ok(())
 		},
+		// Error - propagate message
 		sandman::control::Response::Error { message } => Err(message),
+		// Unexpected - wrong shape
 		_ => Err("the control socket answered a Spend with something else."
 			.to_string()),
 	}
@@ -533,6 +547,7 @@ async fn spend(paths: Paths) -> Result<(), String> {
 
 #[tokio::main]
 async fn main() {
+	// Parse argv and config
 	let argv: Vec<String> = std::env::args().collect();
 	let (command, paths, config, verbosity) = match parse(&argv) {
 		Ok(parsed) => parsed,
@@ -542,6 +557,7 @@ async fn main() {
 		},
 	};
 
+	// Dispatch by command
 	let result = match command {
 		Command::Interactive => interactive(paths, config, verbosity).await,
 		Command::Run(args) => one_shot(args, paths, config, verbosity).await,
@@ -550,6 +566,7 @@ async fn main() {
 		Command::Spend => spend(paths).await,
 	};
 
+	// Report errors
 	if let Err(message) = result {
 		eprintln!("{message}");
 		std::process::exit(1);

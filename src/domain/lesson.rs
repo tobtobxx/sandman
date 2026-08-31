@@ -1,19 +1,34 @@
-//! The Lessons: what metacognition kept.
+//! What metacognition kept.
 //!
-//! Every review and every interrupt may end with a `<lessons>` section, and when
-//! it does the Harness keeps it — what the Session struggled with, and what
-//! whoever does that kind of work next would want to know.
+//! A `<lessons>` section outlives the Session judged. Nothing reads it back
+//! automatically; it is found later by meaning via the `memory` Role.
 //!
-//! A lesson is anchored on the Session that was judged, because the Session is
-//! always the way back to the whole conversation. What the lesson is *about*
-//! varies: most come from a Task, but one from a Comms Session has no Task,
-//! because a conversation with a human is not one. [`LessonSubject`] carries
-//! that difference instead of leaving three fields optional.
+//! Construct: `reflect::keep_lessons` parses `<lessons>` and builds
+//! `NewLesson { text, session, about }`; `Store::keep_lesson` mints
+//! `LessonId`, persists the row, and emits `Event::LessonKept`. Empty sections
+//! write nothing.
 //!
-//! Nothing reads a lesson back automatically. It is written once, never edited,
-//! and found later only by someone looking — which is the whole of what the
-//! `memory` Role does. Now that the Lessons persist, they outlive the Run that
-//! wrote them, and a search reaches every Run.
+//! Use: `memory::lesson_corpus` + `memory::rank` — cosine, brute force —
+//! behind `tools::recall::SearchLessons` and `web::server`'s search box.
+//! `Hit<T>` carries `score`. Indexing is lazy: first search embeds uncached
+//! rows in one batch via `Store::vector` / `put_vector`.
+//!
+//! Consumers:
+//! - `reflect.rs` — produces `NewLesson` from `SessionKind`
+//! - `store.rs` / `db/rows.rs` — persists, emits `LessonKept` → `web/wire`, `log`
+//! - `memory.rs` — `lesson_corpus` + `rank`, shared by tool and Watcher
+//! - `tools/recall.rs` — `render_lesson_hits` via `LessonSubject::describe`
+//!
+//! Rules:
+//! - **Write-once, never edited** — cached vectors never stale.
+//! - **Only `text` is searched** — `LessonSubject` is placement, not corpus.
+//! - **Search reaches every Run** — `run` recorded but never a filter.
+//! - **Lessons never re-enter the judged Session.**
+//!
+//! | `LessonSubject` | when | carries |
+//! | --- | --- | --- |
+//! | `Task` | Worker Session | `TaskId` + `RoleName` + `Title` |
+//! | `Conversation` | Comms Session (no Task) | `ChannelId` |
 //!
 //! Defines: [`Lesson`], [`LessonSubject`], [`NewLesson`], [`Hit`].
 
