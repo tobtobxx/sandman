@@ -14,27 +14,20 @@
 //! request, sent once, with no retry: a failed call already has a full path to a
 //! failed Result.
 //!
-//! Defines: [`Model`], [`OpenRouter`], [`ModelError`], [`MODEL`],
-//! [`GRADER_MODEL`], [`API_KEY`].
+//! Which model a call goes to is [`Purpose`], resolved through [`Models`]. Two
+//! Roles may share one model or have one each; the swarm asks for a purpose and
+//! never for a name.
+//!
+//! Defines: [`Model`], [`Models`], [`Purpose`], [`OpenRouter`], [`ModelError`].
+
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::config::{Config, ModelSpec};
 use crate::domain::{CallRequest, Completion, Cost, NonEmpty, Reply, ToolCall};
-
-/// This is a prototype key with a low limit; leaking it costs nothing.
-pub const API_KEY: &str =
-	"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";
-
-/// The model every Session, every review and every interrupt talks to.
-pub const MODEL: &str = "qwen/qwen3.6-35b-a3b";
-
-/// The model a bench grader talks to. Deliberately stronger than [`MODEL`]: a
-/// judge no better than what it judges is not a judge. Nothing in the swarm ever
-/// uses it, and what it costs is never Spend.
-pub const GRADER_MODEL: &str = "z-ai/glm-5.3-flash";
-
-/// Chat completions, as OpenRouter speaks them.
-pub const ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
+use crate::roles::RoleName;
 
 /// One exchange with a model.
 ///
@@ -80,23 +73,88 @@ pub struct OpenRouter {
 }
 
 impl OpenRouter {
-	/// Read the endpoint, key and model off the constants above.
-	pub fn from_env() -> Self {
-		Self::new(ENDPOINT, API_KEY, MODEL, None)
-	}
-
-	pub fn new(
-		endpoint: &str,
-		api_key: &str,
-		model: &str,
-		effort: Option<String>,
-	) -> Self {
+	/// One model, as the configuration describes it.
+	pub fn from_spec(spec: &ModelSpec) -> Self {
 		OpenRouter {
 			client: reqwest::Client::new(),
-			endpoint: endpoint.to_string(),
-			api_key: api_key.to_string(),
-			model: model.to_string(),
-			effort,
+			endpoint: spec.endpoint.clone(),
+			api_key: spec.api_key.clone(),
+			model: spec.model.clone(),
+			effort: spec.effort.clone(),
+		}
+	}
+}
+
+/// What a call is for, which is how it finds its model.
+///
+/// A property of the Session making it, like [`crate::scheduler::Tier`] is a
+/// property of the caller. There is no variant for "whatever the default is":
+/// the fallback to `models.all` happens once, in the configuration, so nothing
+/// downstream has to know a default exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+	/// A Comms Session, talking to a human.
+	Comms,
+	/// A Worker on a Task of this Role.
+	Work(RoleName),
+	/// A review or an interrupt.
+	Metacognition,
+}
+
+/// Every model a swarm may talk to, one per [`Purpose`].
+///
+/// Built once at startup. Two purposes that name the same model share one
+/// adapter, and so one connection pool — resolving them separately would open a
+/// second pool to the same endpoint for no reason.
+pub struct Models {
+	comms: Arc<dyn Model>,
+	metacognition: Arc<dyn Model>,
+	/// Total over [`RoleName`]: filled from `VARIANTS`, so every Role has one.
+	work: HashMap<RoleName, Arc<dyn Model>>,
+}
+
+impl Models {
+	/// What the configuration says.
+	pub fn from_config(config: &Config) -> Models {
+		let mut built: HashMap<ModelSpec, Arc<dyn Model>> = HashMap::new();
+		let mut of = |spec: &ModelSpec| -> Arc<dyn Model> {
+			built
+				.entry(spec.clone())
+				.or_insert_with(|| Arc::new(OpenRouter::from_spec(spec)))
+				.clone()
+		};
+
+		Models {
+			comms: of(config.for_comms()),
+			metacognition: of(config.for_metacognition()),
+			work: <RoleName as strum::VariantArray>::VARIANTS
+				.iter()
+				.map(|role| (*role, of(config.for_role(*role))))
+				.collect(),
+		}
+	}
+
+	/// One model for everything. What a bench passes: a case that scripts the
+	/// answers is not asking which model would have given them.
+	pub fn uniform(model: Arc<dyn Model>) -> Models {
+		Models {
+			comms: model.clone(),
+			metacognition: model.clone(),
+			work: <RoleName as strum::VariantArray>::VARIANTS
+				.iter()
+				.map(|role| (*role, model.clone()))
+				.collect(),
+		}
+	}
+
+	/// The model this call goes to.
+	pub fn pick(&self, purpose: Purpose) -> &Arc<dyn Model> {
+		match purpose {
+			Purpose::Comms => &self.comms,
+			Purpose::Metacognition => &self.metacognition,
+			Purpose::Work(role) => {
+				self.work.get(&role).expect("every Role is built above")
+			},
 		}
 	}
 }

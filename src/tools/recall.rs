@@ -69,10 +69,9 @@ impl Tool for SearchLessons {
 		};
 		let corpus = crate::memory::lesson_corpus(lessons);
 
-		let embedder = crate::memory::OpenRouterEmbedder::from_env();
 		match crate::memory::rank(
 			&ctx.harness.store,
-			&embedder,
+			ctx.harness.embedder.as_ref(),
 			&query,
 			&corpus,
 			count,
@@ -117,10 +116,9 @@ impl Tool for SearchTasks {
 			})
 			.collect();
 
-		let embedder = crate::memory::OpenRouterEmbedder::from_env();
 		match crate::memory::rank(
 			&ctx.harness.store,
-			&embedder,
+			ctx.harness.embedder.as_ref(),
 			&query,
 			&corpus,
 			count,

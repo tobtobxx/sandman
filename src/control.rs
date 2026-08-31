@@ -13,12 +13,13 @@
 //! keeps it.
 //!
 //! A Unix domain socket with restrictive permissions, never a TCP port: this is a
-//! write path into a running swarm.
+//! write path into a running swarm. Where it lives is
+//! `[sandman].control_socket`.
 //!
-//! Defines: [`Request`], [`Response`], [`serve`], [`send`], [`socket_path`].
+//! Defines: [`Request`], [`Response`], [`serve`], [`send`].
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use strum::IntoDiscriminant;
@@ -86,18 +87,6 @@ pub struct TaskLine {
 	pub state: String,
 	pub not_before: Option<i64>,
 	pub created_at: i64,
-}
-
-/// Where the socket lives: `$SANDMAN_SOCKET`, else `$XDG_RUNTIME_DIR/sandman.sock`,
-/// else a path beside the database.
-pub fn socket_path() -> PathBuf {
-	if let Ok(path) = std::env::var("SANDMAN_SOCKET") {
-		return PathBuf::from(path);
-	}
-	if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-		return PathBuf::from(dir).join("sandman.sock");
-	}
-	PathBuf::from("sandman.sock")
 }
 
 /// Listen, and answer requests until the Harness stops.

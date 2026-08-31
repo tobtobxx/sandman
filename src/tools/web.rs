@@ -15,9 +15,6 @@ use crate::session::SessionCtx;
 
 use super::{Tool, ToolError};
 
-/// The SearXNG instance searches go to.
-pub const SEARX_ENDPOINT: &str = "https://searxh.tobtobxx.net/";
-
 /// Search the web. Returns titles, URLs and snippets.
 pub struct WebSearch;
 
@@ -53,14 +50,14 @@ impl Tool for WebSearch {
 	/// Reads `unresponsive_engines` off the response, so a rate limit can be
 	/// told apart from an empty web — the two look identical in the results and
 	/// mean opposite things to whoever reads them.
-	async fn call(&self, _ctx: &SessionCtx, args: serde_json::Value) -> String {
+	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String {
 		let query = match args.get("query").and_then(|v| v.as_str()) {
 			None => return ToolError::Missing { field: "query" }.to_string(),
 			Some(q) => q,
 		};
 
 		let response = match reqwest::Client::new()
-			.get(SEARX_ENDPOINT)
+			.get(&ctx.harness.config.tools.searxng_endpoint)
 			.query(&[("q", query), ("format", "json")])
 			.send()
 			.await

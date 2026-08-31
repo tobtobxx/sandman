@@ -14,12 +14,13 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use sandman::bench::script::ScriptedModel;
 use sandman::channels;
+use sandman::config::Config;
 use sandman::db::Backing;
 use sandman::domain::{Clock, SystemClock};
 use sandman::event::Events;
 use sandman::harness::{Drive, Harness};
-use sandman::memory::OpenRouterEmbedder;
-use sandman::model::Model;
+use sandman::memory::{Embedder, OpenRouterEmbedder};
+use sandman::model::{Model, Models};
 use sandman::scheduler::Scheduler;
 use sandman::store::Store;
 use sandman::tools::Registry;
@@ -27,8 +28,21 @@ use sandman::web::server::{serve, AppState};
 
 const PORT: u16 = 18_080;
 
+/// The shipped default, against a stubbed environment: this test needs a
+/// configuration of the real shape and has no opinion about what is in it, and
+/// reading the machine's would make it depend on whoever runs it.
+fn config() -> Arc<Config> {
+	Arc::new(
+		Config::parse_with(sandman::config::DEFAULT, &|_| {
+			Some("/nonexistent".to_string())
+		})
+		.expect("the shipped default parses"),
+	)
+}
+
 #[tokio::test]
 async fn watcher_streams_patches_after_say() {
+	let config = config();
 	let clock: Arc<dyn Clock> = Arc::new(SystemClock);
 	let now = clock.now();
 	let events = Arc::new(Events::new(1024));
@@ -37,11 +51,23 @@ async fn watcher_streams_patches_after_say() {
 	);
 	let model: Arc<dyn Model> =
 		Arc::new(ScriptedModel::new(vec![ScriptedModel::saying("ok")]));
-	let scheduler =
-		Arc::new(Scheduler::new(model, store.clone(), clock.clone()));
+	let scheduler = Arc::new(Scheduler::new(
+		Models::uniform(model),
+		store.clone(),
+		clock.clone(),
+	));
 	let tools = Arc::new(Registry::all(events.clone()));
-	let harness =
-		Harness::new(store.clone(), events.clone(), scheduler, tools, clock);
+	let embedder: Arc<dyn Embedder> =
+		Arc::new(OpenRouterEmbedder::from_spec(&config.embedding));
+	let harness = Harness::new(
+		store.clone(),
+		events.clone(),
+		scheduler,
+		tools,
+		clock,
+		embedder,
+		config,
+	);
 
 	tokio::spawn({
 		let harness = harness.clone();
@@ -51,13 +77,10 @@ async fn watcher_streams_patches_after_say() {
 	});
 
 	let channel = channels::web::attach(harness.clone()).await.unwrap();
-	let state = AppState {
-		harness: harness.clone(),
-		embedder: Arc::new(OpenRouterEmbedder::from_env()),
-		channel,
-	};
+	let state = AppState { harness: harness.clone(), channel: Some(channel) };
 	tokio::spawn(async move {
-		let _ = serve(state, PORT).await;
+		let _ =
+			serve(state, std::net::IpAddr::from([127, 0, 0, 1]), PORT).await;
 	});
 	// `serve` binds inside the spawned task; give it a moment before dialing.
 	tokio::time::sleep(Duration::from_millis(200)).await;

@@ -19,7 +19,7 @@
 //! where it goes, because there every tool call already has its result and a
 //! pushed message cannot split the two.
 //!
-//! Defines: [`SessionCtx`], [`Turn`], [`turn`].
+//! Defines: [`SessionCtx`], [`Turn`], [`turn`], [`tell`].
 
 use std::sync::Arc;
 
@@ -29,6 +29,7 @@ use crate::domain::{
 };
 use crate::event::Events;
 use crate::harness::Harness;
+use crate::model::Purpose;
 use crate::roles::{SchemaCtx, COMMS_SESSION_TOOLS};
 use crate::scheduler::{Scheduler, SchedulerError, Tier};
 use crate::store::Store;
@@ -68,15 +69,14 @@ pub enum Turn {
 	Cancelled,
 }
 
-/// How many messages may pass without any metacognition before an interrupt
-/// fires.
-///
-/// Counted from the last one of either kind. A review has just read the whole
-/// conversation and had its own chance at feedback, so an interrupt one message
-/// later would only spend money to repeat it. A Worker taking short turns is
-/// reviewed and never interrupted; a Comms Session — never reviewed — is
-/// interrupted on a plain message count.
-pub const INTERRUPT_EVERY: usize = 15;
+// How many messages may pass without any metacognition before an interrupt
+// fires is `[metacognition].interrupt_interval`.
+//
+// Counted from the last one of either kind. A review has just read the whole
+// conversation and had its own chance at feedback, so an interrupt one message
+// later would only spend money to repeat it. A Worker taking short turns is
+// reviewed and never interrupted; a Comms Session — never reviewed — is
+// interrupted on a plain message count.
 
 /// One turn.
 ///
@@ -106,7 +106,8 @@ pub async fn turn(ctx: &SessionCtx, tier: Tier) -> Turn {
 				.flatten()
 				.map(|r| r.after_message)
 				.unwrap_or(0);
-			if count.saturating_sub(after) >= INTERRUPT_EVERY {
+			let every = ctx.harness.config.metacognition.interrupt_interval;
+			if count.saturating_sub(after) >= every {
 				check_in(ctx).await;
 			}
 		};
@@ -121,13 +122,15 @@ pub async fn turn(ctx: &SessionCtx, tier: Tier) -> Turn {
 			);
 		};
 
-		// Collect tool schemas
-		let tool_names = match &session.kind {
+		// Collect tool schemas, and say what this Session's calls are for.
+		// One match, so a Session cannot hold one shape's tools and be
+		// answered by the other shape's model.
+		let (tool_names, purpose) = match &session.kind {
 			crate::domain::SessionKind::Worker { role, .. } => {
-				crate::roles::tools_for(*role)
+				(crate::roles::tools_for(*role), Purpose::Work(*role))
 			},
 			crate::domain::SessionKind::Comms { .. } => {
-				&COMMS_SESSION_TOOLS[..]
+				(&COMMS_SESSION_TOOLS[..], Purpose::Comms)
 			},
 		};
 		let schema_ctx =
@@ -137,7 +140,8 @@ pub async fn turn(ctx: &SessionCtx, tier: Tier) -> Turn {
 		// Schedule request
 		let _ = ctx.store.set_status(ctx.id, SessionStatus::Thinking);
 		let request = CallRequest { messages, tools };
-		let outcome = ctx.scheduler.request(ctx.id, request, tier).await;
+		let outcome =
+			ctx.scheduler.request(ctx.id, request, tier, purpose).await;
 
 		// Process outcome
 		let completion = match outcome {

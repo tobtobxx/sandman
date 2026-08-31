@@ -92,8 +92,9 @@ pub async fn interrupt(ctx: &SessionCtx) -> Nudge {
 /// message.
 ///
 /// The call goes through the scheduler at [`crate::scheduler::Tier::Metacognition`]
-/// and is recorded against the Session it judges, so its cost lands where the
-/// work is.
+/// and [`crate::model::Purpose::Metacognition`] — so a Session may be judged by a
+/// model other than the one it runs on — and is recorded against the Session it
+/// judges, so its cost lands where the work is.
 ///
 /// Three ways it ends, and each writes a different record:
 ///
@@ -131,7 +132,12 @@ async fn metacognise(
 
 	match ctx
 		.scheduler
-		.request(ctx.id, request, Tier::Metacognition)
+		.request(
+			ctx.id,
+			request,
+			Tier::Metacognition,
+			crate::model::Purpose::Metacognition,
+		)
 		.await
 	{
 		Ok((call, completion)) => {

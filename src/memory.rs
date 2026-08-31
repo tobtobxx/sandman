@@ -24,13 +24,7 @@
 
 use async_trait::async_trait;
 
-/// Long inputs cost more and embed worse — a vector of a whole page is a vector
-/// of nothing in particular. Briefs and lessons are shorter than this in
-/// practice; the cap is here so one runaway Brief cannot fail a whole batch.
-pub const MAX_INPUT_CHARS: usize = 6_000;
-
-pub const EMBED_MODEL: &str = "liquid/lfm-2.5-embedding-350m:free";
-pub const EMBED_ENDPOINT: &str = "https://openrouter.ai/api/v1/embeddings";
+use crate::config::Embedding;
 
 /// Text to vectors.
 #[async_trait]
@@ -38,6 +32,11 @@ pub trait Embedder: Send + Sync {
 	/// The model these vectors come from. Cached vectors are keyed on it, so
 	/// changing the model does not silently mix two vector spaces.
 	fn model(&self) -> &str;
+
+	/// How much of one text is embedded. Long inputs cost more and embed worse —
+	/// a vector of a whole page is a vector of nothing in particular — and the
+	/// cap is here so one runaway Brief cannot fail a whole batch.
+	fn max_input_chars(&self) -> usize;
 
 	/// Embed a batch, order preserved.
 	async fn embed(
@@ -61,6 +60,7 @@ pub struct OpenRouterEmbedder {
 	endpoint: String,
 	api_key: String,
 	model: String,
+	max_input_chars: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -74,19 +74,14 @@ pub enum EmbedError {
 }
 
 impl OpenRouterEmbedder {
-	/// Read the endpoint, key and model off the constants above and
-	/// [`crate::model::API_KEY`]. The same prototype key `OpenRouter` uses —
-	/// configurability comes later.
-	pub fn from_env() -> Self {
-		Self::new(EMBED_ENDPOINT, crate::model::API_KEY, EMBED_MODEL)
-	}
-
-	pub fn new(endpoint: &str, api_key: &str, model: &str) -> Self {
+	/// The embedding service, as the configuration describes it.
+	pub fn from_spec(spec: &Embedding) -> Self {
 		OpenRouterEmbedder {
 			client: reqwest::Client::new(),
-			endpoint: endpoint.to_string(),
-			api_key: api_key.to_string(),
-			model: model.to_string(),
+			endpoint: spec.endpoint.clone(),
+			api_key: spec.api_key.clone(),
+			model: spec.model.clone(),
+			max_input_chars: spec.max_input_chars,
 		}
 	}
 }
@@ -95,6 +90,10 @@ impl OpenRouterEmbedder {
 impl Embedder for OpenRouterEmbedder {
 	fn model(&self) -> &str {
 		&self.model
+	}
+
+	fn max_input_chars(&self) -> usize {
+		self.max_input_chars
 	}
 
 	async fn embed(
@@ -175,10 +174,10 @@ pub fn lesson_corpus(
 		.collect()
 }
 
-/// Cut text down to [`MAX_INPUT_CHARS`], so one runaway Brief cannot fail a
-/// whole batch.
-fn truncated(text: &str) -> String {
-	text.chars().take(MAX_INPUT_CHARS).collect()
+/// Cut text down to what this embedder takes, so one runaway Brief cannot fail
+/// a whole batch.
+fn truncated(text: &str, cap: usize) -> String {
+	text.chars().take(cap).collect()
 }
 
 /// Rank a corpus against a query, best first.
@@ -194,6 +193,7 @@ pub async fn rank<T: Clone>(
 	count: usize,
 ) -> Result<Vec<crate::domain::Hit<T>>, EmbedError> {
 	let model = embedder.model();
+	let cap = embedder.max_input_chars();
 	let vector_of = |key: &str| -> Result<Option<Vec<f32>>, EmbedError> {
 		store
 			.vector(key, model)
@@ -209,11 +209,11 @@ pub async fn rank<T: Clone>(
 			None => {
 				vectors.push(None);
 				missing_idx.push(i);
-				batch.push(truncated(text));
+				batch.push(truncated(text, cap));
 			},
 		}
 	}
-	batch.push(truncated(query));
+	batch.push(truncated(query, cap));
 
 	let mut embedded = embedder.embed(&batch).await?;
 	let query_vector = embedded.pop().expect("the query was just appended");

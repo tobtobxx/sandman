@@ -7,11 +7,11 @@
 //! carries *the Brief that was wanted* — that it kept the greeting, kept the
 //! delay, and added nothing — is a judgement.
 //!
-//! A grader runs against [`crate::model::GRADER_MODEL`], which is stronger than
-//! the one the swarm uses: a judge no better than what it judges is not a judge.
-//! It is bench machinery and not part of the swarm: the call goes straight to
-//! the model, not through the scheduler, and what it costs is reported
-//! separately and never counts as Spend.
+//! A grader runs against `[bench].grader`, which should be stronger than the
+//! one the swarm uses: a judge no better than what it judges is not a judge. It
+//! is bench machinery and not part of the swarm: the call goes straight to the
+//! model, not through the scheduler and not through [`crate::model::Models`],
+//! and what it costs is reported separately and never counts as Spend.
 //!
 //! Graders run only after every goal check has passed. There is nothing to judge
 //! about a run that already failed on something countable.
@@ -21,8 +21,9 @@
 //!
 //! Defines: [`Grader`], [`GraderOutcome`], [`Verdict`], [`run`], [`default_judge`].
 
+use crate::config::ModelSpec;
 use crate::domain::{CallRequest, Cost, Message, Reply};
-use crate::model::{Model, OpenRouter, API_KEY, ENDPOINT, GRADER_MODEL};
+use crate::model::{Model, OpenRouter};
 
 /// What a grader is told it is doing.
 pub const GRADER_SYSTEM: &str = "\
@@ -65,16 +66,13 @@ pub struct GraderOutcome {
 /// error.
 pub async fn run(
 	grader: &Grader,
+	spec: &ModelSpec,
 ) -> Result<GraderOutcome, crate::model::ModelError> {
-	// Unlike the swarm's own model, `GRADER_MODEL` refuses to have reasoning
-	// disabled outright (HTTP 400: "Reasoning is mandatory for this endpoint");
-	// asking for the least of it is the equivalent for a model that insists.
-	let model = OpenRouter::new(
-		ENDPOINT,
-		API_KEY,
-		GRADER_MODEL,
-		Some("low".to_string()),
-	);
+	// How much the grader may think is the configuration's to say, and one
+	// grader model refuses to have reasoning disabled outright (HTTP 400:
+	// "Reasoning is mandatory for this endpoint") where the swarm's own is
+	// happy without it. That is why `effort` is per model and not per swarm.
+	let model = OpenRouter::from_spec(spec);
 	let request = CallRequest {
 		messages: vec![
 			Message::System { content: GRADER_SYSTEM.to_string() },

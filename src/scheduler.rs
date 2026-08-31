@@ -18,7 +18,8 @@
 //!
 //! Priority is a property of the caller, not of the call. A Comms Session passes
 //! [`Tier::Comms`], a Worker passes its Task's tier, metacognition passes
-//! [`Tier::Metacognition`].
+//! [`Tier::Metacognition`]. So is [`crate::model::Purpose`], which travels
+//! beside it and says which model the call goes to.
 //!
 //! The scheduler decides *when*; the [`crate::model::Model`] seam decides *how*.
 //!
@@ -30,7 +31,7 @@ use crate::domain::{
 	CallId, CallRequest, CallStatus, Clock, Completion, NewCall, SessionId,
 	TaskPriority, Usage,
 };
-use crate::model::{Model, ModelError};
+use crate::model::{ModelError, Models, Purpose};
 use crate::store::Store;
 
 /// Where a call waits. Lower runs first, and the derived ordering is the
@@ -78,9 +79,9 @@ impl From<TaskPriority> for Tier {
 	}
 }
 
-/// The one queue in front of the model.
+/// The one queue in front of the models.
 pub struct Scheduler {
-	model: Arc<dyn Model>,
+	models: Models,
 	store: Arc<Store>,
 	clock: Arc<dyn Clock>,
 	inner: tokio::sync::Mutex<Inner>,
@@ -127,12 +128,12 @@ pub enum SchedulerError {
 
 impl Scheduler {
 	pub fn new(
-		model: Arc<dyn Model>,
+		models: Models,
 		store: Arc<Store>,
 		clock: Arc<dyn Clock>,
 	) -> Self {
 		Scheduler {
-			model,
+			models,
 			store,
 			clock,
 			inner: tokio::sync::Mutex::new(Inner {
@@ -159,12 +160,14 @@ impl Scheduler {
 		session: SessionId,
 		request: CallRequest,
 		tier: Tier,
+		purpose: Purpose,
 	) -> Result<(CallId, Completion), SchedulerError> {
+		let model = self.models.pick(purpose);
 		let id = self.store.queue_call(
 			NewCall {
 				session,
 				tier,
-				model: self.model.name().to_string(),
+				model: model.name().to_string(),
 				request: request.clone(),
 			},
 			self.clock.now(),
@@ -176,7 +179,7 @@ impl Scheduler {
 		self.store
 			.set_call_status(id, CallStatus::InFlight { sent_at })?;
 
-		let outcome = self.model.send(&request).await;
+		let outcome = model.send(&request).await;
 		let finished_at = self.clock.now();
 
 		self.release().await;

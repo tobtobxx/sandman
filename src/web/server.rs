@@ -33,8 +33,10 @@ use super::wire::Frame;
 #[derive(Clone)]
 pub struct AppState {
 	pub harness: Arc<Harness>,
-	pub embedder: Arc<dyn crate::memory::Embedder>,
-	pub channel: crate::domain::ChannelId,
+	/// The browser's own Channel, if it has one. `None` when
+	/// `[channels].web` is off: the UI is still served and still watches
+	/// everything, and only its chat window has nowhere to send.
+	pub channel: Option<crate::domain::ChannelId>,
 }
 
 /// How many hits a Lessons search returns.
@@ -49,13 +51,17 @@ enum ClientMessage {
 	Find { query: String },
 }
 
-/// Start the Watcher UI on [`super::PORT`].
+/// Start the Watcher UI where `[sandman]` says.
 ///
 /// Serves `web/` as static files, and upgrades `/ws` to a socket that gets one
 /// `init` and then a patch per Event. `/chat` is the same page as `/` — one
 /// `index.html`, which picks its layout from the path — so a chat window can
 /// be its own link without a second page to keep in step.
-pub async fn serve(state: AppState, port: u16) -> std::io::Result<()> {
+pub async fn serve(
+	state: AppState,
+	address: std::net::IpAddr,
+	port: u16,
+) -> std::io::Result<()> {
 	let index = tower_http::services::ServeFile::new("web/index.html");
 	let app = Router::new()
 		.route("/ws", get(ws_handler))
@@ -63,7 +69,7 @@ pub async fn serve(state: AppState, port: u16) -> std::io::Result<()> {
 		.fallback_service(tower_http::services::ServeDir::new("web"))
 		.with_state(state);
 
-	let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+	let listener = tokio::net::TcpListener::bind((address, port)).await?;
 	axum::serve(listener, app).await
 }
 
@@ -150,10 +156,17 @@ async fn send(
 }
 
 /// A message the human typed in the browser.
+///
+/// Dropped when there is no Channel to put it on. The browser already shows
+/// that window as turned off, so this is the case of a socket that was open
+/// before anyone read the configuration, not something a human is waiting on.
 async fn on_message(state: &AppState, text: &str) {
+	let Some(channel) = state.channel else {
+		return;
+	};
 	state
 		.harness
-		.receive(state.channel, text, IncomingFrom::Human)
+		.receive(channel, text, IncomingFrom::Human)
 		.await;
 }
 
@@ -165,7 +178,7 @@ async fn on_search(state: &AppState, query: &str) -> Frame {
 			let corpus = crate::memory::lesson_corpus(lessons);
 			crate::memory::rank(
 				&state.harness.store,
-				state.embedder.as_ref(),
+				state.harness.embedder.as_ref(),
 				query,
 				&corpus,
 				FIND_LIMIT,

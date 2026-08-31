@@ -24,6 +24,7 @@
 use std::sync::Arc;
 
 use super::{CheckResult, Interceptor, Trip};
+use crate::config::Config;
 use crate::db::Backing;
 use crate::domain::{
 	CallId, CallStatus, ChannelId, ChannelKind, Clock, Duration, FixedClock,
@@ -32,8 +33,8 @@ use crate::domain::{
 };
 use crate::event::Events;
 use crate::harness::{Drive, Harness};
-use crate::log::{Logger, Verbosity};
-use crate::model::{Model, OpenRouter};
+use crate::log::{Echo, Logger, Verbosity};
+use crate::model::{Model, Models};
 use crate::scheduler::Scheduler;
 use crate::store::Store;
 use crate::tools::{Registry, ToolRunner};
@@ -77,6 +78,10 @@ pub struct RigBuilder {
 	channels: Vec<crate::domain::ChannelKind>,
 	timeout: Option<Duration>,
 	log: crate::log::Verbosity,
+	/// The human's own `config.toml` unless a case says otherwise. A case that
+	/// asks for the real model is asking for the real setup, and which model
+	/// that is has one answer per machine, not one per case.
+	config: Option<Arc<Config>>,
 }
 
 /// One Sandman under test.
@@ -84,6 +89,9 @@ pub struct Rig {
 	pub harness: Arc<Harness>,
 	pub store: Arc<Store>,
 	pub interceptor: Arc<super::Interceptor>,
+	/// What this Rig was built out of. The Harness holds it too; a grader is
+	/// not the Harness's and reads it from here.
+	pub config: Arc<Config>,
 	/// The Channel a case's script speaks on, if it opened one.
 	pub channel: Option<ChannelId>,
 	events: tokio::sync::broadcast::Receiver<crate::event::Event>,
@@ -145,6 +153,7 @@ impl Default for RigBuilder {
 			channels: Vec::new(),
 			timeout: None,
 			log: Verbosity::Terse,
+			config: None,
 		}
 	}
 }
@@ -152,6 +161,12 @@ impl Default for RigBuilder {
 impl RigBuilder {
 	pub fn model(mut self, choice: ModelChoice) -> Self {
 		self.model = choice;
+		self
+	}
+
+	/// Run against a configuration the case wrote, instead of the machine's.
+	pub fn config(mut self, config: Arc<Config>) -> Self {
+		self.config = Some(config);
 		self
 	}
 
@@ -192,6 +207,17 @@ impl RigBuilder {
 			detail: e.to_string(),
 		};
 
+		let config = match self.config {
+			Some(config) => config,
+			None => {
+				let read = Config::path(None).and_then(|p| Config::read(&p));
+				Arc::new(read.map_err(|e| Trip::Tripwire {
+					name: "setup".to_string(),
+					detail: e.to_string(),
+				})?)
+			},
+		};
+
 		let clock: Arc<dyn Clock> = match self.clock {
 			ClockChoice::Real => Arc::new(SystemClock),
 			ClockChoice::Fixed(at) => Arc::new(FixedClock(at)),
@@ -204,8 +230,9 @@ impl RigBuilder {
 
 		let dir = tempfile::TempDir::new().map_err(setup)?;
 		let log_path = dir.path().join("sandman.log");
-		let logger =
-			Arc::new(Logger::create(&log_path, self.log).map_err(setup)?);
+		let logger = Arc::new(
+			Logger::create(&log_path, self.log, Echo::Quiet).map_err(setup)?,
+		);
 		let mut drivers = Vec::new();
 		{
 			let logger = logger.clone();
@@ -215,14 +242,23 @@ impl RigBuilder {
 			));
 		}
 
-		let model: Arc<dyn Model> = match self.model {
-			ModelChoice::Real => Arc::new(OpenRouter::from_env()),
-			ModelChoice::Scripted(replies) => {
-				Arc::new(super::script::ScriptedModel::new(replies))
+		// A scripted or supplied model answers every Purpose: a case that wrote
+		// the replies is not asking which model would have given them.
+		let (models, model_name) = match self.model {
+			ModelChoice::Real => {
+				(Models::from_config(&config), config.for_all().model.clone())
 			},
-			ModelChoice::Custom(model) => model,
+			ModelChoice::Scripted(replies) => {
+				let model: Arc<dyn Model> =
+					Arc::new(super::script::ScriptedModel::new(replies));
+				let name = model.name().to_string();
+				(Models::uniform(model), name)
+			},
+			ModelChoice::Custom(model) => {
+				let name = model.name().to_string();
+				(Models::uniform(model), name)
+			},
 		};
-		let model_name = model.name().to_string();
 
 		let store = Arc::new(
 			Store::open(Backing::Memory, events.clone(), &model_name, now)
@@ -230,15 +266,25 @@ impl RigBuilder {
 		);
 
 		let scheduler =
-			Arc::new(Scheduler::new(model, store.clone(), clock.clone()));
+			Arc::new(Scheduler::new(models, store.clone(), clock.clone()));
 
 		let registry: Arc<dyn ToolRunner> =
 			Arc::new(Registry::all(events.clone()));
 		let interceptor = Arc::new(Interceptor::new(registry, self.tools));
 		let tools: Arc<dyn ToolRunner> = interceptor.clone();
 
-		let harness =
-			Harness::new(store.clone(), events, scheduler, tools, clock);
+		let embedder: Arc<dyn crate::memory::Embedder> = Arc::new(
+			crate::memory::OpenRouterEmbedder::from_spec(&config.embedding),
+		);
+		let harness = Harness::new(
+			store.clone(),
+			events,
+			scheduler,
+			tools,
+			clock,
+			embedder,
+			config.clone(),
+		);
 
 		let mut channel = None;
 		for kind in self.channels {
@@ -269,6 +315,7 @@ impl RigBuilder {
 			harness,
 			store,
 			interceptor,
+			config,
 			channel,
 			events: subscription,
 			tripwires: Vec::new(),

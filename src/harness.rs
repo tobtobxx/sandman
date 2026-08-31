@@ -74,7 +74,12 @@ pub struct Harness {
 	pub scheduler: Arc<Scheduler>,
 	pub tools: Arc<dyn ToolRunner>,
 	pub clock: Arc<dyn Clock>,
+	pub embedder: Arc<dyn crate::memory::Embedder>,
 	pub waiters: Arc<Waiters>,
+	/// What this Sandman was built out of. Here because tools reach it —
+	/// `search_lessons` and `web_search` both need something a human chose —
+	/// and a Session reaches it through the Harness like everything else.
+	pub config: Arc<crate::config::Config>,
 
 	/// The Comms Session on each open Channel, and its transport.
 	comms: Mutex<Vec<(ChannelId, Arc<dyn crate::comms::Channel>)>>,
@@ -98,6 +103,8 @@ impl Harness {
 		scheduler: Arc<Scheduler>,
 		tools: Arc<dyn ToolRunner>,
 		clock: Arc<dyn Clock>,
+		embedder: Arc<dyn crate::memory::Embedder>,
+		config: Arc<crate::config::Config>,
 	) -> Arc<Self> {
 		Arc::new(Harness {
 			store,
@@ -105,6 +112,8 @@ impl Harness {
 			scheduler,
 			tools,
 			clock,
+			embedder,
+			config,
 			waiters: Arc::new(Waiters::new()),
 			comms: Mutex::new(Vec::new()),
 			driving: Mutex::new(HashSet::new()),

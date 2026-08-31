@@ -24,8 +24,15 @@
 //!     What a running Sandman has spent, over the control socket.
 //! ```
 //!
-//! Common flags: `--db <path>` (default `sandman.sqlite`), `--log <path>`
-//! (default `sandman.log`), `--socket <path>`, `--verbose`, `--break-lock`.
+//! Common flags: `--config <path>`, `--verbose`, `--break-lock`.
+//!
+//! Everything else is `config.toml` — see [`sandman::config`]. Where the
+//! database, the trace and the socket live is in there and nowhere else; a flag
+//! for each would be a second place to say it and a second place to get it
+//! wrong. Naming another configuration says all three at once. There is no
+//! fallback under the configuration either: a Sandman that finds none writes
+//! the default one and stops, because there is nothing sensible to run before a
+//! human has read it.
 //!
 //! One Sandman per database. `sandman` and `sandman run` each open their own,
 //! and the second to start on a database is refused rather than allowed to
@@ -45,6 +52,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use sandman::config::Config;
 use sandman::domain::{
 	Brief, Creator, Duration, NewTask, Schedule, TaskPriority, TaskState, Title,
 };
@@ -78,6 +86,10 @@ struct TaskArgs {
 }
 
 /// Where the state, the trace and the socket live, and how to open the first.
+///
+/// All three come from `config.toml` and none has a flag. Reaching a second
+/// Sandman is `--config`, which names all three together and cannot name one
+/// Sandman's socket beside another's database.
 struct Paths {
 	db: std::path::PathBuf,
 	log: std::path::PathBuf,
@@ -98,15 +110,9 @@ struct Cli {
 	#[command(subcommand)]
 	command: Option<Cmd>,
 
-	/// Where the database lives.
-	#[arg(long, global = true, default_value = "sandman.sqlite")]
-	db: PathBuf,
-	/// Where the trace goes.
-	#[arg(long, global = true, default_value = "sandman.log")]
-	log: PathBuf,
-	/// Where the control socket lives. Defaults per [`sandman::control::socket_path`].
+	/// Which configuration to read. Defaults per [`Config::path`].
 	#[arg(long, global = true)]
-	socket: Option<PathBuf>,
+	config: Option<PathBuf>,
 	/// Write every body in the trace out whole, instead of eliding it.
 	#[arg(long, global = true)]
 	verbose: bool,
@@ -168,9 +174,13 @@ impl From<TaskFlags> for TaskArgs {
 	}
 }
 
+/// Read the argv and the configuration it names, and settle what beats what.
+///
+/// The configuration is read for every command, including the three that only
+/// talk to a socket: where that socket is, is in it.
 fn parse(
 	argv: &[String],
-) -> Result<(Command, Paths, sandman::log::Verbosity), String> {
+) -> Result<(Command, Paths, Arc<Config>, sandman::log::Verbosity), String> {
 	use clap::Parser;
 
 	// `Error::exit` prints to the right stream (stdout for `--help` and
@@ -178,10 +188,13 @@ fn parse(
 	// bad or absent argv never reaches the rest of this function.
 	let cli = Cli::try_parse_from(argv).unwrap_or_else(|e| e.exit());
 
+	let path = Config::path(cli.config).map_err(|e| e.to_string())?;
+	let config = Config::load(&path).map_err(|e| e.to_string())?;
+
 	let paths = Paths {
-		db: cli.db,
-		log: cli.log,
-		socket: cli.socket.unwrap_or_else(sandman::control::socket_path),
+		db: config.sandman.sqlite_path.clone(),
+		log: config.sandman.log_path.clone(),
+		socket: config.sandman.control_socket.clone(),
 		break_lock: cli.break_lock,
 	};
 	let verbosity = if cli.verbose {
@@ -199,20 +212,22 @@ fn parse(
 		Some(Cmd::Spend) => Command::Spend,
 	};
 
-	Ok((command, paths, verbosity))
+	Ok((command, paths, Arc::new(config), verbosity))
 }
 
-/// Build a whole Sandman: database, Event stream, logger, model, tools,
-/// scheduler, Harness.
+/// Build a whole Sandman: database, Event stream, logger, models, embedder,
+/// tools, scheduler, Harness.
 async fn assemble(
 	paths: &Paths,
+	config: Arc<Config>,
 	verbosity: sandman::log::Verbosity,
 ) -> Result<Arc<Harness>, String> {
 	use sandman::db::Backing;
 	use sandman::domain::{Clock, SystemClock};
 	use sandman::event::Events;
-	use sandman::log::Logger;
-	use sandman::model::{Model, OpenRouter, MODEL};
+	use sandman::log::{Echo, Logger};
+	use sandman::memory::{Embedder, OpenRouterEmbedder};
+	use sandman::model::Models;
 	use sandman::scheduler::Scheduler;
 	use sandman::store::Store;
 	use sandman::tools::Registry;
@@ -222,8 +237,16 @@ async fn assemble(
 
 	let events = Arc::new(Events::new(1024));
 
+	// With no terminal Channel nothing else is using stdout, and a trace
+	// nobody can see is worse than one that scrolls past.
+	let echo = if config.channels.stdio {
+		Echo::Quiet
+	} else {
+		Echo::Stdout
+	};
+	make_room_for(&paths.log)?;
 	let logger =
-		Arc::new(Logger::create(&paths.log, verbosity).map_err(|e| {
+		Arc::new(Logger::create(&paths.log, verbosity, echo).map_err(|e| {
 			format!("could not open {}: {e}", paths.log.display())
 		})?);
 	{
@@ -237,11 +260,13 @@ async fn assemble(
 			format!("could not clear the lock on {}: {e}", paths.db.display())
 		})?;
 	}
+	let model_name = config.for_all().model.clone();
+	make_room_for(&paths.db)?;
 	let store = Arc::new(
 		Store::open(
 			Backing::File(paths.db.clone()),
 			events.clone(),
-			MODEL,
+			&model_name,
 			now,
 		)
 		.map_err(|e| format!("could not open {}: {e}", paths.db.display()))?,
@@ -249,7 +274,7 @@ async fn assemble(
 	logger.note(
 		"sandman",
 		&sandman::log::banner(&format!(
-			"started, model {MODEL}, db {}",
+			"started, model {model_name}, db {}",
 			paths.db.display()
 		)),
 	);
@@ -257,37 +282,71 @@ async fn assemble(
 		logger.note("db", &format!("migrated schema v{from} to v{to}"));
 	}
 
-	let model: Arc<dyn Model> = Arc::new(OpenRouter::from_env());
-	let scheduler =
-		Arc::new(Scheduler::new(model, store.clone(), clock.clone()));
+	let scheduler = Arc::new(Scheduler::new(
+		Models::from_config(&config),
+		store.clone(),
+		clock.clone(),
+	));
 	let tools = Arc::new(Registry::all(events.clone()));
+	let embedder: Arc<dyn Embedder> =
+		Arc::new(OpenRouterEmbedder::from_spec(&config.embedding));
 
-	Ok(Harness::new(store, events, scheduler, tools, clock))
+	Ok(Harness::new(
+		store, events, scheduler, tools, clock, embedder, config,
+	))
 }
 
-/// Two Channels, a Watcher, and a control socket, running until the human
-/// leaves.
+/// Make the directory a configured path lives in, so naming somewhere that does
+/// not exist yet is a configuration choice rather than a failure to start.
+fn make_room_for(path: &std::path::Path) -> Result<(), String> {
+	let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
+	else {
+		return Ok(());
+	};
+	std::fs::create_dir_all(parent)
+		.map_err(|e| format!("could not make {}: {e}", parent.display()))
+}
+
+/// The Channels the configuration opens, a Watcher, and a control socket,
+/// running until the human leaves.
+///
+/// The Watcher is served whether or not its chat window is a Channel: watching
+/// is not talking, and a Sandman with no Channel at all is still worth
+/// following. It does mean `[channels].stdio = false` leaves no `/quit` — a
+/// signal is then the way out, which is what it already is for `sandman run`.
 async fn interactive(
 	paths: Paths,
+	config: Arc<Config>,
 	verbosity: sandman::log::Verbosity,
 ) -> Result<(), String> {
-	let harness = assemble(&paths, verbosity).await?;
+	let harness = assemble(&paths, config.clone(), verbosity).await?;
 
-	sandman::channels::stdio::attach(harness.clone())
-		.await
-		.map_err(|e| format!("could not open the terminal: {e}"))?;
+	if config.channels.stdio {
+		sandman::channels::stdio::attach(harness.clone())
+			.await
+			.map_err(|e| format!("could not open the terminal: {e}"))?;
+	}
 
-	let web_channel = sandman::channels::web::attach(harness.clone())
-		.await
-		.map_err(|e| format!("could not open the browser channel: {e}"))?;
+	let web_channel = if config.channels.web {
+		Some(
+			sandman::channels::web::attach(harness.clone())
+				.await
+				.map_err(|e| {
+					format!("could not open the browser channel: {e}")
+				})?,
+		)
+	} else {
+		None
+	};
 	let web_state = sandman::web::server::AppState {
 		harness: harness.clone(),
-		embedder: Arc::new(sandman::memory::OpenRouterEmbedder::from_env()),
 		channel: web_channel,
 	};
+	let address = config.sandman.webui_address;
+	let port = config.sandman.webui_port;
 	tokio::spawn(async move {
 		if let Err(e) =
-			sandman::web::server::serve(web_state, sandman::web::PORT).await
+			sandman::web::server::serve(web_state, address, port).await
 		{
 			eprintln!("web UI stopped: {e}");
 		}
@@ -322,9 +381,10 @@ async fn interactive(
 async fn one_shot(
 	args: TaskArgs,
 	paths: Paths,
+	config: Arc<Config>,
 	verbosity: sandman::log::Verbosity,
 ) -> Result<(), String> {
-	let harness = assemble(&paths, verbosity).await?;
+	let harness = assemble(&paths, config, verbosity).await?;
 
 	let role = args
 		.role
@@ -474,7 +534,7 @@ async fn spend(paths: Paths) -> Result<(), String> {
 #[tokio::main]
 async fn main() {
 	let argv: Vec<String> = std::env::args().collect();
-	let (command, paths, verbosity) = match parse(&argv) {
+	let (command, paths, config, verbosity) = match parse(&argv) {
 		Ok(parsed) => parsed,
 		Err(message) => {
 			eprintln!("{message}");
@@ -483,8 +543,8 @@ async fn main() {
 	};
 
 	let result = match command {
-		Command::Interactive => interactive(paths, verbosity).await,
-		Command::Run(args) => one_shot(args, paths, verbosity).await,
+		Command::Interactive => interactive(paths, config, verbosity).await,
+		Command::Run(args) => one_shot(args, paths, config, verbosity).await,
 		Command::Task(args) => into_running(args, paths).await,
 		Command::List { state, count } => list(state, count, paths).await,
 		Command::Spend => spend(paths).await,

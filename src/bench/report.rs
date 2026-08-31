@@ -80,7 +80,7 @@ pub async fn assemble(
 	let mut grader_cost = Cost(0);
 	if checks_passed {
 		for grader in &graders {
-			match super::grader::run(grader).await {
+			match super::grader::run(grader, rig.config.for_grader()).await {
 				Ok(outcome) => {
 					grader_cost = grader_cost + outcome.cost;
 					grader_outcomes.push(outcome);

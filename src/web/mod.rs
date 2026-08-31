@@ -17,6 +17,3 @@
 
 pub mod server;
 pub mod wire;
-
-/// Where the Watcher listens.
-pub const PORT: u16 = 8080;

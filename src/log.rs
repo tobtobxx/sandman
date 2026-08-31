@@ -11,9 +11,11 @@
 //! reprinted them would bury the sequence it exists to show. `--verbose`
 //! restores the bodies for a session where that is what is wanted.
 //!
-//! The terminal shows only the conversation, so the two never interleave.
+//! The terminal shows only the conversation, so the two never interleave —
+//! unless the terminal is not a Channel at all, in which case [`Echo::Stdout`]
+//! puts the trace there too rather than leave it empty.
 //!
-//! Defines: [`Logger`], [`Verbosity`], [`banner`].
+//! Defines: [`Logger`], [`Verbosity`], [`Echo`], [`banner`].
 
 use std::io::Write;
 use std::path::Path;
@@ -33,6 +35,18 @@ pub enum Verbosity {
 	Verbose,
 }
 
+/// Whether the trace also goes to the terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Echo {
+	/// The log file alone. The terminal is the human's, and the conversation
+	/// is what belongs there.
+	#[default]
+	Quiet,
+	/// Stdout as well, because the terminal is not a Channel and nothing else
+	/// is using it.
+	Stdout,
+}
+
 /// Writes the trace.
 ///
 /// Takes the log's path rather than writing to the working directory, so several
@@ -41,17 +55,22 @@ pub enum Verbosity {
 pub struct Logger {
 	file: std::sync::Mutex<std::fs::File>,
 	verbosity: Verbosity,
+	echo: Echo,
 }
 
 impl Logger {
 	/// Open a log, truncating whatever was there.
-	pub fn create(path: &Path, verbosity: Verbosity) -> std::io::Result<Self> {
+	pub fn create(
+		path: &Path,
+		verbosity: Verbosity,
+		echo: Echo,
+	) -> std::io::Result<Self> {
 		let file = std::fs::OpenOptions::new()
 			.create(true)
 			.write(true)
 			.truncate(true)
 			.open(path)?;
-		Ok(Logger { file: std::sync::Mutex::new(file), verbosity })
+		Ok(Logger { file: std::sync::Mutex::new(file), verbosity, echo })
 	}
 
 	/// Follow an Event stream until it ends. Spawned once, at startup.
@@ -96,6 +115,11 @@ impl Logger {
 	fn append(&self, line: &str) {
 		let mut file = self.file.lock().unwrap();
 		let _ = writeln!(file, "{line}");
+		if self.echo == Echo::Stdout {
+			// Under the same lock as the file, so two Events cannot interleave
+			// on one line here while staying apart in the log.
+			println!("{line}");
+		}
 	}
 
 	/// One Event's detail, past the timestamp and category every line already
