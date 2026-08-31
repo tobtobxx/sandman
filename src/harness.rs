@@ -131,21 +131,20 @@ impl Harness {
 		self.store.create_task(new, now)
 	}
 
-	/// Record a Task's Result, hand it to whoever asked, release anyone blocked
-	/// on it, and re-arm it if it repeats.
+	/// Record a Task's Result and deliver it.
 	///
-	/// A repeating Task is never finished for good: completing it creates the
-	/// next occurrence — same Title, Brief, Role and Creator, so the same
-	/// Channel is subscribed again — anchored to the schedule rather than to
-	/// when this one ended, so a late run does not push the next one back.
+	/// Resolves waiters and re-arms if repeating. The next occurrence is
+	/// anchored to the schedule, not to completion time.
 	async fn complete_task(
 		&self,
 		id: TaskId,
 		result: TaskResult,
 	) -> Result<(), StoreError> {
+		// Complete task
 		let now = self.clock.now();
 		self.store.complete_task(id, result, now)?;
 
+		// Deliver answer and resolve waiters
 		let task = self
 			.store
 			.task(id)?
@@ -155,6 +154,7 @@ impl Harness {
 		self.deliver(id).await?;
 		self.waiters.resolve(id, &answer);
 
+		// Re-arm if repeating
 		if let Some(schedule) = task.schedule.next_occurrence() {
 			let next = NewTask {
 				title: task.title,
@@ -169,19 +169,15 @@ impl Harness {
 		Ok(())
 	}
 
-	/// Stop a Task, and the whole chain if it repeats.
+	/// Stop a Task and its chain if it repeats.
 	///
-	/// Cancelling one occurrence must stop every occurrence that shares the
-	/// schedule, or a running one would re-arm the next when it finished.
-	///
-	/// Nothing touches a running Task's Session directly: its loop reads the
-	/// cancelled state at its next decision point and ends without a Result. A
-	/// Session blocked in `await_result` is released here, because it would
-	/// otherwise never reach that check.
+	/// Cancels every pending or running occurrence. Running Sessions end
+	/// at their next check; blocked waiters are released here.
 	pub async fn cancel_task(
 		&self,
 		id: TaskId,
 	) -> Result<CancelOutcome, StoreError> {
+		// Check current state
 		let Some(task) = self.store.task(id)? else {
 			return Ok(CancelOutcome::NotFound);
 		};
@@ -197,13 +193,16 @@ impl Harness {
 		};
 		let running = running_session.is_some();
 
+		// Collect chain
 		let mut chain = self.store.chain_of(id)?;
 		chain.retain(|&t| t != id);
 		chain.insert(0, id);
 
+		// Cancel in store
 		let now = self.clock.now();
 		self.store.cancel_tasks(&chain, now)?;
 
+		// Resolve waiters
 		let notice = task.render_cancelled();
 		for &chained in &chain {
 			self.waiters.resolve(chained, &notice);
@@ -215,12 +214,9 @@ impl Harness {
 		Ok(CancelOutcome::Cancelled { ids: chain, running })
 	}
 
-	/// Hand a Task's answer to whoever asked for it.
+	/// Hand a Task's answer to its subscriber.
 	///
-	/// Only a Comms Session subscribes — a Worker waits for a child itself — so
-	/// this is the mailbox path alone. Nothing was registered when the
-	/// subscription was made and nothing fires early: delivery happens when the
-	/// Result exists.
+	/// Only Comms Sessions subscribe — Workers wait directly.
 	async fn deliver(&self, task: TaskId) -> Result<(), StoreError> {
 		let Some(task) = self.store.task(task)? else {
 			return Ok(());
@@ -291,14 +287,10 @@ impl Harness {
 
 	// --- Driving -----------------------------------------------------------
 
-	/// One step of starting.
+	/// Try to start one piece of work.
 	///
-	/// Only kicks off work that is not yet in motion; the Sessions themselves
-	/// keep running between steps. A Channel with mail is answered first — and at
-	/// the call level comms is the top tier anyway — then a Pending Task whose
-	/// time has come starts a Worker.
-	///
-	/// Returns whether it started anything, so a caller knows to look again.
+	/// Answers mail first, then starts the next pending Task. Returns
+	/// whether anything started.
 	pub async fn step(
 		self: &Arc<Self>,
 		drive: Drive,
@@ -307,6 +299,7 @@ impl Harness {
 			return Ok(false);
 		}
 
+		// Try comms with mail first
 		let channels: Vec<ChannelId> = self
 			.comms
 			.lock()
@@ -333,13 +326,12 @@ impl Harness {
 			return Ok(false);
 		}
 
+		// Try next pending Task
 		let now = self.clock.now();
 		let Some(task) = self.store.next_pending(now)? else {
 			return Ok(false);
 		};
 
-		// `new_worker_session` never reads `ctx.id`; the real id does not
-		// exist until the Session row it creates is written.
 		let ctx = self.ctx(SessionId(0));
 		let session = crate::worker::new_worker_session(&ctx, &task).await?;
 		self.store.start_task(task.id, session, now)?;
@@ -355,12 +347,14 @@ impl Harness {
 	pub async fn run(self: &Arc<Self>, drive: Drive) -> Result<(), StoreError> {
 		let mut events = self.events.subscribe();
 		while self.running.load(Ordering::SeqCst) {
+			// Start all that can start
 			while self.step(drive).await? {
 				if !self.running.load(Ordering::SeqCst) {
 					return Ok(());
 				}
 			}
 
+			// Wait for next wakeup
 			let now = self.clock.now();
 			let wait = self.store.next_due_in(now)?;
 			let sleep = tokio::time::sleep(match wait {
@@ -373,8 +367,7 @@ impl Harness {
 				event = events.recv() => self.forward_said(event),
 				_ = self.woken.notified() => {},
 			}
-			// Drain whatever else arrived without waiting again, so a burst
-			// of Events does not cost a re-check each.
+			// Drain remaining events
 			while let Ok(event) = events.try_recv() {
 				self.forward_said(Ok(event));
 			}
@@ -382,9 +375,7 @@ impl Harness {
 		Ok(())
 	}
 
-	/// If an Event says something to a human, hand it to that Channel's
-	/// transport. The Comms Session that wrote it does not know which
-	/// transport it sits on — see `comms.rs` — so this is where the two meet.
+	/// Forward human-visible utterances to their transport.
 	fn forward_said(
 		&self,
 		event: Result<Event, tokio::sync::broadcast::error::RecvError>,
@@ -406,9 +397,7 @@ impl Harness {
 
 	/// Run until nothing is left to do. What a one-shot run does.
 	///
-	/// A Session blocked in `await_result` counts as busy: it is suspended, not
-	/// done, and the child it waits on is still work. A Task waiting on its own
-	/// time is also still work, so this waits for it rather than returning.
+	/// Blocked and scheduled Tasks count as busy.
 	pub async fn run_until_idle(
 		self: &Arc<Self>,
 		drive: Drive,
@@ -434,12 +423,7 @@ impl Harness {
 		}
 	}
 
-	/// A Worker Session's own loop: take a Turn, handle what it earned, repeat
-	/// until the Session is done or aborted.
-	///
-	/// Many of these run at once; the scheduler, not this loop, decides whose
-	/// model call is in flight. A Turn that blocks in `await_result` suspends
-	/// inside the tool call, so this loop sees it as one long turn.
+	/// Drive a Worker until it completes or aborts.
 	async fn drive_worker(self: &Arc<Self>, session: SessionId, task: TaskId) {
 		let ctx = self.ctx(session);
 		loop {
@@ -490,18 +474,15 @@ impl Harness {
 	/// Stop starting new work. Loops already running finish their turn.
 	pub fn stop(&self) {
 		self.running.store(false, Ordering::SeqCst);
-		// `notify_one`, not `notify_waiters`: `run`'s select may not have
-		// reached its wait yet, and only `notify_one` leaves a permit for a
-		// waiter that has not registered yet.
+		// Wake one waiter - keeps permit if not yet registered
 		self.woken.notify_one();
 	}
 
-	/// Stop everything and make sure nothing can still spend: cancel every Task
-	/// that has not finished, then wait for the last in-flight model call to land
-	/// so its cost reaches the record.
+	/// Stop everything and wait for spend to settle.
 	pub async fn wind_down(self: &Arc<Self>, timeout: crate::domain::Duration) {
 		self.stop();
 
+		// Cancel remaining Tasks
 		if let Ok(tasks) = self.store.tasks_of_run(self.store.run()) {
 			let ids: Vec<TaskId> = tasks
 				.iter()
@@ -513,6 +494,7 @@ impl Harness {
 			}
 		}
 
+		// Wait for in-flight calls
 		let deadline = self.clock.now().plus(timeout);
 		loop {
 			let outstanding = self.scheduler.waiting().await > 0

@@ -161,25 +161,24 @@ pub struct ListFilter {
 }
 
 impl Store {
-	/// Open a Store, migrate the database, and start a new Run.
+	/// Open a Store and start a new Run.
 	///
-	/// Every Task, Session, call and lesson written afterwards belongs to that
-	/// Run. Spend is scoped to it; the Lessons and past Tasks are not.
-	///
-	/// A file-backed database is locked first, before it is so much as opened,
-	/// so a start that is refused neither creates nor migrates anything. The
-	/// lock is what [`Store::recover`] below stands on.
+	/// Takes the file lock first, then migrates. Everything written
+	/// afterwards belongs to this Run.
 	pub fn open(
 		backing: Backing,
 		events: Arc<Events>,
 		model: &str,
 		now: Timestamp,
 	) -> Result<Self, StoreError> {
+		// Take lock
 		let lock = match &backing {
 			Backing::File(path) => Some(crate::db::Lock::take(path)?),
 			Backing::Memory => None,
 		};
+		// Open and migrate
 		let (mut conn, migration) = crate::db::open(backing)?;
+		// Start new Run
 		let run = {
 			let tx = conn.transaction().store()?;
 			let id = crate::db::counters::take(&tx, RunId::COUNTER)?;
@@ -199,6 +198,7 @@ impl Store {
 			migration,
 			_lock: lock,
 		};
+		// Emit and recover
 		store.events.emit(Event::RunStarted(Run {
 			id: run,
 			started_at: now,
@@ -211,23 +211,13 @@ impl Store {
 
 	/// End what an earlier Run left open.
 	///
-	/// A Run that died — Ctrl+C, a kill, a crash — leaves rows mid-flight: Tasks
-	/// marked running with no Session turning behind them, Sessions with no loop
-	/// left, calls queued or still out. **Nothing resumes any of it.** A Session
-	/// is a live agent context, not a document, so a new Run closes what it finds
-	/// instead of inheriting it, and the terminal states say which end it was.
-	///
-	/// Pending Tasks are the one thing left alone: they are the queue, and a Task
-	/// scheduled for tomorrow has to outlive tonight's restart.
-	///
-	/// Nothing here is scoped to a Run, and nothing needs to be: the Run that
-	/// just started owns nothing yet, and [`crate::db::Lock`] means no other
-	/// Sandman has this database open. "Still open" and "left behind" are
-	/// therefore the same set. Without the lock they would not be, and this
-	/// would cancel a live Run's work mid-Turn.
+	/// Cancels running Tasks, open Sessions and queued calls. Leaves
+	/// pending Tasks; requires the file lock.
 	fn recover(&self, now: Timestamp) -> Result<(), StoreError> {
 		let mut conn = self.conn.lock().unwrap();
 		let tx = conn.transaction().store()?;
+
+		// Collect ids helper
 
 		let ids = |sql: &str| -> Result<Vec<u32>, StoreError> {
 			let mut stmt = tx.prepare(sql).store()?;
@@ -239,6 +229,7 @@ impl Store {
 			Ok(ids)
 		};
 
+		// Cancel running Tasks
 		let tasks = ids("SELECT id FROM tasks WHERE state = 'running'")?;
 		let task_state = TaskState::Cancelled { at: now };
 		let row = crate::db::rows::task_state_to_row(&task_state)?;
@@ -250,6 +241,7 @@ impl Store {
 			.store()?;
 		}
 
+		// Cancel open Sessions
 		let sessions = ids("SELECT id FROM sessions WHERE ended_at IS NULL")?;
 		let status = SessionStatus::Cancelled;
 		let row = crate::db::rows::session_status_to_row(&status)?;
@@ -262,6 +254,7 @@ impl Store {
 			.store()?;
 		}
 
+		// Drop queued calls
 		let calls = ids(
 			"SELECT id FROM calls WHERE status IN ('queued', 'in_flight')",
 		)?;
@@ -278,6 +271,7 @@ impl Store {
 		tx.commit().store()?;
 		drop(conn);
 
+		// Emit events
 		for id in tasks {
 			self.events.emit(Event::TaskStateChanged {
 				task: TaskId(id),
@@ -339,22 +333,21 @@ impl Store {
 
 	// --- Tasks -------------------------------------------------------------
 
-	/// Put a Task on the queue. Emits [`crate::event::Event::TaskCreated`].
+	/// Put a Task on the queue.
 	///
-	/// The subscriber is derived here, from the Creator, and nowhere else: a
-	/// Comms Session subscribes the Channel it stands on, everyone else
-	/// subscribes nobody. Derived rather than passed in because a caller that
-	/// has to remember will one day not, and the Task would complete with its
-	/// answer going nowhere.
+	/// Derives the subscriber from the Creator.
 	pub fn create_task(
 		&self,
 		new: NewTask,
 		now: Timestamp,
 	) -> Result<TaskId, StoreError> {
+		// Derive subscriber
 		let mut conn = self.conn.lock().unwrap();
 		let tx = conn.transaction().store()?;
 		let id = TaskId(crate::db::counters::take(&tx, TaskId::COUNTER)?);
 		let subscriber = subscriber_of(&tx, new.created_by)?;
+
+		// Prepare rows
 
 		let state = TaskState::Pending;
 		let state_row = crate::db::rows::task_state_to_row(&state)?;
@@ -363,6 +356,7 @@ impl Store {
 		let priority_json = serde_json::to_string(&new.priority).store()?;
 		let created_by_json = serde_json::to_string(&new.created_by).store()?;
 
+		// Insert task
 		tx.execute(
 			"INSERT INTO tasks (
 				id, run, title, brief, role, state, state_json,
@@ -389,6 +383,7 @@ impl Store {
 		.store()?;
 		tx.commit().store()?;
 
+		// Emit event
 		let task = Task {
 			id,
 			run: self.run,
@@ -579,6 +574,7 @@ impl Store {
 	/// Every occurrence of one repeating chain that has not finished — so
 	/// cancelling one occurrence can stop the chain.
 	pub fn chain_of(&self, id: TaskId) -> Result<Vec<TaskId>, StoreError> {
+		// Load anchor
 		let conn = self.conn.lock().unwrap();
 		let anchor = read_optional(
 			&conn,
@@ -594,10 +590,9 @@ impl Store {
 			return Ok(vec![id]);
 		};
 
+		// Find chain
 		let mut stmt = conn
 			.prepare(
-				// No `subscriber` here: it is a function of `created_by`, so
-				// matching on both would only say the same thing twice.
 				"SELECT id, schedule, schedule_json FROM tasks
 				 WHERE role = ?1 AND title = ?2 AND brief = ?3
 				   AND created_by = ?4
@@ -1196,20 +1191,16 @@ impl Store {
 
 	// --- Channels ----------------------------------------------------------
 
-	/// Open a Channel and stand a fresh Comms Session on it, minting both ids
-	/// in one transaction.
+	/// Open a Channel and Comms Session atomically.
 	///
-	/// Neither `start_session` nor `open_channel` alone can do this: a Comms
-	/// Session's `kind` carries the Channel it stands on, and a Channel's row
-	/// is a real foreign key to its Session. Whichever went first would need
-	/// an id that does not exist yet. Minting both here, in one transaction,
-	/// is what breaks the cycle.
+	/// Mints both ids in one transaction to break the cycle.
 	pub fn open_comms(
 		&self,
 		kind: ChannelKind,
 		messages: Vec<Message>,
 		now: Timestamp,
 	) -> Result<(SessionId, ChannelId), StoreError> {
+		// Mint ids
 		let mut conn = self.conn.lock().unwrap();
 		let tx = conn.transaction().store()?;
 		let session_id =
@@ -1222,6 +1213,7 @@ impl Store {
 		let status = SessionStatus::Idle;
 		let status_row = crate::db::rows::session_status_to_row(&status)?;
 
+		// Insert session
 		tx.execute(
 			"INSERT INTO sessions (
 				id, run, kind, task, role, channel, status, status_json,
@@ -1241,6 +1233,7 @@ impl Store {
 		)
 		.store()?;
 
+		// Insert messages
 		for (idx, message) in messages.iter().enumerate() {
 			let row = crate::db::rows::message_to_row(message)?;
 			tx.execute(
@@ -1251,6 +1244,7 @@ impl Store {
 			.store()?;
 		}
 
+		// Insert channel
 		tx.execute(
 			"INSERT INTO channels (id, kind, session) VALUES (?1,?2,?3)",
 			rusqlite::params![channel_id.0, <&str>::from(kind), session_id.0],
@@ -1259,6 +1253,7 @@ impl Store {
 
 		tx.commit().store()?;
 
+		// Emit events
 		let session = Session {
 			id: session_id,
 			run: self.run,
@@ -1521,6 +1516,7 @@ impl Store {
 	pub fn snapshot(&self) -> Result<Snapshot, StoreError> {
 		let mut conn = self.conn.lock().unwrap();
 
+		// Load run
 		let run = read_required(
 			&conn,
 			"SELECT * FROM runs WHERE id = ?1",
@@ -1528,6 +1524,7 @@ impl Store {
 			crate::db::rows::read_run,
 		)?;
 
+		// Load tasks
 		let mut tasks = Vec::new();
 		{
 			let mut stmt = conn
@@ -1539,6 +1536,7 @@ impl Store {
 			}
 		}
 
+		// Load sessions
 		let session_ids: Vec<i64> = {
 			let mut stmt = conn
 				.prepare("SELECT id FROM sessions WHERE run = ?1 ORDER BY id")
@@ -1563,6 +1561,7 @@ impl Store {
 			tx.commit().store()?;
 		}
 
+		// Load calls
 		let mut calls = Vec::new();
 		{
 			let mut stmt = conn
@@ -1574,6 +1573,7 @@ impl Store {
 			}
 		}
 
+		// Load channels
 		let mut channels = Vec::new();
 		{
 			let mut stmt = conn
@@ -1601,6 +1601,7 @@ impl Store {
 			}
 		}
 
+		// Load lessons
 		let mut lessons = Vec::new();
 		{
 			let mut stmt =

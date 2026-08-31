@@ -45,14 +45,11 @@ use crate::session::SessionCtx;
 /// Every section metacognition may write. A section ends where the next begins.
 pub const SECTIONS: [&str; 3] = ["summary", "feedback", "lessons"];
 
-/// Review one Worker Session's conversation.
+/// Review one Worker Session.
 ///
-/// Feedback is read first: it is the review saying the run is not over, whatever
-/// else it wrote beside it. A summary written alongside would be an answer to a
-/// Task the review has just said is unfinished.
-///
-/// Neither a summary nor feedback means the review had nothing to say, and the
-/// caller falls back to what the Worker itself wrote last.
+/// Reads the whole conversation and decides what the turn meant. If there's
+/// feedback, summary is discarded. Nothing means the caller falls back
+/// to the Worker's own text.
 pub async fn reflect(ctx: &SessionCtx) -> Outcome {
 	metacognise(
 		ctx,
@@ -63,13 +60,10 @@ pub async fn reflect(ctx: &SessionCtx) -> Outcome {
 	.await
 }
 
-/// Interrupt a Session mid-turn and ask whether the run is still going somewhere:
-/// is it looping, already finished, chasing something that cannot be reached, or
-/// no longer on its goal?
+/// Interrupt a Session mid-turn.
 ///
-/// A summary is dropped rather than obeyed. The interrupt was told not to write
-/// one, and a model that writes it anyway is answering a Task on behalf of a
-/// Session that never offered an answer. An empty answer is the expected one.
+/// Asks whether the run still goes somewhere. Drops any summary — only
+/// feedback matters. Nothing is the expected outcome.
 pub async fn interrupt(ctx: &SessionCtx) -> Nudge {
 	match metacognise(
 		ctx,
@@ -86,30 +80,15 @@ pub async fn interrupt(ctx: &SessionCtx) -> Nudge {
 
 /// One metacognitive call, whichever it is.
 ///
-/// The sandwich: the metacognition system prompt on top, the Session's whole
-/// conversation as the subject with system messages recast as user so the
-/// reviewer never adopts them, and the framing of the question last as system
-/// message.
-///
-/// The call goes through the scheduler at [`crate::scheduler::Tier::Metacognition`]
-/// and [`crate::model::Purpose::Metacognition`] — so a Session may be judged by a
-/// model other than the one it runs on — and is recorded against the Session it
-/// judges, so its cost lands where the work is.
-///
-/// Three ways it ends, and each writes a different record:
-///
-/// - the call answered — a [`crate::domain::ReflectionResult::Ran`] on that call;
-/// - the call failed — a [`crate::domain::ReflectionResult::FailedOpen`] on the
-///   same call, which exists because the scheduler recorded it before sending;
-/// - the Store refused — nothing was queued, so there is no call to anchor a
-///   Reflection on and none is written. Failing open still holds: the Session
-///   carries on either way.
+/// Builds a sandwiched request, sends via Metacognition tier, and records
+/// the reflection. Fails open — a broken call still lets the Session continue.
 async fn metacognise(
 	ctx: &SessionCtx,
 	kind: ReflectionKind,
 	system: &str,
 	question: &str,
 ) -> Outcome {
+	// Get conversation context
 	let Ok(after_message) = ctx.store.message_count(ctx.id) else {
 		return Outcome::Nothing;
 	};
@@ -117,6 +96,7 @@ async fn metacognise(
 		return Outcome::Nothing;
 	};
 
+	// Build sandwiched request
 	let mut messages = Vec::with_capacity(transcript.len() + 2);
 	messages.push(Message::System { content: system.to_string() });
 	for message in transcript {
@@ -130,6 +110,7 @@ async fn metacognise(
 	let request = CallRequest { messages, tools: Vec::new() };
 	let now = ctx.clock.now();
 
+	// Send request
 	match ctx
 		.scheduler
 		.request(
@@ -140,12 +121,14 @@ async fn metacognise(
 		)
 		.await
 	{
+		// Call succeeded - parse sections and record
 		Ok((call, completion)) => {
 			let content = match completion.reply {
 				Reply::Text(text) => text,
 				Reply::Calls { preamble, .. } => preamble.unwrap_or_default(),
 			};
 
+			// Parse sections - feedback takes precedence
 			let feedback = section(&content, "feedback")
 				.map(|s| s.trim().to_string())
 				.filter(|s| !s.is_empty());
@@ -165,6 +148,7 @@ async fn metacognise(
 				},
 			};
 
+			// Record reflection
 			let _ = ctx.store.record_reflection(
 				ctx.id,
 				Reflection {
@@ -180,10 +164,12 @@ async fn metacognise(
 				},
 			);
 
+			// Keep lessons
 			keep_lessons(ctx, ctx.id, &content).await;
 
 			outcome
 		},
+		// Model failed - record FailedOpen and fail open
 		Err(SchedulerError::Call { call, source }) => {
 			let _ = ctx.store.record_reflection(
 				ctx.id,
@@ -199,6 +185,7 @@ async fn metacognise(
 			);
 			Outcome::Nothing
 		},
+		// Store failed - nothing to record, fail open
 		Err(SchedulerError::Store(_)) => Outcome::Nothing,
 	}
 }

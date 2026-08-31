@@ -169,6 +169,7 @@ impl Model for OpenRouter {
 		&self,
 		request: &CallRequest,
 	) -> Result<Completion, ModelError> {
+		// Build request
 		let body = ChatRequest {
 			model: &self.model,
 			messages: request.messages.iter().map(WireMessage::from).collect(),
@@ -198,6 +199,7 @@ impl Model for OpenRouter {
 			usage: WireUsageConfig { include: true },
 		};
 
+		// Send request
 		let response = self
 			.client
 			.post(&self.endpoint)
@@ -213,6 +215,7 @@ impl Model for OpenRouter {
 			.await
 			.map_err(|e| ModelError::Transport(e.to_string()))?;
 
+		// Check status
 		if !status.is_success() {
 			return Err(ModelError::Status {
 				status: status.as_u16(),
@@ -220,6 +223,7 @@ impl Model for OpenRouter {
 			});
 		}
 
+		// Parse response
 		let parsed: WireResponse = serde_json::from_str(&text)
 			.map_err(|e| ModelError::Malformed(e.to_string()))?;
 
@@ -227,6 +231,7 @@ impl Model for OpenRouter {
 			ModelError::Malformed("no choices in response".into())
 		})?;
 
+		// Build reply
 		let reply = match choice.message.tool_calls.filter(|c| !c.is_empty()) {
 			Some(calls) => {
 				let calls = calls
@@ -244,6 +249,7 @@ impl Model for OpenRouter {
 			None => Reply::Text(choice.message.content.unwrap_or_default()),
 		};
 
+		// Compute cost
 		let usage = parsed.usage.unwrap_or_default();
 		let cost =
 			Cost((usage.cost.unwrap_or(0.0) * 1_000_000_000.0).round() as i64);
