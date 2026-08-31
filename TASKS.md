@@ -2,39 +2,6 @@
 
 Scratchpad. Debt goes here as it is created, not afterwards.
 
-## Not built yet
-
-Every source file has its definitions and its documentation; the bodies are
-`unimplemented!()`. The docstring is the intent; a body that differs is the bug.
-Ten steps, bottom up. `cargo check` passes today and must pass after each step.
-
-### 1. `domain/` — ids, text, time, and the small helpers — done
-
-### 2. `event.rs`, `db/`, `store.rs` — done
-
-### 3. `log.rs` — done
-
-### 4. `model.rs`, `scheduler.rs` — done
-
-### 5. `roles.rs`, `prompts.rs`, `waiters.rs`, `memory.rs`, `tools/` — done
-
-### 6. `session.rs`, `reflect.rs`, `worker.rs`, `comms.rs` — done
-
-### 7. `harness.rs` — done
-
-### 8. `channels/`, `control.rs`, `bin/sandman.rs` — first runnable Sandman — done
-
-### 9. `bench/`, `bin/bench.rs` — done
-
-### 10. `web/` — done
-
-Built from scratch rather than porting the prototype's front end (`web/index.html`,
-`style.css`, `app.js` are new, plain lists + a chat pane, no forest/ribbon/inspector).
-`patch_for` ended up needing `&Store` — it re-fetches the current full entity for a
-delta Event rather than shipping a partial field, so a Patch is always a whole-entity
-replace on the browser side, never a merge. That needed one new getter,
-`Store::channel(id)`.
-
 Known rough edges, not fixed here:
 - **The Watcher's files are found relative to the working directory.**
   `server.rs` serves `web/index.html` and `ServeDir::new("web")` by relative path, so
