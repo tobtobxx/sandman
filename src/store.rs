@@ -49,6 +49,10 @@ pub struct Store {
 	/// it was already current — for whoever holds the Logger to note once at
 	/// startup.
 	migration: Option<(u32, u32)>,
+	/// Exclusive use of the database file, held for this Store's whole life and
+	/// dropped after the connection above it. `None` for an in-memory database,
+	/// which no other process can reach anyway. See [`crate::db::Lock`].
+	_lock: Option<crate::db::Lock>,
 }
 
 /// What can go wrong asking the Store for something.
@@ -161,12 +165,20 @@ impl Store {
 	///
 	/// Every Task, Session, call and lesson written afterwards belongs to that
 	/// Run. Spend is scoped to it; the Lessons and past Tasks are not.
+	///
+	/// A file-backed database is locked first, before it is so much as opened,
+	/// so a start that is refused neither creates nor migrates anything. The
+	/// lock is what [`Store::recover`] below stands on.
 	pub fn open(
 		backing: Backing,
 		events: Arc<Events>,
 		model: &str,
 		now: Timestamp,
 	) -> Result<Self, StoreError> {
+		let lock = match &backing {
+			Backing::File(path) => Some(crate::db::Lock::take(path)?),
+			Backing::Memory => None,
+		};
 		let (mut conn, migration) = crate::db::open(backing)?;
 		let run = {
 			let tx = conn.transaction().store()?;
@@ -185,6 +197,7 @@ impl Store {
 			events,
 			run,
 			migration,
+			_lock: lock,
 		};
 		store.events.emit(Event::RunStarted(Run {
 			id: run,

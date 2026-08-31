@@ -25,7 +25,13 @@
 //! ```
 //!
 //! Common flags: `--db <path>` (default `sandman.sqlite`), `--log <path>`
-//! (default `sandman.log`), `--socket <path>`, `--verbose`.
+//! (default `sandman.log`), `--socket <path>`, `--verbose`, `--break-lock`.
+//!
+//! One Sandman per database. `sandman` and `sandman run` each open their own,
+//! and the second to start on a database is refused rather than allowed to
+//! cancel the first one's work — see [`sandman::db::Lock`]. `task`, `list` and
+//! `spend` open nothing: they go through the control socket, which is how you
+//! reach a Sandman that is already running.
 //!
 //! Wiring lives here and only here: which [`sandman::model::Model`], which
 //! [`sandman::tools::ToolRunner`], which [`sandman::domain::Clock`]. Everything
@@ -72,11 +78,13 @@ struct TaskArgs {
 	priority: Option<String>,
 }
 
-/// Where the state, the trace and the socket live.
+/// Where the state, the trace and the socket live, and how to open the first.
 struct Paths {
 	db: std::path::PathBuf,
 	log: std::path::PathBuf,
 	socket: std::path::PathBuf,
+	/// Take the database's lock however it looks. See `--break-lock`.
+	break_lock: bool,
 }
 
 /// The argv shape, read by `clap`. Kept private to `parse`: everywhere else in
@@ -103,6 +111,14 @@ struct Cli {
 	/// Write every body in the trace out whole, instead of eliding it.
 	#[arg(long, global = true)]
 	verbose: bool,
+	/// Start even though the database looks locked.
+	///
+	/// A lock left by a dead Sandman is cleared on its own — the pid in it is
+	/// checked. This is for the one case that check cannot settle, a pid the
+	/// system has since given to something else. Using it while a Sandman is
+	/// really running will cancel that Sandman's work.
+	#[arg(long, global = true)]
+	break_lock: bool,
 }
 
 #[derive(clap::Subcommand)]
@@ -172,6 +188,7 @@ fn parse(
 		db: cli.db,
 		log: cli.log,
 		socket: cli.socket.unwrap_or_else(sandman::control::socket_path),
+		break_lock: cli.break_lock,
 	};
 	let verbosity = if cli.verbose {
 		sandman::log::Verbosity::Verbose
@@ -221,6 +238,11 @@ async fn assemble(
 		tokio::spawn(async move { logger.follow(&events).await });
 	}
 
+	if paths.break_lock {
+		sandman::db::Lock::clear(&paths.db).map_err(|e| {
+			format!("could not clear the lock on {}: {e}", paths.db.display())
+		})?;
+	}
 	let store = Arc::new(
 		Store::open(
 			Backing::File(paths.db.clone()),

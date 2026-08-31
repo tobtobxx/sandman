@@ -16,7 +16,7 @@
 //!
 //! Modules: [`schema`] — tables and migrations; [`rows`] — rows to domain values.
 //!
-//! Defines: [`Backing`], [`DbError`], [`open`], [`counters`].
+//! Defines: [`Backing`], [`Lock`], [`DbError`], [`open`], [`counters`].
 
 pub mod rows;
 pub mod schema;
@@ -46,6 +46,114 @@ pub enum DbError {
 	UnknownVariant { what: &'static str, tag: String },
 	#[error("{0}")]
 	Corrupt(String),
+	/// Another Sandman has this database open, and its Run is live. See
+	/// [`Lock`].
+	#[error(
+		"{path} is open in process {pid}; \
+		 only one Sandman may use a database at a time"
+	)]
+	Locked { path: String, pid: u32 },
+	/// The lockfile itself could not be written — a read-only directory, most
+	/// likely.
+	#[error("could not take the lock at {path}: {source}")]
+	Lock {
+		path: String,
+		#[source]
+		source: std::io::Error,
+	},
+}
+
+/// Exclusive use of one database file, for as long as this value lives.
+///
+/// `Store::recover` ends every Task, Session and call it finds still open,
+/// reasoning that a Run which has only just started owns none of them. That
+/// holds for a database nobody else has: a second Sandman opening the same file
+/// would cancel the first one's work out from under it, mid-Turn. This is what
+/// makes it hold.
+///
+/// A lockfile beside the database, naming the process that took it. A Run that
+/// dies leaves it behind — Ctrl+C is the ordinary way out here, so a lock that
+/// outlived its holder must not stop the next start. The pid is what settles
+/// which of the two it is: gone from `/proc`, and the lock is stale and taken
+/// over without a word. That check is Linux-only, as the control socket already
+/// is.
+///
+/// `Drop` removes it, so leaving cleanly leaves nothing behind either.
+pub struct Lock {
+	path: std::path::PathBuf,
+}
+
+impl Lock {
+	/// Take the lock on `db`, or say which process holds it.
+	pub fn take(db: &std::path::Path) -> Result<Lock, DbError> {
+		let path = lock_path(db);
+		if let Some(pid) = holder(&path) {
+			return Err(DbError::Locked {
+				path: db.display().to_string(),
+				pid,
+			});
+		}
+		// Nothing holds it: either there is no lockfile, or the one there
+		// outlived its process. Clearing and creating are two steps, and
+		// `create_new` is what keeps them honest — a start that wins the gap
+		// between them fails here rather than being overwritten.
+		let _ = std::fs::remove_file(&path);
+		let mut file = std::fs::OpenOptions::new()
+			.write(true)
+			.create_new(true)
+			.open(&path)
+			.map_err(|source| DbError::Lock {
+				path: path.display().to_string(),
+				source,
+			})?;
+		std::io::Write::write_all(
+			&mut file,
+			std::process::id().to_string().as_bytes(),
+		)
+		.map_err(|source| DbError::Lock {
+			path: path.display().to_string(),
+			source,
+		})?;
+		Ok(Lock { path })
+	}
+
+	/// Remove the lock on `db`, whatever holds it. What `--break-lock` does,
+	/// for the one case a pid cannot settle: a pid that has since been recycled
+	/// makes a stale lock look live for good.
+	pub fn clear(db: &std::path::Path) -> std::io::Result<()> {
+		match std::fs::remove_file(lock_path(db)) {
+			Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+			other => other,
+		}
+	}
+}
+
+impl Drop for Lock {
+	/// Best effort. A lock this fails to remove is one the next start finds
+	/// stale and clears itself.
+	fn drop(&mut self) {
+		let _ = std::fs::remove_file(&self.path);
+	}
+}
+
+/// Where a database's lock lives: beside it, under its own name plus `.lock`.
+/// Appended rather than substituted, so `sandman.sqlite` and `sandman.db` in
+/// one directory cannot end up sharing one.
+fn lock_path(db: &std::path::Path) -> std::path::PathBuf {
+	let mut path = db.as_os_str().to_os_string();
+	path.push(".lock");
+	std::path::PathBuf::from(path)
+}
+
+/// The pid of a live process holding this lockfile, if one does. `None` covers
+/// all three ways there is nothing to respect: no lockfile, one whose contents
+/// are not a pid, and one whose process is gone.
+fn holder(lock: &std::path::Path) -> Option<u32> {
+	let pid: u32 = std::fs::read_to_string(lock).ok()?.trim().parse().ok()?;
+	std::path::Path::new("/proc")
+		.join(pid.to_string())
+		.exists()
+		.then_some(pid)
 }
 
 /// Open a database and bring it up to the current schema.

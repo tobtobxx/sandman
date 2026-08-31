@@ -1,10 +1,13 @@
 //! Rough smoke tests for the Store, against a fresh in-memory database: Runs,
 //! Comms Sessions, messages, mail, Channels and Lessons. A rough "is this
 //! broken" check, not a regression suite.
+//!
+//! One needs a file instead: a lock is two Stores over one database, and a
+//! fresh in-memory one has nothing to be left behind in.
 
 use std::sync::Arc;
 
-use sandman::db::Backing;
+use sandman::db::{Backing, DbError, Lock};
 use sandman::domain::{
 	Brief, ChannelId, ChannelKind, Creator, Incoming, IncomingFrom,
 	LessonSubject, Message, NewLesson, NewSession, NewTask, Schedule,
@@ -13,7 +16,7 @@ use sandman::domain::{
 };
 use sandman::event::Events;
 use sandman::roles::RoleName;
-use sandman::store::Store;
+use sandman::store::{Store, StoreError};
 
 fn open() -> Store {
 	Store::open(
@@ -229,4 +232,47 @@ fn lessons_and_vectors() {
 		store.vector("lesson/l-01", "test-embed").unwrap(),
 		Some(vec![1.0, 2.0, 3.0])
 	);
+}
+
+/// One Sandman per database. A second Store on a file a live one holds is
+/// refused — this is what lets `recover` end everything it finds open without
+/// asking whose it is.
+#[test]
+fn a_second_store_on_one_database_is_refused() {
+	let path = std::env::temp_dir()
+		.join(format!("sandman-lock-{}.sqlite", std::process::id()));
+	let clean = || {
+		for suffix in ["", "-wal", "-shm", ".lock"] {
+			let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+		}
+	};
+	clean();
+	let open = || {
+		Store::open(
+			Backing::File(path.clone()),
+			Arc::new(Events::new(64)),
+			"test-model",
+			Timestamp(0),
+		)
+	};
+
+	let first = open().expect("the first Store takes the lock");
+	assert!(
+		matches!(open(), Err(StoreError::Db(DbError::Locked { .. }))),
+		"a second Store on a held database must be refused"
+	);
+
+	// Dropping releases it. A restart is exactly this: one process, then the
+	// next.
+	drop(first);
+	let second = open().expect("the lock goes with the Store that held it");
+
+	// What `--break-lock` does, and why it is a last resort: the lock is gone
+	// whether or not anything was still using it.
+	Lock::clear(&path).expect("breaking a lock");
+	let third = open().expect("a broken lock lets the next start in");
+
+	drop(second);
+	drop(third);
+	clean();
 }
