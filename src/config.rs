@@ -49,7 +49,11 @@ pub struct Config {
 }
 
 /// One model, and how to reach it.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+///
+/// Hashed by everything it holds, so two purposes that name the same model —
+/// whether by the same slug or by two slugs that say the same thing — share one
+/// adapter. See [`crate::model::Models`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSpec {
 	/// A chat-completions URL.
@@ -206,19 +210,25 @@ impl Config {
 	/// a human is in the middle of editing would be the worst possible answer to
 	/// a missing comma.
 	pub fn load(path: &Path) -> Result<Config, ConfigError> {
-		let text = match std::fs::read_to_string(path) {
-			Ok(text) => text,
-			Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+		match Config::read(path) {
+			Err(ConfigError::Read { source, .. })
+				if source.kind() == std::io::ErrorKind::NotFound =>
+			{
 				write_default(path)?;
-				return Err(ConfigError::Written(path.to_path_buf()));
+				Err(ConfigError::Written(path.to_path_buf()))
 			},
-			Err(source) => {
-				return Err(ConfigError::Read {
-					path: path.to_path_buf(),
-					source,
-				});
-			},
-		};
+			other => other,
+		}
+	}
+
+	/// The configuration as it is, and nothing written if it is not there.
+	///
+	/// What a bench reads: a case is not the place to create a human's
+	/// configuration, and one that cannot find it should say so and stop.
+	pub fn read(path: &Path) -> Result<Config, ConfigError> {
+		let text = std::fs::read_to_string(path).map_err(|source| {
+			ConfigError::Read { path: path.to_path_buf(), source }
+		})?;
 		Config::parse(&text).map_err(|e| match e {
 			ConfigError::Malformed(source) => {
 				ConfigError::Parse { path: path.to_path_buf(), source }
@@ -233,7 +243,10 @@ impl Config {
 		Config::parse_with(text, &|name| std::env::var(name).ok())
 	}
 
-	fn parse_with(
+	/// The same, against an environment the caller supplies. For anything that
+	/// must not read the one it is running in — a test, or a configuration read
+	/// on behalf of somewhere else.
+	pub fn parse_with(
 		text: &str,
 		env: &dyn Fn(&str) -> Option<String>,
 	) -> Result<Config, ConfigError> {
@@ -282,6 +295,12 @@ impl Config {
 	/// One model by slug.
 	pub fn spec(&self, slug: &str) -> Option<&ModelSpec> {
 		self.model.get(slug)
+	}
+
+	/// The model named by `models.all` — what a Session uses when nothing names
+	/// another, and the name a Run is recorded under.
+	pub fn for_all(&self) -> &ModelSpec {
+		self.resolve(&self.models.all)
 	}
 
 	/// The model a Role's Workers talk to.
