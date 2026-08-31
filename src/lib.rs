@@ -34,6 +34,7 @@
 pub mod bench;
 pub mod channels;
 pub mod comms;
+pub mod config;
 pub mod control;
 pub mod db;
 pub mod domain;
