@@ -163,6 +163,18 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 	}
 }
 
+/// The Lessons as a corpus for [`rank`]: keyed by id, searched by their text.
+/// Shared by the `memory` Role's `search_lessons` tool and the Watcher's
+/// search box, so a score one sees is the score the other would.
+pub fn lesson_corpus(
+	lessons: Vec<crate::domain::Lesson>,
+) -> Vec<(String, String, crate::domain::Lesson)> {
+	lessons
+		.into_iter()
+		.map(|l| (format!("lesson/{}", l.id), l.text.clone(), l))
+		.collect()
+}
+
 /// Cut text down to [`MAX_INPUT_CHARS`], so one runaway Brief cannot fail a
 /// whole batch.
 fn truncated(text: &str) -> String {

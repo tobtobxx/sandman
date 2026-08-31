@@ -67,10 +67,7 @@ impl Tool for SearchLessons {
 			Ok(l) => l,
 			Err(e) => return format!("Error: {e}"),
 		};
-		let corpus: Vec<(String, String, Lesson)> = lessons
-			.into_iter()
-			.map(|l| (format!("lesson/{}", l.id), l.text.clone(), l))
-			.collect();
+		let corpus = crate::memory::lesson_corpus(lessons);
 
 		let embedder = crate::memory::OpenRouterEmbedder::from_env();
 		match crate::memory::rank(

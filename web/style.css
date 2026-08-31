@@ -1,0 +1,352 @@
+:root {
+  color-scheme: light dark;
+  --bg: light-dark(#fff, #14161a);
+  --panel: light-dark(#f4f4f6, #1c1f26);
+  --border: light-dark(#dcdce0, #2c303a);
+  --text: light-dark(#1a1a1e, #e4e4e8);
+  --dim: light-dark(#6a6a72, #8a8d98);
+  --accent: light-dark(#2a5db0, #6fa3ff);
+  --up: #2e9e5b;
+  --down: #c0392b;
+  --warn: light-dark(#b0730c, #d9a13a);
+  --think: light-dark(#7a4fb5, #a888e0);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+/* The mark and the word are one unit, so they sit closer than the header's
+   gap — negative margin rather than a wrapper element. */
+#logo {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  margin-right: -0.6rem;
+  flex: none;
+}
+
+header h1 {
+  font-size: 1rem;
+  margin: 0;
+}
+
+#routes {
+  display: flex;
+  gap: 0.8rem;
+}
+#routes a {
+  color: var(--dim);
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+#routes a.here {
+  color: var(--accent);
+}
+
+.spend {
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.link {
+  margin-left: auto;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+.link.up {
+  color: var(--up);
+}
+.link.down {
+  color: var(--down);
+}
+
+main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+#lists {
+  flex: 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+}
+
+#tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.tab {
+  background: none;
+  border: none;
+  color: var(--dim);
+  padding: 0.5rem 0.9rem;
+  cursor: pointer;
+  font: inherit;
+  border-bottom: 2px solid transparent;
+}
+.tab.here {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+#find {
+  flex: none;
+  border-bottom: 1px solid var(--border);
+}
+#find.hidden {
+  display: none;
+}
+#find input {
+  width: 100%;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  padding: 0.5rem 1rem;
+  outline: none;
+}
+
+.list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.4rem 1rem;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.row:hover {
+  background: var(--panel);
+}
+.row.sel {
+  background: var(--panel);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.row .id {
+  font-family: ui-monospace, monospace;
+  color: var(--accent);
+  flex: none;
+}
+.row .ttl {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row .snip {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+}
+.row .tag {
+  background: var(--panel);
+  border-radius: 3px;
+  padding: 0.05rem 0.4rem;
+  font-size: 0.8rem;
+  flex: none;
+}
+/* A state badge is tinted with its own colour rather than filled with it: the
+   text carries the meaning and the wash behind it keeps the badge readable in
+   either scheme. `wait` is the neutral one — nothing is happening, so nothing
+   should catch the eye. */
+.tag.ok {
+  color: var(--up);
+  background: color-mix(in srgb, var(--up) 18%, transparent);
+}
+.tag.bad {
+  color: var(--down);
+  background: color-mix(in srgb, var(--down) 20%, transparent);
+}
+.tag.busy {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.tag.warn {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 20%, transparent);
+}
+.tag.think {
+  color: var(--think);
+  background: color-mix(in srgb, var(--think) 22%, transparent);
+}
+.tag.wait {
+  color: var(--dim);
+}
+
+/* The trailing cells are a column, not a sentence: each is a fixed width so
+   the same quantity lands in the same place on every row, whatever it holds.
+   `.ttl` is the only cell that flexes, so it absorbs the slack and everything
+   after it stays put. Widths fit the longest value each cell can hold —
+   `reflecting` for a state, `$0.000000` for a cost. */
+.row .tag.state {
+  width: 5.5rem;
+  text-align: center;
+}
+.row .cost,
+.row .tok,
+.row .wall,
+.row .score {
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  flex: none;
+}
+.row .cost {
+  width: 6rem;
+}
+.row .tok {
+  width: 5rem;
+}
+.row .wall {
+  width: 3.5rem;
+}
+
+.empty {
+  color: var(--dim);
+  padding: 1rem;
+}
+
+#inspector,
+#chat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+}
+#inspector h2,
+#chat h2 {
+  font-size: 0.9rem;
+  margin: 0;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+/* On `/`, the chat window is a separate page; on `/chat`, it is the whole
+   page and the lists and inspector have nothing to show. */
+#chat {
+  display: none;
+}
+body.chat #chat {
+  display: flex;
+}
+body.chat #lists,
+body.chat #inspector {
+  display: none;
+}
+
+#insp-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.6rem 1rem;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 0.8rem;
+  margin: 0 0 0.8rem;
+}
+.kv dt {
+  color: var(--dim);
+}
+.kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+#insp-body h3 {
+  font-size: 0.8rem;
+  color: var(--dim);
+  margin: 1rem 0 0.3rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+#insp-body pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+  font-family: inherit;
+}
+
+.msg {
+  border-left: 2px solid var(--border);
+  padding: 0.1rem 0 0.1rem 0.6rem;
+  margin-bottom: 0.5rem;
+}
+.msg .who {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--dim);
+}
+.msg.assistant .who,
+.msg.sandman .who {
+  color: var(--accent);
+}
+
+.transcript {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.5rem 1rem;
+}
+
+.utt {
+  margin-bottom: 0.6rem;
+}
+.utt .who {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--dim);
+}
+.utt .at {
+  margin-left: 0.5rem;
+  color: var(--dim);
+  font-size: 0.75rem;
+}
+.utt.sandman .who {
+  color: var(--accent);
+}
+
+#say {
+  flex: none;
+  border-top: 1px solid var(--border);
+}
+#say input {
+  width: 100%;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  padding: 0.6rem 1rem;
+  outline: none;
+}

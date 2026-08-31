@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sandman</title>
+    <link rel="icon" href="/icon.png" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <img id="logo" src="/icon.png" alt="" />
+      <h1>Sandman</h1>
+      <nav id="routes">
+        <a href="/">watch</a>
+        <a href="/chat">chat</a>
+      </nav>
+      <span id="spend" class="spend"></span>
+      <span id="link" class="link">connecting…</span>
+    </header>
+
+    <main>
+      <section id="lists">
+        <nav id="tabs">
+          <button class="tab here" data-bucket="tasks">Tasks</button>
+          <button class="tab" data-bucket="sessions">Sessions</button>
+          <button class="tab" data-bucket="calls">Calls</button>
+          <button class="tab" data-bucket="channels">Channels</button>
+          <button class="tab" data-bucket="lessons">Lessons</button>
+        </nav>
+
+        <form id="find">
+          <input
+            id="find-text"
+            autocomplete="off"
+            placeholder="Search the Lessons by meaning…"
+          />
+        </form>
+
+        <div class="list" id="rows"></div>
+      </section>
+
+      <aside id="inspector">
+        <h2 id="insp-title">Inspector</h2>
+        <div class="body" id="insp-body">
+          <p class="empty">Pick anything on the left to see inside it.</p>
+        </div>
+      </aside>
+
+      <aside id="chat">
+        <h2>Chat</h2>
+        <div class="transcript" id="transcript"></div>
+        <form id="say">
+          <input
+            id="say-text"
+            autocomplete="off"
+            placeholder="Talk to the swarm…"
+          />
+        </form>
+      </aside>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

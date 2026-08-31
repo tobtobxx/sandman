@@ -1378,6 +1378,32 @@ impl Store {
 		Ok(heads)
 	}
 
+	/// One Channel, with its whole transcript, for a Watcher patching a single
+	/// entity — see [`crate::web::wire`].
+	pub fn channel(
+		&self,
+		id: ChannelId,
+	) -> Result<Option<ChannelRecord>, StoreError> {
+		let conn = self.conn.lock().unwrap();
+		let Some(mut head) = read_optional(
+			&conn,
+			"SELECT * FROM channels WHERE id = ?1",
+			[id.0],
+			crate::db::rows::read_channel,
+		)?
+		else {
+			return Ok(None);
+		};
+		let mut stmt = conn
+			.prepare("SELECT * FROM utterances WHERE channel = ?1 ORDER BY idx")
+			.store()?;
+		let mut rows = stmt.query([id.0]).store()?;
+		while let Some(row) = rows.next().store()? {
+			head.transcript.push(crate::db::rows::read_utterance(row)?);
+		}
+		Ok(Some(head))
+	}
+
 	/// The Comms Session standing on a Channel.
 	pub fn channel_session(
 		&self,

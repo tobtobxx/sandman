@@ -38,10 +38,9 @@
 //! below takes what it needs and builds nothing itself, which is what lets the
 //! bench assemble the same Harness with different pieces.
 //!
-//! The browser Channel is [`sandman::channels::web`]'s to open; nothing here
-//! opens it yet, since the server that would serve it — `sandman::web` — is
-//! not built (see TASKS.md, step 10). Interactive mode runs on the terminal
-//! Channel and the control socket alone until then.
+//! Interactive mode opens three ways in: the terminal Channel, the browser
+//! Channel with its Watcher UI on [`sandman::web::PORT`], and the control
+//! socket.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -282,6 +281,22 @@ async fn interactive(
 	sandman::channels::stdio::attach(harness.clone())
 		.await
 		.map_err(|e| format!("could not open the terminal: {e}"))?;
+
+	let web_channel = sandman::channels::web::attach(harness.clone())
+		.await
+		.map_err(|e| format!("could not open the browser channel: {e}"))?;
+	let web_state = sandman::web::server::AppState {
+		harness: harness.clone(),
+		embedder: Arc::new(sandman::memory::OpenRouterEmbedder::from_env()),
+		channel: web_channel,
+	};
+	tokio::spawn(async move {
+		if let Err(e) =
+			sandman::web::server::serve(web_state, sandman::web::PORT).await
+		{
+			eprintln!("web UI stopped: {e}");
+		}
+	});
 
 	let socket_harness = harness.clone();
 	let socket_path = paths.socket.clone();

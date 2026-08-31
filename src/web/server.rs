@@ -17,7 +17,17 @@
 
 use std::sync::Arc;
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::State;
+use axum::response::IntoResponse;
+use axum::routing::get;
+use axum::Router;
+use futures_util::{SinkExt, StreamExt};
+
+use crate::domain::IncomingFrom;
 use crate::harness::Harness;
+
+use super::wire::Frame;
 
 /// What every request handler reaches.
 #[derive(Clone)]
@@ -27,26 +37,150 @@ pub struct AppState {
 	pub channel: crate::domain::ChannelId,
 }
 
+/// How many hits a Lessons search returns.
+const FIND_LIMIT: usize = 10;
+
+/// One request from a browser. `say` is the human talking; `find` is the
+/// Lessons search box. There is nowhere else a browser writes.
+#[derive(serde::Deserialize)]
+#[serde(tag = "t", rename_all = "lowercase")]
+enum ClientMessage {
+	Say { text: String },
+	Find { query: String },
+}
+
 /// Start the Watcher UI on [`super::PORT`].
 ///
 /// Serves `web/` as static files, and upgrades `/ws` to a socket that gets one
-/// `init` and then a patch per Event.
-pub async fn serve(_state: AppState, _port: u16) -> std::io::Result<()> {
-	unimplemented!()
+/// `init` and then a patch per Event. `/chat` is the same page as `/` — one
+/// `index.html`, which picks its layout from the path — so a chat window can
+/// be its own link without a second page to keep in step.
+pub async fn serve(state: AppState, port: u16) -> std::io::Result<()> {
+	let index = tower_http::services::ServeFile::new("web/index.html");
+	let app = Router::new()
+		.route("/ws", get(ws_handler))
+		.route_service("/chat", index)
+		.fallback_service(tower_http::services::ServeDir::new("web"))
+		.with_state(state);
+
+	let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+	axum::serve(listener, app).await
+}
+
+async fn ws_handler(
+	ws: WebSocketUpgrade,
+	State(state): State<AppState>,
+) -> impl IntoResponse {
+	ws.on_upgrade(move |socket| watch(state, socket))
 }
 
 /// One browser: send the snapshot, then follow the stream.
-async fn watch(_state: AppState, _socket: axum::extract::ws::WebSocket) {
-	unimplemented!()
+///
+/// Subscribed before the snapshot is taken, so an Event landing in the gap is
+/// merely sent twice — once inside `init`, once as a Patch — rather than lost.
+/// A consumer that falls behind loses Events per [`crate::event::Events`]; the
+/// fix here is the same one a reconnect gets, a fresh `init`.
+async fn watch(state: AppState, socket: WebSocket) {
+	let mut events = state.harness.events.subscribe();
+	let (mut tx, mut rx) = socket.split();
+
+	let Some(first) = init(&state) else { return };
+	if send(&mut tx, &first).await.is_err() {
+		return;
+	}
+
+	loop {
+		tokio::select! {
+			event = events.recv() => {
+				let frame = match event {
+					Ok(event) => super::wire::patch_for(&state.harness.store, &event),
+					Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+						init(&state)
+					},
+					Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+				};
+				if let Some(frame) = frame {
+					if send(&mut tx, &frame).await.is_err() {
+						return;
+					}
+				}
+			},
+			// Axum answers a Ping with a Pong on its own, but still hands both
+			// to the caller, along with any Binary or Close frame a client
+			// sends — none of which is a browser talking, so only Text is
+			// read, and only a closed or broken socket ends the watch.
+			incoming = rx.next() => {
+				let text = match incoming {
+					Some(Ok(Message::Text(text))) => text,
+					Some(Ok(_)) => continue,
+					Some(Err(_)) | None => return,
+				};
+				let Ok(msg) = serde_json::from_str::<ClientMessage>(&text) else {
+					continue;
+				};
+				match msg {
+					ClientMessage::Say { text } => on_message(&state, &text).await,
+					ClientMessage::Find { query } => {
+						let frame = on_search(&state, &query).await;
+						if send(&mut tx, &frame).await.is_err() {
+							return;
+						}
+					},
+				}
+			},
+		}
+	}
+}
+
+/// The snapshot, as an `init` Frame. `None` only if the Store itself cannot
+/// be read, which is not a state a Watcher can do anything about.
+fn init(state: &AppState) -> Option<Frame> {
+	let snapshot = state.harness.store.snapshot().ok()?;
+	let spend = state.harness.spend().unwrap_or_default();
+	Some(super::wire::init_frame(&snapshot, spend))
+}
+
+/// Put one Frame on the wire as a text message.
+async fn send(
+	tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+	frame: &Frame,
+) -> Result<(), axum::Error> {
+	let text = serde_json::to_string(frame).expect("a Frame always serializes");
+	tx.send(Message::Text(text)).await
 }
 
 /// A message the human typed in the browser.
-async fn on_message(_state: &AppState, _text: &str) {
-	unimplemented!()
+async fn on_message(state: &AppState, text: &str) {
+	state
+		.harness
+		.receive(state.channel, text, IncomingFrom::Human)
+		.await;
 }
 
 /// Rank the Lessons for the search box, with the same call the `memory` Role's
 /// tools make.
-async fn on_search(_state: &AppState, _query: &str) -> super::wire::Frame {
-	unimplemented!()
+async fn on_search(state: &AppState, query: &str) -> Frame {
+	let hits = match state.harness.store.all_lessons() {
+		Ok(lessons) => {
+			let corpus = crate::memory::lesson_corpus(lessons);
+			crate::memory::rank(
+				&state.harness.store,
+				state.embedder.as_ref(),
+				query,
+				&corpus,
+				FIND_LIMIT,
+			)
+			.await
+			.unwrap_or_default()
+		},
+		Err(_) => Vec::new(),
+	};
+
+	Frame::Ranked {
+		query: query.to_string(),
+		hits: hits
+			.into_iter()
+			.map(|h| (h.item.id.to_string(), h.score))
+			.collect(),
+	}
 }
