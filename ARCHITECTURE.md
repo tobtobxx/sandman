@@ -63,7 +63,7 @@ Harness::run → step                  starts only what is not already in motion
           │                ▼
           │        session::turn(ctx, tier)      loop, per iteration:
           │          Task cancelled            → Turn::Cancelled
-          │          msgs since last metacognition ≥ INTERRUPT_EVERY
+          │          msgs since last metacognition ≥ interrupt_interval
           │                                    → reflect::interrupt → tell
           │          scheduler.request           one call, Tier from the caller
           │          Reply::Calls               → tools.run each, then loop
@@ -132,7 +132,9 @@ Role to tools is `roles.rs`. Across all of them:
 ## Seams
 
 Four traits, two adapters each. Two is what makes a seam real rather than hypothetical.
-The scheduler decides *when* a call goes out; `Model` decides *how*.
+The scheduler decides *when* a call goes out; `Model` decides *how*. Which model a call
+gets is its `Purpose`, resolved once at start into `Models`: one adapter per distinct
+spec, so same-model purposes share a connection pool.
 
 | Trait | Real | Bench |
 | --- | --- | --- |
@@ -201,9 +203,11 @@ src/
   event.rs        The one ordered trace, which log.rs writes out as sandman.log.
   db/             SQLite: schema, migrations, rows to domain values.
   store.rs        All state, behind one vocabulary. Emits every Event.
+  config.rs       The configuration: one file, read once at start, nothing else
+                  configured anywhere. default-config.toml is its documentation.
   waiters.rs      Who is blocked in await_result on what.
   scheduler.rs    One call in flight, ordered by Tier then arrival.
-  model.rs        The Model seam, the OpenRouter adapter, the wire shape.
+  model.rs        The Model seam, Purpose and Models, the OpenRouter adapter.
   memory.rs       The Embedder seam, and ranking by meaning.
   roles.rs        The closed Role set: prompt plus tool names.
   prompts.rs      Every prompt, compiled in from prompts/ (one Markdown file each).

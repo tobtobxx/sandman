@@ -37,6 +37,11 @@ Keep all these docs files terse. Important commands, simple description, ~100 li
 
 ## Run it
 
+First start finds no configuration: it writes the commented default to
+`$XDG_CONFIG_HOME/sandman/config.toml` and stops. Read it and start again —
+every key is required, an unknown key is an error. `--config <path>` names
+another file, all state paths included.
+
 Start the harness:
 ```sh
 cargo run --bin sandman
@@ -47,7 +52,7 @@ marked ended. Ctrl+C aborts — the process dies with its calls in flight. The n
 ends what a dead Run left open: Tasks marked running, Sessions, queued and in-flight
 calls. Pending Tasks survive a restart; Sessions never do.
 
-One Sandman per database. A second start on `sandman.sqlite` — including `sandman run` —
+One Sandman per database. A second start on one database — including `sandman run` —
 is refused while the first is live. A lock left by a dead Sandman clears itself; pass
 `--break-lock` for the case it does not.
 
@@ -63,17 +68,20 @@ cargo run --bin sandman -- task \
 
 ## Produced files
 
-A run writes into the working directory. All of it is gitignored, and deleting all
-of it gives you a fresh Sandman.
+Paths come from `[sandman]`; the defaults are under the XDG directories, not the
+working directory. Deleting all of it gives you a fresh Sandman.
 
-- `sandman.sqlite` — every Task, Session, transcript, model call and TaskResult.
-- `sandman.log` — one line per Event: the order in which events happened.
-  Truncated at each start. `--verbose` writes the bodies out too.
-- `sandman.sock` — the control socket `sandman task` talks to. Lives in
-  `$XDG_RUNTIME_DIR` when there is one, beside the database otherwise. Only the
-  interactive harness opens it, and a stale one from a killed process is replaced.
-
-`--db`, `--log` and `--socket` move each of the three.
+- `$XDG_STATE_HOME/sandman/sandman.sqlite` — every Task, Session, transcript, model
+  call and TaskResult.
+- `$XDG_STATE_HOME/sandman/sandman.log` — one line per Event: the order in which
+  events happened. Truncated at each start. `--verbose` writes the bodies out too;
+  with the terminal not a Channel (`[channels].stdio = false`) the trace also goes
+  to stdout.
+- `$XDG_RUNTIME_DIR/sandman/sandman.sock` — the control socket `sandman task`
+  talks to. Only the interactive harness opens it, and a stale one from a killed
+  process is replaced.
+- `$XDG_CONFIG_HOME/sandman/config.toml` — the configuration, written once on
+  first start.
 
 ## Test it
 
@@ -85,6 +93,9 @@ cargo run --bin bench -- --times 5   # with a report and artifacts
 
 ## Configuration
 
-Almost none, on purpose. Model, API key and reasoning effort are constants in
-`src/model.rs`; port is in `src/web/mod.rs`. The key committed here is limited
-and a leak costs nothing.
+One file: `--config`, else `$XDG_CONFIG_HOME/sandman/config.toml`. Read once at
+start; the only place anything is configured — models per Purpose, state paths,
+embedding, Channels, tool endpoints, the bench grader.
+`src/default-config.toml` is the template and the documentation. Any string may
+name a `$VAR`; a variable not set is an error. The API key in the default is a
+limited prototype one; a leak costs nothing.
