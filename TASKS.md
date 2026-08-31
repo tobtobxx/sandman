@@ -26,28 +26,24 @@ Ten steps, bottom up. `cargo check` passes today and must pass after each step.
 
 ### 9. `bench/`, `bin/bench.rs` — done
 
-Cases ended up one file per case under `src/bench/cases/`, not `tests/cases.rs`: each
-file's module doc says the scenario in plain language, and its `#[ignore]`d
-`#[cfg(test)]` wrapper lives at the bottom of the same file rather than in a separate
-integration-test crate, so a case and the test that runs it cannot drift apart.
+### 10. `web/` — done
 
-Verified against the real model: `hello` and `plan-greet` pass. `greet-again` currently
-fails — the Comms Session answers "I've set a reminder" and never calls `create_task`,
-so the reminder is not real. That is the bench doing its job, not a bug in it; see
-"To do" below.
+Built from scratch rather than porting the prototype's front end (`web/index.html`,
+`style.css`, `app.js` are new, plain lists + a chat pane, no forest/ribbon/inspector).
+`patch_for` ended up needing `&Store` — it re-fetches the current full entity for a
+delta Event rather than shipping a partial field, so a Patch is always a whole-entity
+replace on the browser side, never a merge. That needed one new getter,
+`Store::channel(id)`.
 
-### 10. `web/`
-
-Watch out:
-- **The Watcher UI has no front end.** `src/web/` serves it and turns Events into
-  frames; nothing under `web/` exists to receive them. The prototype's `web/app.js` is
-  a reasonable starting shape but reads a different wire format — it merged whole
-  entities out of a twice-a-second diff, and there are no diffs now.
-- `patch_for` returns `None` for Events a Watcher shows nothing for.
-- Nothing in `wire.rs` recomputes. Fields come off the value the Store handed over.
-- Two writes only: a message on the browser's Channel, and a Lessons search — ranked
-  in the server, with the embedder the `memory` Role uses.
-- The channel is a stub.
+Known rough edges, not fixed here:
+- **The Watcher's files are found relative to the working directory.**
+  `server.rs` serves `web/index.html` and `ServeDir::new("web")` by relative path, so
+  starting Sandman anywhere but the repo root gives 404s while the terminal and the
+  control socket keep working. Goes away with `config.toml`.
+- `MailReceived` produces no Patch, so a Session's mailbox count on the wire goes
+  stale between whichever other Events next patch that Session.
+- A failed Lessons search (`on_search`) answers with an empty `Ranked` rather than
+  surfacing the error — `Frame::Ranked` has no error field to put one in.
 
 ## Known debt
 
@@ -58,8 +54,18 @@ Watch out:
 
 - **A recurring chain has no identity.** A repeating Task is a chain of ordinary
   Tasks, and cancelling one must stop the chain. Identity is by what the re-arm copies
-  verbatim — Role, Title, Brief, subscriber, creator, interval — so two identical
+  verbatim — Role, Title, Brief, creator, interval — so two identical
   recurring Tasks would cancel together. A chain-root id on the Task would settle it.
+
+- **A restart ends a recurring chain that was mid-run.** The next occurrence is only
+  created when one completes, so a Task cancelled by `Store::recover` never re-arms:
+  Ctrl+C at the wrong moment loses a daily Task for good. Deliberate for now — the
+  rework that gives a chain its own identity is where this gets fixed.
+
+- **A clean shutdown leaves its Comms Sessions open.** `wind_down` cancels Tasks but
+  ends no Session, so after `/quit` the two Comms Sessions sit at `idle` with no
+  `ended_at` until the next start cancels them. Harmless and self-correcting; it does
+  mean `cancelled` does not distinguish "aborted" from "shut down".
 
 - **A Worker picks a Channel by guessing.** `message_human` names a Channel, and
   several may be open. A Task carries no record of which human it came from — Briefs
@@ -99,6 +105,7 @@ Watch out:
 - Simplify which channels message_human lists?
 - Memory search results cutoff by similarity
 - Sessions are cutoff when calling view_session
+- config.toml
 
 ## To do
 
