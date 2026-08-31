@@ -88,7 +88,8 @@ pub async fn interrupt(ctx: &SessionCtx) -> Nudge {
 ///
 /// The sandwich: the metacognition system prompt on top, the Session's whole
 /// conversation as the subject with system messages recast as user so the
-/// reviewer never adopts them, and the framing of the question last.
+/// reviewer never adopts them, and the framing of the question last as system
+/// message.
 ///
 /// The call goes through the scheduler at [`crate::scheduler::Tier::Metacognition`]
 /// and is recorded against the Session it judges, so its cost lands where the
@@ -123,7 +124,7 @@ async fn metacognise(
 			other => other,
 		});
 	}
-	messages.push(Message::User { content: question.to_string() });
+	messages.push(Message::System { content: question.to_string() });
 
 	let request = CallRequest { messages, tools: Vec::new() };
 	let now = ctx.clock.now();
