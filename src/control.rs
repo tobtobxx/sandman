@@ -229,7 +229,6 @@ async fn handle(harness: &Arc<Harness>, request: Request) -> Response {
 				brief,
 				role,
 				schedule,
-				subscriber: None,
 				priority,
 				created_by: Creator::Control,
 			};

@@ -32,11 +32,11 @@ use strum::IntoDiscriminant;
 
 use crate::db::{Backing, DbError};
 use crate::domain::{
-	CallId, CallStatus, ChannelId, ChannelKind, ChannelRecord, Cost, Day,
-	Duration, Incoming, Lesson, LessonId, LlmCall, Message, NewCall, NewLesson,
-	NewSession, NewTask, Reflection, Run, RunId, Schedule, Session, SessionId,
-	SessionKind, SessionStatus, Spend, Task, TaskId, TaskResult, TaskState,
-	TaskStateName, TaskSummary, Timestamp, Title, Utterance,
+	CallId, CallStatus, ChannelId, ChannelKind, ChannelRecord, Cost, Creator,
+	Day, Duration, Incoming, Lesson, LessonId, LlmCall, Message, NewCall,
+	NewLesson, NewSession, NewTask, Reflection, Run, RunId, Schedule, Session,
+	SessionId, SessionKind, SessionStatus, Spend, Task, TaskId, TaskResult,
+	TaskState, TaskStateName, TaskSummary, Timestamp, Title, Utterance,
 };
 use crate::event::{Event, Events};
 
@@ -105,6 +105,30 @@ fn read_optional<T>(
 		.optional()
 		.store()?;
 	Ok(row.transpose()?)
+}
+
+/// Which Channel is waiting on the work this Creator is enqueuing.
+///
+/// The Channel of a Comms Session, and nothing for anyone else. `sessions.channel`
+/// is written from [`SessionKind::Comms`] alone, so a Worker cannot resolve to
+/// one; a Creator with no Session cannot even ask.
+fn subscriber_of(
+	conn: &rusqlite::Connection,
+	created_by: Creator,
+) -> Result<Option<ChannelId>, StoreError> {
+	let Creator::Session(session) = created_by else {
+		return Ok(None);
+	};
+	let channel: Option<i64> = conn
+		.query_row(
+			"SELECT channel FROM sessions WHERE id = ?1",
+			[session.0],
+			|row| row.get(0),
+		)
+		.optional()
+		.store()?
+		.flatten();
+	Ok(channel.map(|c| ChannelId(c as u32)))
 }
 
 fn task_state_columns(row: &Row<'_>) -> Result<TaskState, DbError> {
@@ -212,6 +236,12 @@ impl Store {
 	// --- Tasks -------------------------------------------------------------
 
 	/// Put a Task on the queue. Emits [`crate::event::Event::TaskCreated`].
+	///
+	/// The subscriber is derived here, from the Creator, and nowhere else: a
+	/// Comms Session subscribes the Channel it stands on, everyone else
+	/// subscribes nobody. Derived rather than passed in because a caller that
+	/// has to remember will one day not, and the Task would complete with its
+	/// answer going nowhere.
 	pub fn create_task(
 		&self,
 		new: NewTask,
@@ -220,6 +250,7 @@ impl Store {
 		let mut conn = self.conn.lock().unwrap();
 		let tx = conn.transaction().store()?;
 		let id = TaskId(crate::db::counters::take(&tx, TaskId::COUNTER)?);
+		let subscriber = subscriber_of(&tx, new.created_by)?;
 
 		let state = TaskState::Pending;
 		let state_row = crate::db::rows::task_state_to_row(&state)?;
@@ -245,7 +276,7 @@ impl Store {
 				schedule_row.tag,
 				schedule_row.json,
 				not_before.map(|t| t.0),
-				new.subscriber.map(|c| c.0),
+				subscriber.map(|c| c.0),
 				priority_json,
 				created_by_json,
 				now.0,
@@ -262,7 +293,7 @@ impl Store {
 			role: new.role,
 			state,
 			schedule: new.schedule,
-			subscriber: new.subscriber,
+			subscriber,
 			priority: new.priority,
 			created_by: new.created_by,
 			created_at: now,
@@ -461,9 +492,11 @@ impl Store {
 
 		let mut stmt = conn
 			.prepare(
+				// No `subscriber` here: it is a function of `created_by`, so
+				// matching on both would only say the same thing twice.
 				"SELECT id, schedule, schedule_json FROM tasks
 				 WHERE role = ?1 AND title = ?2 AND brief = ?3
-				   AND subscriber IS ?4 AND created_by = ?5
+				   AND created_by = ?4
 				   AND state IN ('pending', 'running')",
 			)
 			.store()?;
@@ -473,7 +506,6 @@ impl Store {
 				anchor.role.to_string(),
 				anchor.title.as_str(),
 				anchor.brief.as_str(),
-				anchor.subscriber.map(|c| c.0),
 				created_by,
 			])
 			.store()?;

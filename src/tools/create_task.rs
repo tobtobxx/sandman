@@ -6,9 +6,10 @@
 //! and a Role that should not be choosing Roles is given only the narrow tool.
 //!
 //! None of them waits. A Worker that wants the answer calls `await_result` with
-//! the id it got back, when it is ready for it. None of them subscribes a
-//! Worker either: only a Comms Session subscribes, because it cannot block on a
-//! tool call and so must be handed the answer as mail instead.
+//! the id it got back, when it is ready for it. None of them subscribes anyone
+//! either: the Store reads the subscriber off the calling Session, so a Comms
+//! Session — which cannot block on a tool call, and must be handed the answer as
+//! mail instead — is subscribed whether or not a tool remembered to ask.
 //!
 //! Defines: [`CreateTask`], [`CreateResearchTask`], [`CreateTaskFull`].
 
@@ -105,7 +106,9 @@ fn priority_from(priority: Option<String>) -> Result<TaskPriority, ToolError> {
 /// What a caller is told once its Task exists.
 ///
 /// A Worker is reminded that it can call `await_result`; a Comms Session is told
-/// the answer will reach it when it is ready, because it has no such tool.
+/// the answer will reach it when it is ready, because it has no such tool. The
+/// branch that picks the wording and the subscription the Store derives read the
+/// same Session — say the two differently and this promise goes unkept.
 fn created_reply(ctx: &SessionCtx, id: TaskId) -> String {
 	let is_worker = ctx
 		.store
@@ -165,7 +168,6 @@ impl Tool for CreateTask {
 			brief,
 			role: RoleName::Planning,
 			schedule: Schedule::Now,
-			subscriber: None,
 			priority: TaskPriority::default(),
 			created_by: Creator::Session(ctx.id),
 		};
@@ -215,7 +217,6 @@ impl Tool for CreateResearchTask {
 			brief,
 			role: RoleName::Research,
 			schedule: Schedule::Now,
-			subscriber: None,
 			priority: TaskPriority::default(),
 			created_by: Creator::Session(ctx.id),
 		};
@@ -307,7 +308,6 @@ impl Tool for CreateTaskFull {
 			brief,
 			role,
 			schedule,
-			subscriber: None,
 			priority,
 			created_by: Creator::Session(ctx.id),
 		};

@@ -126,9 +126,9 @@ impl Harness {
 	/// on it, and re-arm it if it repeats.
 	///
 	/// A repeating Task is never finished for good: completing it creates the
-	/// next occurrence — same Title, Brief, Role and subscriber — anchored to the
-	/// schedule rather than to when this one ended, so a late run does not push
-	/// the next one back.
+	/// next occurrence — same Title, Brief, Role and Creator, so the same
+	/// Channel is subscribed again — anchored to the schedule rather than to
+	/// when this one ended, so a late run does not push the next one back.
 	async fn complete_task(
 		&self,
 		id: TaskId,
@@ -152,7 +152,6 @@ impl Harness {
 				brief: task.brief,
 				role: task.role,
 				schedule,
-				subscriber: task.subscriber,
 				priority: task.priority,
 				created_by: task.created_by,
 			};

@@ -1,20 +1,18 @@
-//! Rough smoke tests for the Store, against a fresh in-memory database.
-//!
-//! Task and call round trips need `RoleName`/`Tier` (`roles.rs`,
-//! `scheduler.rs`), still `unimplemented!()` this early in the build order —
-//! see TASKS.md. These cover what does not: Runs, Comms Sessions, messages,
-//! mail, Channels and Lessons. A rough "is this broken" check, not a
-//! regression suite.
+//! Rough smoke tests for the Store, against a fresh in-memory database: Runs,
+//! Comms Sessions, messages, mail, Channels and Lessons. A rough "is this
+//! broken" check, not a regression suite.
 
 use std::sync::Arc;
 
 use sandman::db::Backing;
 use sandman::domain::{
-	ChannelId, ChannelKind, Incoming, IncomingFrom, LessonSubject, Message,
-	NewLesson, NewSession, SessionKind, SessionStatus, Spend, Timestamp,
+	Brief, ChannelId, ChannelKind, Creator, Incoming, IncomingFrom,
+	LessonSubject, Message, NewLesson, NewSession, NewTask, Schedule,
+	SessionKind, SessionStatus, Spend, TaskPriority, Timestamp, Title,
 	Utterance, Who,
 };
 use sandman::event::Events;
+use sandman::roles::RoleName;
 use sandman::store::Store;
 
 fn open() -> Store {
@@ -144,6 +142,50 @@ fn channel_open_say_and_transcript() {
 	let channels = store.channels().unwrap();
 	assert_eq!(channels.len(), 1);
 	assert_eq!(channels[0].transcript.len(), 2);
+}
+
+/// Who gets the answer is read off who asked. A Comms Session subscribes the
+/// Channel it stands on without asking for it; nobody else subscribes at all.
+#[test]
+fn a_comms_session_subscribes_the_task_it_creates() {
+	let store = open();
+	let (comms, channel) = store
+		.open_comms(ChannelKind::Scripted, Vec::new(), Timestamp(0))
+		.unwrap();
+	let task = |by: Creator| NewTask {
+		title: Title::try_from("find something out".to_string()).unwrap(),
+		brief: Brief::try_from("the whole of it".to_string()).unwrap(),
+		role: RoleName::Research,
+		schedule: Schedule::Now,
+		priority: TaskPriority::default(),
+		created_by: by,
+	};
+	let subscriber_of = |by: Creator| {
+		let id = store.create_task(task(by), Timestamp(0)).unwrap();
+		store.task(id).unwrap().unwrap().subscriber
+	};
+
+	assert_eq!(subscriber_of(Creator::Session(comms)), Some(channel));
+	assert_eq!(subscriber_of(Creator::Cli), None);
+	assert_eq!(subscriber_of(Creator::Control), None);
+
+	// A Worker stands on a Task rather than a Channel, so it resolves to
+	// nobody. It waits for a child with `await_result` instead.
+	let parent = store.create_task(task(Creator::Cli), Timestamp(0)).unwrap();
+	let worker = store
+		.start_session(
+			NewSession {
+				kind: SessionKind::Worker {
+					task: parent,
+					role: RoleName::Planning,
+				},
+				status: SessionStatus::Thinking,
+				messages: Vec::new(),
+			},
+			Timestamp(0),
+		)
+		.unwrap();
+	assert_eq!(subscriber_of(Creator::Session(worker)), None);
 }
 
 #[test]

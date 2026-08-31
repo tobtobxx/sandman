@@ -38,7 +38,6 @@ fn brief() -> NewTask {
 		.expect("a short literal brief is never empty"),
 		role: RoleName::Planning,
 		schedule: Schedule::Now,
-		subscriber: None,
 		priority: TaskPriority::default(),
 		created_by: Creator::Cli,
 	}

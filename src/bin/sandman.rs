@@ -320,7 +320,6 @@ async fn one_shot(
 		brief,
 		role,
 		schedule,
-		subscriber: None,
 		priority,
 		created_by: Creator::Cli,
 	};

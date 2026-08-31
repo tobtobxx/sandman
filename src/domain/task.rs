@@ -34,11 +34,15 @@ pub struct Task {
 	pub schedule: Schedule,
 	/// The Channel to hand this Task's Result to, if anyone asked for it.
 	///
-	/// Only a Comms Session ever subscribes — a Worker waits for a child by
-	/// calling `await_result`, which blocks inside the tool call rather than
-	/// registering anything. Naming the Channel rather than the Session makes
-	/// that invariant structural. A Task without a subscriber is work nobody is
-	/// waiting on: its Result is recorded and nothing further happens.
+	/// Never chosen: the Store derives it from [`Creator`], because who is
+	/// waiting is a property of who asked, not a decision a caller makes. A
+	/// Comms Session gets the Channel it stands on; everyone else gets `None` —
+	/// a Worker waits for a child by calling `await_result`, which blocks inside
+	/// the tool call rather than registering anything, and the Cli and Control
+	/// creators read the Result out of the Store themselves.
+	///
+	/// A Task without a subscriber is work nobody is waiting on: its Result is
+	/// recorded and nothing further happens.
 	pub subscriber: Option<ChannelId>,
 	/// How urgently the swarm should spend a model call on this Task's Worker.
 	pub priority: TaskPriority,
@@ -164,13 +168,15 @@ pub enum Creator {
 }
 
 /// Everything needed to put a Task on the queue. The Store mints the id.
+///
+/// No `subscriber`: it follows from `created_by`, so there is no way to enqueue
+/// work and forget to say who is waiting for it. See [`Task::subscriber`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewTask {
 	pub title: Title,
 	pub brief: Brief,
 	pub role: RoleName,
 	pub schedule: Schedule,
-	pub subscriber: Option<ChannelId>,
 	pub priority: TaskPriority,
 	pub created_by: Creator,
 }
