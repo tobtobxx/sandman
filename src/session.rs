@@ -69,20 +69,10 @@ pub enum Turn {
 	Cancelled,
 }
 
-// How many messages may pass without any metacognition before an interrupt
-// fires is `[metacognition].interrupt_interval`.
-//
-// Counted from the last one of either kind. A review has just read the whole
-// conversation and had its own chance at feedback, so an interrupt one message
-// later would only spend money to repeat it. A Worker taking short turns is
-// reviewed and never interrupted; a Comms Session — never reviewed — is
-// interrupted on a plain message count.
-
-/// One turn.
+/// Run one turn to completion.
 ///
-/// The tier is the caller's, because this one loop drives both shapes: a Worker
-/// passes its Task's tier, a Comms Session passes [`Tier::Comms`]. Metacognition
-/// runs its own calls through the scheduler directly and never has to ask.
+/// Sends requests, processes tools and conducts metacog interrupts.
+/// Loops until no more tools. Returns if cancelled or done.
 pub async fn turn(ctx: &SessionCtx, tier: Tier) -> Turn {
 	loop {
 		// Check if cancelled
@@ -122,9 +112,7 @@ pub async fn turn(ctx: &SessionCtx, tier: Tier) -> Turn {
 			);
 		};
 
-		// Collect tool schemas, and say what this Session's calls are for.
-		// One match, so a Session cannot hold one shape's tools and be
-		// answered by the other shape's model.
+		// Collect tool schemas
 		let (tool_names, purpose) = match &session.kind {
 			crate::domain::SessionKind::Worker { role, .. } => {
 				(crate::roles::tools_for(*role), Purpose::Work(*role))
@@ -143,7 +131,7 @@ pub async fn turn(ctx: &SessionCtx, tier: Tier) -> Turn {
 		let outcome =
 			ctx.scheduler.request(ctx.id, request, tier, purpose).await;
 
-		// Process outcome
+		// Handle LLM errors
 		let completion = match outcome {
 			Ok((_call, completion)) => completion,
 			Err(SchedulerError::Call { source, .. }) => {
@@ -154,7 +142,9 @@ pub async fn turn(ctx: &SessionCtx, tier: Tier) -> Turn {
 			},
 		};
 
+		// Process replies
 		match completion.reply {
+			// Only text - append to history and return
 			Reply::Text(text) => {
 				let _ = ctx.store.append_message(
 					ctx.id,
@@ -168,6 +158,7 @@ pub async fn turn(ctx: &SessionCtx, tier: Tier) -> Turn {
 				}
 				return Turn::Text(text);
 			},
+			// Tool calls - append to history, run calls and continue loop
 			Reply::Calls { preamble, calls } => {
 				let _ = ctx.store.append_message(
 					ctx.id,
