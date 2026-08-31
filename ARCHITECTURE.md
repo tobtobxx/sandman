@@ -23,6 +23,12 @@ SQLite is the single source of truth. No in-memory mirror. Structural, not docum
 Ids from `counters`, inside the transaction using them — so two Harnesses can share a
 process. Migrations ordered under `meta.schema_version`; a newer database is refused.
 
+A Run opens by ending the last one's leftovers: `Store::open` cancels every Task marked
+running, Session still open and call still queued or out. Nothing resumes a Session.
+Pending Tasks are left — they are the queue. Unscoped by Run, and safe because
+`db::Lock` gives one Sandman the database file: a pid lockfile beside it, stale locks
+cleared by checking `/proc`, `--break-lock` to override.
+
 One Event stream, read by `log.rs`, `web/` and bench cases. Broadcast: a slow consumer
 loses Events, never slows the swarm. Tool calls are not state changes, so the registry
 emits `ToolCalled`/`ToolReturned` on its own handle.
@@ -170,9 +176,9 @@ fewer Turns finishes first.
 ## Invariants
 
 A Session is `waiting`, `thinking`, `tools`, `idle` (Comms only), `reflecting`, then
-`finished` or `failed`, and stays in the database once done. A model call is `queued`,
-`in_flight`, then `done` or `failed`, recording tokens and what the provider billed as an
-integer of nano-dollars. And everywhere:
+`finished`, `failed` or `cancelled`, and stays in the database once done. A model call is
+`queued`, `in_flight`, then `done`, `failed` or `dropped`, recording tokens and what the
+provider billed as an integer of nano-dollars. And everywhere:
 
 - One Task concept: human request, investigation and delegated work are the same thing.
 - A Task has exactly one Result, on success or failure — or it is cancelled and has none.

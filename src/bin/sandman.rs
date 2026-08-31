@@ -293,13 +293,12 @@ async fn interactive(
 		}
 	});
 
-	tokio::select! {
-		result = harness.run(Drive::Full) => result.map_err(|e| e.to_string())?,
-		// Ctrl+C leaves the same way `/quit` does: stop starting new work,
-		// then wind down. `harness.run` notices `stop()` and returns on its
-		// own, so nothing here is left half-finished.
-		_ = tokio::signal::ctrl_c() => harness.stop(),
-	}
+	// No signal handler, deliberately. Ctrl+C and a kill both mean *abort*:
+	// the process dies where it stands, in-flight model calls with it. What
+	// that leaves half-written in the database — Tasks marked running,
+	// Sessions still open, calls still out — the next start ends, in
+	// `Store::open`. Leaving is `/quit` or Ctrl+D, which is the path below.
+	harness.run(Drive::Full).await.map_err(|e| e.to_string())?;
 
 	harness.wind_down(Duration::from_secs(30)).await;
 	let _ = harness.store.end_run(harness.now());

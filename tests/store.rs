@@ -2,20 +2,21 @@
 //! Comms Sessions, messages, mail, Channels and Lessons. A rough "is this
 //! broken" check, not a regression suite.
 //!
-//! One needs a file instead: a lock is two Stores over one database, and a
-//! fresh in-memory one has nothing to be left behind in.
+//! Two need a file instead: a lock and a restart are each two Stores over one
+//! database, and a fresh in-memory one has nothing to be left behind in.
 
 use std::sync::Arc;
 
 use sandman::db::{Backing, DbError, Lock};
 use sandman::domain::{
-	Brief, ChannelId, ChannelKind, Creator, Incoming, IncomingFrom,
-	LessonSubject, Message, NewLesson, NewSession, NewTask, Schedule,
-	SessionKind, SessionStatus, Spend, TaskPriority, Timestamp, Title,
-	Utterance, Who,
+	Brief, CallRequest, CallStatus, ChannelId, ChannelKind, Creator, Incoming,
+	IncomingFrom, LessonSubject, Message, NewCall, NewLesson, NewSession,
+	NewTask, Schedule, SessionKind, SessionStatus, Spend, TaskPriority,
+	TaskState, Timestamp, Title, Utterance, Who,
 };
 use sandman::event::Events;
 use sandman::roles::RoleName;
+use sandman::scheduler::Tier;
 use sandman::store::{Store, StoreError};
 
 fn open() -> Store {
@@ -275,4 +276,102 @@ fn a_second_store_on_one_database_is_refused() {
 	drop(second);
 	drop(third);
 	clean();
+}
+
+/// A Run that died leaves rows mid-flight. The next start ends every one of
+/// them, and leaves the queue alone.
+#[test]
+fn a_restart_ends_what_a_dead_run_left_open() {
+	let path = std::env::temp_dir()
+		.join(format!("sandman-restart-{}.sqlite", std::process::id()));
+	for suffix in ["", "-wal", "-shm", ".lock"] {
+		let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+	}
+	let open = |now| {
+		Store::open(
+			Backing::File(path.clone()),
+			Arc::new(Events::new(64)),
+			"test-model",
+			now,
+		)
+		.expect("open a file-backed store")
+	};
+	let task = |title: &str| NewTask {
+		title: Title::try_from(title.to_string()).unwrap(),
+		brief: Brief::try_from("find something out".to_string()).unwrap(),
+		role: RoleName::Research,
+		schedule: Schedule::Now,
+		priority: TaskPriority::default(),
+		created_by: Creator::Cli,
+	};
+
+	// A Run that got as far as starting one Task and dying.
+	let (pending, running, session, call) = {
+		let store = open(Timestamp(0));
+		let pending = store
+			.create_task(task("waits its turn"), Timestamp(0))
+			.unwrap();
+		let running = store
+			.create_task(task("was interrupted"), Timestamp(0))
+			.unwrap();
+		let session = store
+			.start_session(
+				NewSession {
+					kind: SessionKind::Worker {
+						task: running,
+						role: RoleName::Research,
+					},
+					status: SessionStatus::Thinking,
+					messages: Vec::new(),
+				},
+				Timestamp(1),
+			)
+			.unwrap();
+		store.start_task(running, session, Timestamp(1)).unwrap();
+		let call = store
+			.queue_call(
+				NewCall {
+					session,
+					tier: Tier::TaskNormal,
+					model: "test-model".to_string(),
+					request: CallRequest {
+						messages: Vec::new(),
+						tools: Vec::new(),
+					},
+				},
+				Timestamp(1),
+			)
+			.unwrap();
+		assert!(store.calls_outstanding().unwrap());
+		(pending, running, session, call)
+	};
+
+	let store = open(Timestamp(100));
+
+	assert_eq!(
+		store.task(running).unwrap().unwrap().state,
+		TaskState::Cancelled { at: Timestamp(100) }
+	);
+	let session = store.session(session).unwrap().unwrap();
+	assert_eq!(session.status, SessionStatus::Cancelled);
+	assert_eq!(session.ended_at, Some(Timestamp(100)));
+	assert_eq!(
+		store.call(call).unwrap().unwrap().status,
+		CallStatus::Dropped { at: Timestamp(100) }
+	);
+
+	// The queue outlives the process it was written in.
+	assert_eq!(
+		store.task(pending).unwrap().unwrap().state,
+		TaskState::Pending
+	);
+	assert_eq!(
+		store.next_pending(Timestamp(100)).unwrap().unwrap().id,
+		pending
+	);
+
+	drop(store);
+	for suffix in ["", "-wal", "-shm", ".lock"] {
+		let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+	}
 }

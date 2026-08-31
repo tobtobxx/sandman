@@ -205,7 +205,98 @@ impl Store {
 			ended_at: None,
 			model: model.to_string(),
 		}));
+		store.recover(now)?;
 		Ok(store)
+	}
+
+	/// End what an earlier Run left open.
+	///
+	/// A Run that died — Ctrl+C, a kill, a crash — leaves rows mid-flight: Tasks
+	/// marked running with no Session turning behind them, Sessions with no loop
+	/// left, calls queued or still out. **Nothing resumes any of it.** A Session
+	/// is a live agent context, not a document, so a new Run closes what it finds
+	/// instead of inheriting it, and the terminal states say which end it was.
+	///
+	/// Pending Tasks are the one thing left alone: they are the queue, and a Task
+	/// scheduled for tomorrow has to outlive tonight's restart.
+	///
+	/// Nothing here is scoped to a Run, and nothing needs to be: the Run that
+	/// just started owns nothing yet, and [`crate::db::Lock`] means no other
+	/// Sandman has this database open. "Still open" and "left behind" are
+	/// therefore the same set. Without the lock they would not be, and this
+	/// would cancel a live Run's work mid-Turn.
+	fn recover(&self, now: Timestamp) -> Result<(), StoreError> {
+		let mut conn = self.conn.lock().unwrap();
+		let tx = conn.transaction().store()?;
+
+		let ids = |sql: &str| -> Result<Vec<u32>, StoreError> {
+			let mut stmt = tx.prepare(sql).store()?;
+			let mut rows = stmt.query([]).store()?;
+			let mut ids = Vec::new();
+			while let Some(row) = rows.next().store()? {
+				ids.push(row.get::<_, i64>(0).store()? as u32);
+			}
+			Ok(ids)
+		};
+
+		let tasks = ids("SELECT id FROM tasks WHERE state = 'running'")?;
+		let task_state = TaskState::Cancelled { at: now };
+		let row = crate::db::rows::task_state_to_row(&task_state)?;
+		for &id in &tasks {
+			tx.execute(
+				"UPDATE tasks SET state = ?1, state_json = ?2 WHERE id = ?3",
+				rusqlite::params![row.tag, row.json, id],
+			)
+			.store()?;
+		}
+
+		let sessions = ids("SELECT id FROM sessions WHERE ended_at IS NULL")?;
+		let status = SessionStatus::Cancelled;
+		let row = crate::db::rows::session_status_to_row(&status)?;
+		for &id in &sessions {
+			tx.execute(
+				"UPDATE sessions SET status = ?1, status_json = ?2,
+				 ended_at = ?3 WHERE id = ?4",
+				rusqlite::params![row.tag, row.json, now.0, id],
+			)
+			.store()?;
+		}
+
+		let calls = ids(
+			"SELECT id FROM calls WHERE status IN ('queued', 'in_flight')",
+		)?;
+		let dropped = CallStatus::Dropped { at: now };
+		let row = crate::db::rows::call_status_to_row(&dropped)?;
+		for &id in &calls {
+			tx.execute(
+				"UPDATE calls SET status = ?1, status_json = ?2 WHERE id = ?3",
+				rusqlite::params![row.tag, row.json, id],
+			)
+			.store()?;
+		}
+
+		tx.commit().store()?;
+		drop(conn);
+
+		for id in tasks {
+			self.events.emit(Event::TaskStateChanged {
+				task: TaskId(id),
+				to: task_state.clone(),
+			});
+		}
+		for id in sessions {
+			self.events.emit(Event::SessionStatusChanged {
+				session: SessionId(id),
+				to: status.clone(),
+			});
+		}
+		for id in calls {
+			self.events.emit(Event::CallStatusChanged {
+				call: CallId(id),
+				to: dropped.clone(),
+			});
+		}
+		Ok(())
 	}
 
 	/// The Run this Store is writing.

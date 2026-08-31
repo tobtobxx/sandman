@@ -71,6 +71,11 @@ pub enum CallStatus {
 		finished_at: Timestamp,
 		error: String,
 	},
+	/// Left behind by a Run that died, still queued or still out. Its own
+	/// variant rather than a [`CallStatus::Failed`], which would have to invent
+	/// a `sent_at` that a queued call never had. Cost nothing that can be
+	/// known, so Spend ignores it.
+	Dropped { at: Timestamp },
 }
 
 /// What one finished call consumed.

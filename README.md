@@ -42,6 +42,15 @@ Start the harness:
 cargo run --bin sandman
 ```
 
+`/quit` or Ctrl+D leaves cleanly: nothing new starts, the last calls land, the **Run** is
+marked ended. Ctrl+C aborts — the process dies with its calls in flight. The next start
+ends what a dead Run left open: Tasks marked running, Sessions, queued and in-flight
+calls. Pending Tasks survive a restart; Sessions never do.
+
+One Sandman per database. A second start on `sandman.sqlite` — including `sandman run` —
+is refused while the first is live. A lock left by a dead Sandman clears itself; pass
+`--break-lock` for the case it does not.
+
 A Task into a Sandman already running — this is how cron, an RSS script or a mail watcher
 gets work in. Prints the Task's id and exits:
 ```sh

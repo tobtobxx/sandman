@@ -100,6 +100,9 @@ pub enum SessionStatus {
 	/// Stopped by something that could not be recovered from — in practice, a
 	/// model that could not be reached.
 	Failed { reason: String },
+	/// Left behind by a Run that died. A Session is a live agent context and
+	/// nothing resumes one: the next start finds it still open and ends it here.
+	Cancelled,
 }
 
 /// Everything needed to start a Session. The Store mints the id.
@@ -272,6 +275,11 @@ impl SessionKind {
 
 impl SessionStatus {
 	pub fn is_terminal(&self) -> bool {
-		matches!(self, SessionStatus::Finished | SessionStatus::Failed { .. })
+		matches!(
+			self,
+			SessionStatus::Finished
+				| SessionStatus::Failed { .. }
+				| SessionStatus::Cancelled
+		)
 	}
 }
