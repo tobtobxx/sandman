@@ -178,29 +178,22 @@ pub enum ConfigError {
 	)]
 	NoSuchSlug { key: String, slug: String },
 	#[error(
-		"there is nowhere to keep a configuration: neither $XDG_CONFIG_HOME \
-		 nor $HOME is set. Name one with --config."
+		"$XDG_CONFIG_HOME is not set. Name a configuration with --config."
 	)]
 	Nowhere,
 }
 
 impl Config {
 	/// Where the configuration lives: `--config`, else
-	/// `$XDG_CONFIG_HOME/sandman/config.toml`, else `~/.config/sandman/config.toml`.
+	/// `$XDG_CONFIG_HOME/sandman/config.toml`. `$XDG_CONFIG_HOME` must be set;
+	/// there is no fallback.
 	pub fn path(flag: Option<PathBuf>) -> Result<PathBuf, ConfigError> {
 		if let Some(path) = flag {
 			return Ok(path);
 		}
-		if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
-			return Ok(PathBuf::from(dir).join("sandman").join("config.toml"));
-		}
-		if let Ok(home) = std::env::var("HOME") {
-			return Ok(PathBuf::from(home)
-				.join(".config")
-				.join("sandman")
-				.join("config.toml"));
-		}
-		Err(ConfigError::Nowhere)
+		let dir = std::env::var("XDG_CONFIG_HOME")
+			.map_err(|_| ConfigError::Nowhere)?;
+		Ok(PathBuf::from(dir).join("sandman").join("config.toml"))
 	}
 
 	/// Read the configuration, or write the default one and stop.
