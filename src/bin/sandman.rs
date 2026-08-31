@@ -111,11 +111,6 @@ struct Cli {
 	#[arg(long, global = true)]
 	verbose: bool,
 	/// Start even though the database looks locked.
-	///
-	/// A lock left by a dead Sandman is cleared on its own — the pid in it is
-	/// checked. This is for the one case that check cannot settle, a pid the
-	/// system has since given to something else. Using it while a Sandman is
-	/// really running will cancel that Sandman's work.
 	#[arg(long, global = true)]
 	break_lock: bool,
 }
