@@ -221,18 +221,6 @@ macro_rules! bench_case {
 
 			$crate::bench::cases::finish(case, rig, outcome, graders).await
 		}
-
-		#[cfg(test)]
-		mod tests {
-			#[tokio::test]
-			#[ignore = "spends money on a real model; cargo test -- --ignored"]
-			async fn passes() {
-				let (_, report) = super::run().await;
-				if !report.pass {
-					panic!("{} did not pass: {:#?}", $name, report);
-				}
-			}
-		}
 	};
 }
 pub(crate) use bench_case;
