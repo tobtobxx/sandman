@@ -232,6 +232,27 @@ main {
   width: 3.5rem;
 }
 
+.cancel-btn {
+  background: color-mix(in srgb, var(--down) 14%, transparent);
+  color: var(--down);
+  border: 1px solid color-mix(in srgb, var(--down) 30%, transparent);
+  border-radius: 3px;
+  padding: 0.15rem 0.5rem;
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  flex: none;
+}
+.cancel-btn:hover {
+  background: color-mix(in srgb, var(--down) 22%, transparent);
+}
+.row .cancel-btn {
+  margin-left: auto;
+}
+#insp-body .actions {
+  margin: 0.6rem 0;
+}
+
 .empty {
   color: var(--dim);
   padding: 1rem;

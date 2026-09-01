@@ -222,6 +222,11 @@ function kv(pairs) {
 // Each returns the row's inner markup only; `renderRows` wraps it with the
 // bucket and id a click needs to open the inspector on the right thing.
 
+function canCancelTask(t) {
+  const s = tagOf(t.state);
+  return s === "pending" || s === "running";
+}
+
 function taskRow(t) {
   // A completed Task takes its colour from the Result it carries rather than
   // from the word "completed": a Task that finished having failed is not good
@@ -229,11 +234,15 @@ function taskRow(t) {
   const name = tagOf(t.state);
   const tone =
     name === "completed" ? TONE[tagOf(payloadOf(t.state).result)] : undefined;
+  const cancel = canCancelTask(t)
+    ? `<button class="cancel-btn" data-cancel="${esc(t.id)}">Cancel</button>`
+    : "";
   return `<span class="id">${esc(t.id)}</span>
     <span class="ttl" title="${esc(t.brief)}">${esc(t.title)}</span>
     <span class="tag">${esc(t.role)}</span>
     <span class="tag pri">${esc(t.priority)}</span>
-    ${stateTag(name, tone)}`;
+    ${stateTag(name, tone)}
+    ${cancel}`;
 }
 
 function sessionRow(s) {
@@ -291,6 +300,9 @@ function row(bucketName, id, inner, depth = 0) {
 function taskDetail(t) {
   const s = sessionForTask(t.id);
   const result = payloadOf(t.state);
+  const cancel = canCancelTask(t)
+    ? `<button class="cancel-btn" data-cancel="${esc(t.id)}">Cancel task</button>`
+    : "";
   return (
     kv([
       ["task", esc(t.id)],
@@ -304,6 +316,7 @@ function taskDetail(t) {
       ["created at", when(t.created_at)],
       ["session", s ? esc(s.id) : undefined],
     ]) +
+    (cancel ? `<div class="actions">${cancel}</div>` : "") +
     `<h3>Brief</h3><pre>${esc(t.brief)}</pre>` +
     (tagOf(t.state) === "completed"
       ? `<h3>Result</h3><pre>${esc(payloadOf(result.result))}</pre>`
@@ -522,10 +535,28 @@ document.querySelectorAll(".tab").forEach((b) =>
 );
 
 document.getElementById("rows").addEventListener("click", (ev) => {
+  const cancel = ev.target.closest("[data-cancel]");
+  if (cancel) {
+    ev.stopPropagation();
+    const taskId = cancel.dataset.cancel;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ t: "cancel", task_id: taskId }));
+    }
+    return;
+  }
   const r = ev.target.closest(".row[data-id]");
   if (!r) return;
   selected = { bucket: r.dataset.bucket, id: r.dataset.id };
   render();
+});
+
+document.getElementById("insp-body").addEventListener("click", (ev) => {
+  const cancel = ev.target.closest("[data-cancel]");
+  if (!cancel) return;
+  const taskId = cancel.dataset.cancel;
+  if (socket?.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ t: "cancel", task_id: taskId }));
+  }
 });
 
 document.getElementById("find").addEventListener("submit", (ev) => {

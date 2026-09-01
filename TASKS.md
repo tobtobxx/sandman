@@ -3,10 +3,6 @@
 Scratchpad. Debt goes here as it is created, not afterwards.
 
 Known rough edges, not fixed here:
-- **The Watcher's files are found relative to the working directory.**
-  `server.rs` serves `web/index.html` and `ServeDir::new("web")` by relative path, so
-  starting Sandman anywhere but the repo root gives 404s while the terminal and the
-  control socket keep working.
 - `MailReceived` produces no Patch, so a Session's mailbox count on the wire goes
   stale between whichever other Events next patch that Session.
 - A failed Lessons search (`on_search`) answers with an empty `Ranked` rather than

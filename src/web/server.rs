@@ -2,20 +2,21 @@
 //!
 //! Construct: `AppState { harness: Arc<Harness>, channel: Option<ChannelId> }` where
 //! `None` means `[channels].web` is off — UI still watches, chat has nowhere to send;
-//! `serve(state, addr, port)` binds axum, serves `web/` and upgrades `/ws`.
-//! Use: browser loads `/` or `/chat` (same `index.html`) then `ws_handler → watch`
+//! `serve(state, addr, port)` binds axum, serves embedded `web/` and upgrades `/ws`.
+//! Use: browser loads `/` or `/chat` (same embedded `index.html`) then `ws_handler → watch`
 //! sends one `Frame::Init` then one `Frame` per [`crate::event::Event`]; inbound
-//! `ClientMessage::Say | Find` are the only writes (`on_message → Harness::receive`,
-//! `on_search → memory::rank`).
+//! `ClientMessage::Say | Find | Cancel` are the writes (`on_message → Harness::receive`,
+//! `on_search → memory::rank`, `on_cancel → Harness::cancel_task`).
 //! Consumers: browser JS is the only external consumer; internally `Harness` supplies
 //! `Events` + `Store::snapshot`, `wire::{init_frame,patch_for}` supplies `Frame`s.
 //! Seam: `wire` owns `Event` → `Frame`; `server` owns sockets, broadcast handling,
-//! and the two writes — never ranking or patch translation.
+//! and the three writes — never ranking or patch translation.
 //!
 //! | `ClientMessage` | handler | effect |
 //! | --- | --- | --- |
 //! | `Say` | `on_message` | `Harness::receive` on own `Channel` — dropped if `None` |
 //! | `Find` | `on_search` | `memory::rank` with same `Embedder` as `memory` tool |
+//! | `Cancel` | `on_cancel` | `Harness::cancel_task` — stops pending/running chain |
 //!
 //! Call trace: `serve → ws_handler → watch → init → send(Init)` then
 //! `select! { events.recv → patch_for → send; rx.next → Say | Find → send(Ranked) }`
@@ -30,15 +31,22 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::http::{header, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
+use rust_embed::RustEmbed;
 
 use crate::domain::IncomingFrom;
 use crate::harness::Harness;
 
 use super::wire::Frame;
+
+/// Embedded `web/` assets compiled into the binary.
+#[derive(RustEmbed)]
+#[folder = "web/"]
+struct Assets;
 
 /// State threaded into every handler.
 ///
@@ -55,33 +63,84 @@ const FIND_LIMIT: usize = 10;
 
 /// One write from a browser.
 ///
-/// `Say` is the human talking on own `Channel`; `Find` is the Lessons search box.
-/// No other browser write exists.
+/// `Say` is the human talking on own `Channel`; `Find` is the Lessons search box;
+/// `Cancel` stops a Task and its repeating chain.
 #[derive(serde::Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 enum ClientMessage {
 	Say { text: String },
 	Find { query: String },
+	Cancel { task_id: String },
 }
 
 /// Bind the Watcher UI.
 ///
-/// Serves `web/` as static files and upgrades `/ws` to Watcher sockets.
+/// Serves embedded `web/` as static files and upgrades `/ws` to Watcher sockets.
 /// `/chat` serves the same `index.html` as `/` so a chat window has its own link.
 pub async fn serve(
 	state: AppState,
 	address: std::net::IpAddr,
 	port: u16,
 ) -> std::io::Result<()> {
-	let index = tower_http::services::ServeFile::new("web/index.html");
 	let app = Router::new()
 		.route("/ws", get(ws_handler))
-		.route_service("/chat", index)
-		.fallback_service(tower_http::services::ServeDir::new("web"))
+		.fallback(serve_asset)
 		.with_state(state);
 
 	let listener = tokio::net::TcpListener::bind((address, port)).await?;
 	axum::serve(listener, app).await
+}
+
+/// Serve an embedded static asset.
+///
+/// `/` and `/chat` both return `index.html`; other paths are looked up verbatim
+/// in the embedded `web/` folder. Returns `404` when no asset matches.
+async fn serve_asset(uri: Uri) -> impl IntoResponse {
+	let path = uri.path();
+	let key = match path {
+		"/" | "/chat" | "/index.html" => "index.html",
+		_ => path.trim_start_matches('/'),
+	};
+	if key.is_empty() {
+		return serve_embedded("index.html");
+	}
+	// Trim query is already done via `path`; handle trailing slash for /chat/
+	if let Some(file) = Assets::get(key) {
+		return response_for(key, file.data.into_owned());
+	}
+	// Also try without trailing slash variant (e.g. /chat/ -> index.html)
+	if key.ends_with('/') {
+		let trimmed = key.trim_end_matches('/');
+		if trimmed == "chat" {
+			return serve_embedded("index.html");
+		}
+	}
+	(StatusCode::NOT_FOUND, "not found").into_response()
+}
+
+fn serve_embedded(key: &str) -> axum::response::Response {
+	if let Some(file) = Assets::get(key) {
+		response_for(key, file.data.into_owned())
+	} else {
+		(StatusCode::NOT_FOUND, "not found").into_response()
+	}
+}
+
+fn response_for(key: &str, bytes: Vec<u8>) -> axum::response::Response {
+	([(header::CONTENT_TYPE, content_type(key))], bytes).into_response()
+}
+
+fn content_type(path: &str) -> &'static str {
+	match path.rsplit('.').next() {
+		Some("html") => "text/html; charset=utf-8",
+		Some("js") => "application/javascript; charset=utf-8",
+		Some("css") => "text/css; charset=utf-8",
+		Some("png") => "image/png",
+		Some("svg") => "image/svg+xml",
+		Some("json") => "application/json",
+		Some("ico") => "image/x-icon",
+		_ => "application/octet-stream",
+	}
 }
 
 /// Upgrade a request to a Watcher socket.
@@ -96,7 +155,7 @@ async fn ws_handler(
 
 /// Drive one browser connection.
 ///
-/// Sends `Init` then follows `Events` with `Patch`/`Appended` and answers `Say`/`Find`.
+/// Sends `Init` then follows `Events` with `Patch`/`Appended` and answers `Say`/`Find`/`Cancel`.
 /// Returns when the socket closes or `Events` is closed; `Lagged` re-sends `Init`.
 async fn watch(state: AppState, socket: WebSocket) {
 	// Subscribe before snapshot
@@ -156,6 +215,10 @@ async fn watch(state: AppState, socket: WebSocket) {
 							return;
 						}
 					},
+					// Cancel — stop task chain
+					ClientMessage::Cancel { task_id } => {
+						on_cancel(&state, &task_id).await;
+					},
 				}
 			},
 		}
@@ -195,6 +258,17 @@ async fn on_message(state: &AppState, text: &str) {
 		.harness
 		.receive(channel, text, IncomingFrom::Human)
 		.await;
+}
+
+/// Cancel a Task and its repeating chain from the browser.
+///
+/// Parses the id and delegates to `Harness::cancel_task`. Failures are silent —
+/// the `Patch` on success or no change on failure is the feedback.
+async fn on_cancel(state: &AppState, task_id: &str) {
+	let Ok(id) = task_id.parse::<crate::domain::TaskId>() else {
+		return;
+	};
+	let _ = state.harness.cancel_task(id).await;
 }
 
 /// Rank `Lesson`s for a search query.

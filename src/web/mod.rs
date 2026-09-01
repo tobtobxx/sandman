@@ -6,12 +6,12 @@
 //! embedding call.
 //!
 //! Construct: `AppState { harness: Arc<Harness>, channel: Option<ChannelId> }`;
-//! `server::serve(state, addr, port)` binds axum, serves `web/` and upgrades
+//! `server::serve(state, addr, port)` binds axum, serves embedded `web/` and upgrades
 //! `/ws`. Use: browser loads `/` or `/chat` (same `index.html`), opens `/ws`,
 //! gets one `Frame::Init` (every entity from `Store::snapshot` plus `Spend` and
 //! `Run`) then one `Frame` per [`crate::event::Event`] via `wire::patch_for`;
-//! writes are `Say`/`Find` JSON (`t: "say"|"find"`) handled by
-//! `on_message`/`on_search`. Consumers: browser JS is the only external consumer;
+//! writes are `Say`/`Find`/`Cancel` JSON (`t: "say"|"find"|"cancel"`) handled by
+//! `on_message`/`on_search`/`on_cancel`. Consumers: browser JS is the only external consumer;
 //! internally `Harness` supplies `Events` + `Store`, `memory::rank` supplies
 //! Lesson scores so the browser sees the same ranking a `memory` Worker would.
 //! Seam: `Event` → `Frame` translation lives only in [`wire`]; [`server`] owns
