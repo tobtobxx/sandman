@@ -7,6 +7,7 @@
 *.sqlite-shm
 sandman.log
 sandman.sock
+config.toml
 
 # The prototype this design came from. Kept on disk for reference, with its own
 # history; not part of this repo.
