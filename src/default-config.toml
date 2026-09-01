@@ -1,21 +1,16 @@
 # Sandman's configuration.
 #
-# Written here when Sandman starts and finds nothing, and then Sandman stops:
-# there is nothing sensible to run before you have read this file. Nothing has a
-# built-in fallback — what is here is what Sandman uses, and a key that is not
-# here is an error at start. An unknown key is an error too, so a typo is loud
-# rather than quiet.
+# This is the empty default config when no config is found.
+# You have to at least adjust the [model] sections: Supply an API key or point
+# to your local model.
 #
-# Read from --config, else $XDG_CONFIG_HOME/sandman/config.toml.
-#
-# Any string may name an environment variable: `$NAME` or `${NAME}`, and `$$`
-# for a literal `$`. A variable that is not set is an error, not an empty
-# string.
+# Environment variables are parsed: `$HOME` or `${XDG_RUNTIME_DIR}`, and `$$`
+# for a literal `$`.
 
 
 # --- Models ------------------------------------------------------------------
 # One table per slug. The name in brackets is the slug, and everything below
-# names a model by it. Slugs nothing names are kept, not complained about.
+# defines a model by it.
 #
 #   endpoint  a chat-completions URL
 #   api_key   sent as `Authorization: Bearer`. May be empty for a local endpoint.
@@ -25,24 +20,23 @@
 #             "low", "medium", "high", or whatever else the endpoint takes.
 
 [model.qwen36-local]
-endpoint = "https://llm.tobtobxx.net/v1/chat/completions"
+endpoint = "https://localhost:11434/v1/chat/completions"
 api_key = ""
 model = "Qwen3.6-35B-A3B:MXFP4_MOE"
 effort = false
 
 [model.qwen36-remote]
 endpoint = "https://openrouter.ai/api/v1/chat/completions"
-# A prototype key with a low limit; leaking it costs nothing.
-api_key = "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"
+api_key = "sk-or-v1-..."
 model = "qwen/qwen3.6-35b-a3b"
 effort = false
 
+# Used for grading the benchmark
 [model.glm-flash]
 endpoint = "https://openrouter.ai/api/v1/chat/completions"
-api_key = "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"
+api_key = "sk-or-v1-..."
 model = "z-ai/glm-5.3-flash"
-# This one refuses to have reasoning turned off — HTTP 400, "Reasoning is
-# mandatory for this endpoint". "low" is the least it takes.
+# Reasoning is mandatory for GLM 5.3 Flash
 effort = "low"
 
 
@@ -63,13 +57,13 @@ all = "qwen36-local"
 # --- Sandman -----------------------------------------------------------------
 
 [sandman]
-# A relative path is relative to the working directory. The parent of each is
-# created at start if it is not there.
+# State database
 sqlite_path = "$XDG_STATE_HOME/sandman/sandman.sqlite"
+# Log file
 log_path = "$XDG_STATE_HOME/sandman/sandman.log"
-# Where the control socket lives — how `sandman task`, `sandman list` and
-# `sandman spend` reach a Sandman that is already running.
+# Access to the running instance for `sandman task` -`list` and -`spend`
 control_socket = "$XDG_RUNTIME_DIR/sandman/sandman.sock"
+# Observer and chat webui
 webui_address = "::1"
 webui_port = 8080
 
@@ -83,17 +77,13 @@ model = "qwen36-local"
 
 
 # --- Embedding ---------------------------------------------------------------
-# What the `memory` Role searches with. Not a chat model: its own endpoint, and
-# nothing to think about. Cached vectors are keyed on the model name, so
-# changing it leaves the old ones alone rather than mixing two vector spaces.
+# Embedding model for lessons/sessions. The memory role uses it for searches.
+# Changing it breaks the old cached embeddings.
 
 [embedding]
 endpoint = "https://openrouter.ai/api/v1/embeddings"
-api_key = "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"
+api_key = "sk-or-v1-..."
 model = "liquid/lfm-2.5-embedding-350m:free"
-# Longer inputs cost more and embed worse. The cap is here so one runaway Brief
-# cannot fail a whole batch.
-max_input_chars = 6000
 
 
 # --- Channels ----------------------------------------------------------------
@@ -111,12 +101,11 @@ web = true
 
 [tools]
 # What `web_search` asks.
-searxng_endpoint = "https://searxh.tobtobxx.net/"
+searxng_endpoint = "https://priv.au/" # Must have json replies enabled.
 
 
 # --- Bench -------------------------------------------------------------------
 
 [bench]
-# The grader's model. Deliberately stronger than the swarm's: a judge no better
-# than what it judges is not a judge. What it costs is never Spend.
+# The grader's model. Should be stronger than the swarms model.
 grader = "glm-flash"
