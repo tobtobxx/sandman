@@ -19,16 +19,16 @@
 #             reasoning at all. Anything else is a string, sent as written —
 #             "low", "medium", "high", or whatever else the endpoint takes.
 
+[model.qwen36-remote]
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+api_key = "sk-or-v1-..."               # <----------- IF NOTHING ELSE, CHANGE THIS
+model = "qwen/qwen3.6-35b-a3b"
+effort = false
+
 [model.qwen36-local]
 endpoint = "https://localhost:11434/v1/chat/completions"
 api_key = ""
 model = "Qwen3.6-35B-A3B:MXFP4_MOE"
-effort = false
-
-[model.qwen36-remote]
-endpoint = "https://openrouter.ai/api/v1/chat/completions"
-api_key = "sk-or-v1-..."
-model = "qwen/qwen3.6-35b-a3b"
 effort = false
 
 # Used for grading the benchmark
@@ -40,18 +40,50 @@ model = "z-ai/glm-5.3-flash"
 effort = "low"
 
 
+# --- Embedding ---------------------------------------------------------------
+# Embedding model for lessons/sessions. The memory role uses it for searches.
+# Changing it breaks the old cached embeddings.
+
+[embedding]
+endpoint = "https://openrouter.ai/api/v1/embeddings"
+api_key = "sk-or-v1-..."               # <----------- AND CHANGE THIS TOO
+model = "liquid/lfm-2.5-embedding-350m:free"
+
+
 # --- Which model does which work ---------------------------------------------
 # `all` is what every Session uses. The rest are the only optional keys in this
 # file: each names the model for that Role's Workers, and falls back to `all`
 # when it is not here. `comms` is the Session that talks to a human.
 
 [models]
-all = "qwen36-local"
+all = "qwen36-remote"
 # comms = "qwen36-remote"
 # planning = "qwen36-remote"
 # research = "qwen36-remote"
 # memory = "qwen36-local"
 # task_manager = "qwen36-local"
+
+
+# --- Metacognition -----------------------------------------------------------
+
+[metacognition]
+# How many messages may pass with no review and no interrupt before one fires.
+interrupt_interval = 15
+model = "qwen36-remote"
+
+
+# --- Tools -------------------------------------------------------------------
+
+[tools]
+# What `web_search` asks.
+searxng_endpoint = "https://priv.au/" # Must have json replies enabled.
+
+
+# --- Bench -------------------------------------------------------------------
+
+[bench]
+# The grader's model. Should be stronger than the swarms model.
+grader = "glm-flash"
 
 
 # --- Sandman -----------------------------------------------------------------
@@ -68,24 +100,6 @@ webui_address = "::1"
 webui_port = 8080
 
 
-# --- Metacognition -----------------------------------------------------------
-
-[metacognition]
-# How many messages may pass with no review and no interrupt before one fires.
-interrupt_interval = 15
-model = "qwen36-local"
-
-
-# --- Embedding ---------------------------------------------------------------
-# Embedding model for lessons/sessions. The memory role uses it for searches.
-# Changing it breaks the old cached embeddings.
-
-[embedding]
-endpoint = "https://openrouter.ai/api/v1/embeddings"
-api_key = "sk-or-v1-..."
-model = "liquid/lfm-2.5-embedding-350m:free"
-
-
 # --- Channels ----------------------------------------------------------------
 # The ways a human reaches the swarm. The Watcher UI is served either way; `web`
 # only decides whether its chat pane is a Channel or says it is turned off.
@@ -96,16 +110,3 @@ model = "liquid/lfm-2.5-embedding-350m:free"
 stdio = true
 web = true
 
-
-# --- Tools -------------------------------------------------------------------
-
-[tools]
-# What `web_search` asks.
-searxng_endpoint = "https://priv.au/" # Must have json replies enabled.
-
-
-# --- Bench -------------------------------------------------------------------
-
-[bench]
-# The grader's model. Should be stronger than the swarms model.
-grader = "glm-flash"
