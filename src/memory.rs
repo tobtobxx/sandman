@@ -23,8 +23,7 @@
 //! | `Embedder` | `OpenRouterEmbedder` (skips scheduler, never Spend) | deterministic stub |
 //!
 //! Rules: **embedder never goes through scheduler** — no queue, no Spend, no
-//! Session turn. **truncate at `max_input_chars`** — one runaway Brief cannot
-//! fail a batch. **brute force, no index** — `rank` scans every vector.
+//! Session turn. **brute force, no index** — `rank` scans every vector.
 //!
 //! Defines: [`Embedder`], [`OpenRouterEmbedder`], [`EmbedError`], [`cosine`],
 //! [`rank`], [`lesson_corpus`], [`search_failed`].
@@ -39,9 +38,6 @@ pub trait Embedder: Send + Sync {
 	/// Model that produced these vectors — cache key so spaces never mix.
 	fn model(&self) -> &str;
 
-	/// Max chars per input — caps cost and keeps vectors meaningful.
-	fn max_input_chars(&self) -> usize;
-
 	/// Embed a batch, order preserved.
 	async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError>;
 }
@@ -54,7 +50,6 @@ pub struct OpenRouterEmbedder {
 	endpoint: String,
 	api_key: String,
 	model: String,
-	max_input_chars: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -75,7 +70,6 @@ impl OpenRouterEmbedder {
 			endpoint: spec.endpoint.clone(),
 			api_key: spec.api_key.clone(),
 			model: spec.model.clone(),
-			max_input_chars: spec.max_input_chars,
 		}
 	}
 }
@@ -84,10 +78,6 @@ impl OpenRouterEmbedder {
 impl Embedder for OpenRouterEmbedder {
 	fn model(&self) -> &str {
 		&self.model
-	}
-
-	fn max_input_chars(&self) -> usize {
-		self.max_input_chars
 	}
 
 	async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
@@ -171,11 +161,6 @@ pub fn lesson_corpus(
 		.collect()
 }
 
-/// Truncate to `cap` chars so one long Brief cannot fail a batch.
-fn truncated(text: &str, cap: usize) -> String {
-	text.chars().take(cap).collect()
-}
-
 /// Rank a corpus against a query by cosine, best first.
 ///
 /// Lazily embeds uncached entries in one batch; caches and scores all.
@@ -188,7 +173,6 @@ pub async fn rank<T: Clone>(
 	count: usize,
 ) -> Result<Vec<crate::domain::Hit<T>>, EmbedError> {
 	let model = embedder.model();
-	let cap = embedder.max_input_chars();
 	let vector_of = |key: &str| -> Result<Option<Vec<f32>>, EmbedError> {
 		store
 			.vector(key, model)
@@ -205,11 +189,11 @@ pub async fn rank<T: Clone>(
 			None => {
 				vectors.push(None);
 				missing_idx.push(i);
-				batch.push(truncated(text, cap));
+				batch.push(text.clone());
 			},
 		}
 	}
-	batch.push(truncated(query, cap));
+	batch.push(query.to_string());
 
 	// Embed missing plus query
 	let mut embedded = embedder.embed(&batch).await?;

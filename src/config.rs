@@ -99,7 +99,6 @@ pub struct Embedding {
 	pub endpoint: String,
 	pub api_key: String,
 	pub model: String,
-	pub max_input_chars: usize,
 }
 
 /// Ways a human reaches the swarm.
