@@ -33,7 +33,3 @@ path = "src/lib.rs"
 [[bin]]
 name = "sandman"
 path = "src/bin/sandman.rs"
-
-[[bin]]
-name = "bench"
-path = "src/bin/bench.rs"
