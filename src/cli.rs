@@ -10,8 +10,7 @@
 //!
 //! Rules: **subcommand required** — no default (previous `Interactive`/`None`
 //! is now `Serve`). **global config flags** (`--config`, `--verbose`,
-//! `--break-lock`) are on `Cli` so every command sees them, even though
-//! `bench` ignores them.
+//! `--break-lock`) are on `Cli` so every command sees them.
 
 use std::path::PathBuf;
 

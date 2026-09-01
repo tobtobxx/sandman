@@ -40,6 +40,9 @@ mod plan_greet;
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+
+use crate::config::Config;
 
 use super::report::{self, RunReport};
 use super::{CheckResult, Grader, Rig, Trip, Watch};
@@ -50,8 +53,9 @@ use super::{CheckResult, Grader, Rig, Trip, Watch};
 /// out of it; it is absent only when the Rig could not be built, which still
 /// reports. A tripwire is not an error here — it is [`RunReport::tripped`], so a
 /// run that ended early still says what it saw on the way.
-type CaseFn =
-	fn() -> Pin<Box<dyn Future<Output = (Option<Rig>, RunReport)> + Send>>;
+type CaseFn = fn(
+	Arc<Config>,
+) -> Pin<Box<dyn Future<Output = (Option<Rig>, RunReport)> + Send>>;
 
 /// One question put to the harness-and-model combination.
 pub struct Case {
@@ -66,18 +70,18 @@ pub const CASES: &[Case] = &[
 	Case {
 		name: "hello",
 		description: "`\"Hello :)\"` gets a reply and reaches for no Task.",
-		run: || Box::pin(hello::run()),
+		run: |config| Box::pin(hello::run(config)),
 	},
 	Case {
 		name: "greet-again",
 		description:
 			"Asking to be greeted again in ~3 minutes creates one Task.",
-		run: || Box::pin(greet_again::run()),
+		run: |config| Box::pin(greet_again::run(config)),
 	},
 	Case {
 		name: "plan-greet",
 		description: "A planning Worker schedules a greeting ~3 minutes out.",
-		run: || Box::pin(plan_greet::run()),
+		run: |config| Box::pin(plan_greet::run(config)),
 	},
 ];
 
@@ -190,13 +194,15 @@ macro_rules! bench_case {
 		tripwires: [ $( ($tw_name:expr, $tw_pred:expr) ),* $(,)? ],
 		body: |$rig:ident, $graders:ident| $body:block
 	) => {
-		pub(super) async fn run() -> (
+		pub(super) async fn run(
+			config: ::std::sync::Arc<$crate::config::Config>,
+		) -> (
 			Option<$crate::bench::Rig>,
 			$crate::bench::report::RunReport,
 		) {
 			let case =
 				$crate::bench::cases::find($name).expect("registered in CASES");
-			let mut rig = match ($builder).build().await {
+			let mut rig = match ($builder).config(config).build().await {
 				Ok(rig) => rig,
 				Err(trip) => {
 					return (

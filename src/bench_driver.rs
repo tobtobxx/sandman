@@ -6,23 +6,28 @@
 //! own — `Rig` owns the four seams (`Model`, `ToolRunner`, `Clock`,
 //! `Embedder`).
 //!
-//! Construct: `BenchFlags` from `cli` → `bench(flags)` validates `--case`
-//! names against `CASES`. Use: `main` on `Cmd::Bench` → `bench` →
-//! `bench_run_once(case, dir)` → `report::write_artifacts` /
+//! Construct: `BenchFlags` from `cli` → `bench(flags, config_flag)` validates
+//! `--case` names against `CASES`, loads `Config` from `--config`, and threads
+//! it to each `Rig`. Use: `main` on `Cmd::Bench` → `bench` →
+//! `bench_run_once(case, dir, config)` → `report::write_artifacts` /
 //! `report::print_run`. Consumers: `main` only.
 //!
 //! Call trace:
 //! ```text
-//! bench → CASES / find(name) → bench_run_once → (case.run)() → write_artifacts
+//! bench → CASES / find(name) → bench_run_once → (case.run)(config) → write_artifacts
 //!       → summarize → report::print_summary
 //! ```
 //!
 //! Rules: one `Rig` per run (private DB/log/counters) so parallel runs are
 //! honest. `--list` exits before any spend. Announce before await so silence
-//! does not read as hang.
+//! does not read as hang. `--config` is honored for every run.
+
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use sandman::bench::report::{self, CaseSummary, RunReport};
 use sandman::bench::{Case, CASES};
+use sandman::config::Config;
 
 use crate::cli::BenchFlags;
 
@@ -44,13 +49,14 @@ fn bench_list() {
 
 /// Run one case and persist its artifacts.
 ///
-/// Executes `case.run()` and writes `result.json`/`store.sqlite`/`sandman.log`.
+/// Executes `(case.run)(config)` and writes `result.json`/`store.sqlite`/`sandman.log`.
 /// Returns `RunReport`; only artifact write failure becomes `Err`.
 async fn bench_run_once(
 	case: &Case,
 	dir: &std::path::Path,
+	config: Arc<Config>,
 ) -> Result<RunReport, String> {
-	let (rig, report) = (case.run)().await;
+	let (rig, report) = (case.run)(config).await;
 	if let Some(rig) = rig {
 		report::write_artifacts(&report, &rig, dir).map_err(|e| {
 			format!("could not write artifacts to {}: {e}", dir.display())
@@ -110,7 +116,10 @@ fn bench_summarize(reports: &[(String, RunReport)]) -> Vec<CaseSummary> {
 }
 
 /// Execute the bench subcommand.
-pub async fn bench(flags: BenchFlags) -> Result<(), String> {
+pub async fn bench(
+	flags: BenchFlags,
+	config_flag: Option<PathBuf>,
+) -> Result<(), String> {
 	if flags.list {
 		bench_list();
 		return Ok(());
@@ -137,6 +146,11 @@ pub async fn bench(flags: BenchFlags) -> Result<(), String> {
 			.collect::<Result<Vec<_>, String>>()?
 	};
 
+	let path =
+		Config::path(config_flag).map_err(|e| e.to_string())?;
+	let config = Config::load(&path).map_err(|e| e.to_string())?;
+	let config = Arc::new(config);
+
 	let on = sandman::bench::color::enabled();
 	let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
 	let total = cases.len() * times;
@@ -161,7 +175,7 @@ pub async fn bench(flags: BenchFlags) -> Result<(), String> {
 				bench_announce(on, case.name, k, times);
 				let dir = report::run_dir(&flags.out, &stamp, case.name, k);
 				done += 1;
-				match bench_run_once(case, &dir).await {
+				match bench_run_once(case, &dir, config.clone()).await {
 					Ok(report) => {
 						print!(
 							"{} ",
@@ -183,8 +197,9 @@ pub async fn bench(flags: BenchFlags) -> Result<(), String> {
 			for k in 1..=times {
 				bench_announce(on, case.name, k, times);
 				let dir = report::run_dir(&flags.out, &stamp, case.name, k);
+				let cfg = config.clone();
 				set.spawn(
-					async move { (case.name, bench_run_once(case, &dir).await) },
+					async move { (case.name, bench_run_once(case, &dir, cfg).await) },
 				);
 			}
 		}

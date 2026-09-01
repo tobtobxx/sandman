@@ -84,7 +84,7 @@ async fn main() {
 			};
 			task::spend(paths).await
 		},
-		Cmd::Bench(flags) => bench_driver::bench(flags).await,
+		Cmd::Bench(flags) => bench_driver::bench(flags, config_flag).await,
 	};
 
 	if let Err(message) = result {
