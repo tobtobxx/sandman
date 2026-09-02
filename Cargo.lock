@@ -3311,7 +3311,7 @@ dependencies = [
  "serde_json",
  "strum",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
  "toml",
