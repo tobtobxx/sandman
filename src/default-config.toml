@@ -103,12 +103,35 @@ webui_port = 8080
 
 
 # --- Channels ----------------------------------------------------------------
-# The ways a human reaches the swarm. The Watcher UI is served either way; `web`
-# only decides whether its chat pane is a Channel or says it is turned off.
+# The ways a human reaches the swarm. One table per transport, each with its own
+# `enable`.
 
-[channels]
 # The terminal. Turned off, the trace goes to stdout as well as to the log,
 # because nothing else is using it.
-stdio = true
-web = true
+[channels.stdio]
+enable = true
+
+# The chat pane of the Watcher UI. The UI is served either way; this only
+# decides whether its chat pane is a Channel or says it is turned off.
+[channels.web]
+enable = true
+
+# A Matrix account. Sandman talks to `authorized_user` in a direct room and
+# ignores every other sender. Messages are end-to-end encrypted; the device and
+# its keys live in `store_path`, so the same device comes back after a restart.
+[channels.matrix]
+enable = false
+user = "@sandman:example.org"
+password = "..."
+homeserver = "https://example.org"
+# The one human Sandman answers here.
+authorized_user = "@you:example.org"
+# Crypto store and saved session.
+store_path = "$XDG_STATE_HOME/sandman/matrix"
+# Passphrase for the homeserver's Secret Storage (SSSS). Set it, and the device
+# signs itself, so other Matrix clients show it as verified, and a second
+# machine (or a rebuild after state loss) recovers the same identity. It may be
+# removed again after the first successful start. Absent, the device works but
+# stays unverified.
+# recovery_passphrase = "a strong passphrase"
 

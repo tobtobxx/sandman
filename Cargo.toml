@@ -21,6 +21,7 @@ clap = { version = "4", features = ["derive"] }
 strum = { version = "0.28.0", features = ["derive"] }
 num_enum = "0.7.6"
 toml = "1.1.4"
+matrix-sdk = { version = "0.18", features = ["markdown", "sqlite", "e2e-encryption"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"

@@ -16,6 +16,7 @@
 //! |---|---|---|
 //! | `Stdio` | cyan to stdout | stdin loop → `Harness::receive` |
 //! | `Web` | no-op (Store `Said` already holds it) | browser → `Harness::receive` |
+//! | `Matrix` | sends into the direct room | homeserver sync → `Harness::receive` |
 //! | `Scripted` | captured for artifacts | bench script → `Harness::receive` |
 //!
 //! Rules: **one Comms Session per Channel, for its life.** **Transcript is what the human saw — no system prompt, tool calls, or unseen swarm post.** **More than one Channel may be open; they share nothing.** **One-way sources (RSS/mail) out of scope — outside work enters as Task via control socket.**
@@ -57,6 +58,8 @@ pub enum ChannelKind {
 	Stdio,
 	/// A browser on the Watcher UI.
 	Web,
+	/// A direct room with one human on a Matrix homeserver.
+	Matrix,
 	/// A bench script — named honestly, not a fake terminal.
 	Scripted,
 }

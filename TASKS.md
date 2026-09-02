@@ -82,3 +82,9 @@ Known rough edges, not fixed here:
   name the right Channel? It needs a Rig with two Channels open, to make the "which
   human" guess visible. A unit bench like the rest — the call is intercepted, not
   delivered.
+
+
+## Prio
+ - Fix scheduling
+ - Show better token usage
+ - Task/session/call references clickable

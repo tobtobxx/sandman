@@ -102,11 +102,41 @@ pub struct Embedding {
 }
 
 /// Ways a human reaches the swarm.
+///
+/// One table per transport, each with its own `enable`.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Channels {
-	pub stdio: bool,
-	pub web: bool,
+	pub stdio: Toggle,
+	pub web: Toggle,
+	pub matrix: Matrix,
+}
+
+/// A Channel that needs nothing but a yes or a no.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Toggle {
+	pub enable: bool,
+}
+
+/// The Matrix Channel: an account, the one human it answers, and where its keys live.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Matrix {
+	pub enable: bool,
+	/// Sandman's own Matrix id, as `@name:server`.
+	pub user: String,
+	pub password: String,
+	pub homeserver: String,
+	/// The one human this Channel answers. Every other sender is ignored.
+	pub authorized_user: String,
+	/// Directory for the crypto store and the saved session, so the same
+	/// Matrix device comes back after a restart.
+	pub store_path: PathBuf,
+	/// Passphrase for the homeserver's Secret Storage. Set, the device
+	/// self-verifies and can recover its keys on another machine; absent, the
+	/// device stays unverified in other Matrix clients.
+	pub recovery_passphrase: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -463,7 +493,8 @@ mod tests {
 			PathBuf::from("/run/user/1000/sandman/sandman.sock")
 		);
 		assert_eq!(config.metacognition.interrupt_interval, 15);
-		assert!(config.channels.stdio && config.channels.web);
+		assert!(config.channels.stdio.enable && config.channels.web.enable);
+		assert!(!config.channels.matrix.enable);
 	}
 
 	#[test]

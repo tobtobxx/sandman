@@ -53,6 +53,10 @@
 //! the parent/child boundary.** **Spend re-summed on read, never
 //! accumulated.**
 
+// `matrix-sdk`'s encrypted sync is a future deep enough that proving it `Send`
+// runs past the default limit.
+#![recursion_limit = "256"]
+
 pub mod bench;
 pub mod channels;
 pub mod comms;

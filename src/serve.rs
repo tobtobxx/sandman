@@ -5,14 +5,16 @@
 //! attaches channels, spawns the web UI and control socket, then drives the
 //! harness until the user quits.
 //!
-//! Construct: `assemble(&Paths, Arc<Config>, Verbosity) → Arc<Harness>`.
+//! Construct: `assemble(&Paths, Arc<Config>, Verbosity) → (Arc<Harness>,
+//! Arc<Logger>)` — the `Logger` comes back out because the Matrix Channel
+//! writes its transport trouble there instead of onto the terminal.
 //! Use: `main` on `Cmd::Serve` → `load_config_and_paths` → `interactive` →
 //! `harness.run(Drive::Full)` → `wind_down` → `end_run` → remove socket.
 //! Consumers: `main` only.
 //!
 //! Call trace:
 //! ```text
-//! interactive → assemble → attach stdio/web → spawn web::serve + control::serve
+//! interactive → assemble → attach stdio/web/matrix → spawn web::serve + control::serve
 //!             → harness.run → wind_down → end_run → remove socket
 //! ```
 //!
@@ -25,21 +27,23 @@ use std::sync::Arc;
 use sandman::config::Config;
 use sandman::domain::Duration;
 use sandman::harness::{Drive, Harness};
+use sandman::log::Logger;
 
 use crate::paths::{make_room_for, Paths};
 
 /// Assemble a full Harness from config.
 ///
-/// Opens Store, Events, Logger, Scheduler and registry. Returns `Arc<Harness>`.
+/// Opens Store, Events, Logger, Scheduler and registry. Returns the Harness
+/// and the Logger, which the Matrix Channel writes its transport trouble to.
 pub async fn assemble(
 	paths: &Paths,
 	config: Arc<Config>,
 	verbosity: sandman::log::Verbosity,
-) -> Result<Arc<Harness>, String> {
+) -> Result<(Arc<Harness>, Arc<Logger>), String> {
 	use sandman::db::Backing;
 	use sandman::domain::{Clock, SystemClock};
 	use sandman::event::Events;
-	use sandman::log::{Echo, Logger};
+	use sandman::log::Echo;
 	use sandman::memory::{Embedder, OpenRouterEmbedder};
 	use sandman::model::Models;
 	use sandman::scheduler::Scheduler;
@@ -50,7 +54,7 @@ pub async fn assemble(
 	let now = clock.now();
 	let events = Arc::new(Events::new(1024));
 
-	let echo = if config.channels.stdio {
+	let echo = if config.channels.stdio.enable {
 		Echo::Quiet
 	} else {
 		Echo::Stdout
@@ -153,8 +157,9 @@ pub async fn assemble(
 	let embedder: Arc<dyn Embedder> =
 		Arc::new(OpenRouterEmbedder::from_spec(&config.embedding));
 
-	Ok(Harness::new(
-		store, events, scheduler, tools, clock, embedder, config,
+	Ok((
+		Harness::new(store, events, scheduler, tools, clock, embedder, config),
+		logger,
 	))
 }
 
@@ -167,15 +172,25 @@ pub async fn interactive(
 	config: Arc<Config>,
 	verbosity: sandman::log::Verbosity,
 ) -> Result<(), String> {
-	let harness = assemble(&paths, config.clone(), verbosity).await?;
+	let (harness, logger) = assemble(&paths, config.clone(), verbosity).await?;
 
-	if config.channels.stdio {
+	if config.channels.stdio.enable {
 		sandman::channels::stdio::attach(harness.clone())
 			.await
 			.map_err(|e| format!("could not open the terminal: {e}"))?;
 	}
 
-	let web_channel = if config.channels.web {
+	if config.channels.matrix.enable {
+		sandman::channels::matrix::attach(
+			harness.clone(),
+			&config.channels.matrix,
+			logger.clone(),
+		)
+		.await
+		.map_err(|e| format!("could not open the Matrix channel: {e}"))?;
+	}
+
+	let web_channel = if config.channels.web.enable {
 		Some(
 			sandman::channels::web::attach(harness.clone())
 				.await

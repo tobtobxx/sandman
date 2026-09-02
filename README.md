@@ -75,7 +75,7 @@ working directory. Deleting all of it gives you a fresh Sandman.
   call and TaskResult.
 - `$XDG_STATE_HOME/sandman/sandman.log` — one line per Event: the order in which
   events happened. Truncated at each start. `--verbose` writes the bodies out too;
-  with the terminal not a Channel (`[channels].stdio = false`) the trace also goes
+  with the terminal not a Channel (`[channels.stdio] enable = false`) the trace also goes
   to stdout.
 - `$XDG_RUNTIME_DIR/sandman/sandman.sock` — the control socket `sandman task`
   talks to. Only the interactive harness opens it, and a stale one from a killed
