@@ -563,7 +563,7 @@ impl Rig {
 		self.store
 			.save_copy(&dir.join("store.sqlite"))
 			.map_err(|e| {
-				std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+				std::io::Error::other(e.to_string())
 			})?;
 		// Copy log if present
 		let log_path = self.dir.path().join("sandman.log");

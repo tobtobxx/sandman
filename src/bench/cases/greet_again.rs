@@ -9,7 +9,6 @@
 //! judgement, not a count, so a grader reads it: it must keep the greeting and
 //! keep the delay, and add nothing that was not there.
 
-use crate::bench::grader::Grader;
 use crate::bench::intercept::{Answer, ToolsChoice};
 use crate::domain::ChannelKind;
 use crate::harness::Drive;

@@ -45,6 +45,10 @@ pub enum Verdict {
 	Fail,
 }
 
+/// How to read a grader's reply: maps the whole reply text to a verdict and
+/// a human-readable detail line.
+pub type Judge = Box<dyn Fn(&str) -> (Verdict, String) + Send + Sync>;
+
 /// One question put to a model about a finished run.
 pub struct Grader {
 	pub name: String,
@@ -52,7 +56,7 @@ pub struct Grader {
 	/// out of the run's state and the calls the Session made.
 	pub input: String,
 	/// How to read the reply. [`default_judge`] looks for the verdict tag.
-	pub judge: Option<Box<dyn Fn(&str) -> (Verdict, String) + Send + Sync>>,
+	pub judge: Option<Judge>,
 }
 
 /// What one grader found.

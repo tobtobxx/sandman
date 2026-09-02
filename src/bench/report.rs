@@ -157,7 +157,7 @@ pub fn write_artifacts(
 ) -> std::io::Result<()> {
 	rig.save_to(dir)?;
 	let json = serde_json::to_string_pretty(report).map_err(|e| {
-		std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+		std::io::Error::other(e.to_string())
 	})?;
 	std::fs::write(dir.join("result.json"), json)?;
 	Ok(())
