@@ -148,6 +148,20 @@ function payloadOf(v) {
   return undefined;
 }
 
+/** Human-readable schedule, including its config: timestamp or cron expr. */
+function scheduleText(s) {
+  const tag = tagOf(s);
+  if (tag === "now") return esc(tag);
+  const p = payloadOf(s);
+  if (tag === "at") return `at ${esc(p != null ? new Date(p).toISOString() : "")}`;
+  if (tag === "cron") {
+    const expr = p?.expr != null ? esc(p.expr) : "";
+    const next = p?.next != null ? esc(new Date(p.next).toISOString()) : "";
+    return `cron "${expr}" — next ${next}`;
+  }
+  return esc(tag);
+}
+
 /** The number in an id — every id reads `<prefix>-<n>`, and the number is the
  *  order it was made in. */
 const serialOf = (id) => Number(id.slice(id.lastIndexOf("-") + 1));
@@ -379,7 +393,7 @@ function taskDetail(t) {
       ["role", esc(t.role)],
       ["priority", esc(t.priority)],
       ["state", esc(tagOf(t.state))],
-      ["schedule", esc(tagOf(t.schedule))],
+      ["schedule", scheduleText(t.schedule)],
       ["subscriber", t.subscriber ? ref(t.subscriber) : undefined],
       // `created_by` is a variant name on its own — `cli`, `comms` — except
       // for `session`, which names the Session that asked for the Task.
