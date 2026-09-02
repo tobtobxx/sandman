@@ -114,6 +114,10 @@ function payloadOf(v) {
   return undefined;
 }
 
+/** The number in an id — every id reads `<prefix>-<n>`, and the number is the
+ *  order it was made in. */
+const serialOf = (id) => Number(id.slice(id.lastIndexOf("-") + 1));
+
 const money = (nanoUsd) => `$${((nanoUsd ?? 0) / 1e9).toFixed(6)}`;
 const when = (ms) => (ms ? new Date(ms).toLocaleTimeString() : "");
 /** A span in ms, read at a glance: sub-second stays in ms, longer goes to
@@ -187,7 +191,7 @@ function parentTaskId(t) {
   return s && tagOf(s.kind) === "worker" ? payloadOf(s.kind).task : null;
 }
 
-/** Every Task, depth-first under whichever Task's Worker created it, oldest
+/** Every Task, depth-first under whichever Task's Worker created it, newest
  *  sibling first. Flat by default — most Tasks have no children. */
 function taskTree() {
   const children = new Map();
@@ -197,7 +201,7 @@ function taskTree() {
     if (p) (children.get(p) ?? children.set(p, []).get(p)).push(t);
     else roots.push(t);
   }
-  const byAge = (a, b) => a.created_at - b.created_at;
+  const byAge = (a, b) => b.created_at - a.created_at;
   for (const list of children.values()) list.sort(byAge);
   roots.sort(byAge);
 
@@ -446,7 +450,11 @@ function renderRows() {
 
   if (bucket !== "lessons") {
     findBox.classList.add("hidden");
-    const items = Object.values(state[bucket]);
+    // Newest on top. Ids read `<prefix>-<n>`, so it is the number that orders
+    // them — sorting the strings would put `call-10` before `call-9`.
+    const items = Object.values(state[bucket]).sort(
+      (a, b) => serialOf(b.id) - serialOf(a.id),
+    );
     box.innerHTML =
       items.map((item) => row(bucket, item.id, ROW[bucket](item))).join("") ||
       `<p class="empty">Nothing here yet.</p>`;
