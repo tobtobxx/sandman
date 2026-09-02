@@ -6,7 +6,7 @@
 //! Sandman (private DB, counters, log, Harness); integration is a series of
 //! unit benches, not a swarm case.
 //!
-//! Construct: [`rig::RigBuilder`] → [`rig::Rig`] (model/clock/tools/drive/channel/timeout).
+//! Construct: [`rig::RigBuilder`] → [`rig::Rig`] (model/clock/tools/drive/channel).
 //! Drive: [`Rig::until`] follows the Event stream; predicate and every
 //! tripwire re-checked on each Event, no polling.
 //! Verify: tripwire (continuous → [`Trip`]) vs check (once → [`CheckResult`])

@@ -1,6 +1,6 @@
 //! One Sandman under test — private Harness, Store, scheduler, Event stream and log.
 //!
-//! Construct: `RigBuilder::default` → `RigBuilder::{model,clock,tools,drive,channel,timeout,config}` → `build() → Rig`.
+//! Construct: `RigBuilder::default` → `RigBuilder::{model,clock,tools,drive,channel,config}` → `build() → Rig`.
 //! Use: seed state (`seed_task`, `seed_lesson`, `send`), drive (`until`, `idle_for`, `converse`, `await_task`) with tripwires, read (`tool_calls`, `transcript`, `tasks`, `spend`, `failed_calls`), end (`wind_down`, `save_to`).
 //! Consumers: `cases` via `Case::run`, `report::assemble` (winds down and reports), `bin/bench` and `tests/cases.rs`.
 //!
@@ -16,6 +16,7 @@
 //! - **One Rig is one Sandman** — private in-memory DB, Events, scheduler, log dir; nothing process-global.
 //! - **`Drive` controls what starts** — `Manual`/`CommsOnly`/`Full`; bench is one Session by construction.
 //! - **`until` is event-driven** — predicate and tripwires re-checked on each Event, no polling.
+//! - **The case bound is `bench.timeout`** — one deadline from config, the same for every case.
 //! - **Wind-down is mandatory** — `wind_down` cancels unfinished Tasks and waits for in-flight calls; `Drop` aborts drivers.
 //! - **Channels are bench transports** — `BenchChannel::send` is no-op, transcript lives in `Store`.
 //!
@@ -66,7 +67,6 @@ pub struct RigBuilder {
 	clock: ClockChoice,
 	drive: Drive,
 	channels: Vec<crate::domain::ChannelKind>,
-	timeout: Option<Duration>,
 	log: crate::log::Verbosity,
 	config: Option<Arc<Config>>,
 }
@@ -83,7 +83,8 @@ pub struct Rig {
 	events: tokio::sync::broadcast::Receiver<crate::event::Event>,
 	tripwires: Vec<Tripwire>,
 	started_at: Timestamp,
-	deadline: Option<Timestamp>,
+	/// Case bound from `bench.timeout`. Every wait stops here.
+	deadline: Timestamp,
 	dir: tempfile::TempDir,
 	drivers: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -129,7 +130,6 @@ impl Default for RigBuilder {
 			clock: ClockChoice::Real,
 			drive: Drive::Manual,
 			channels: Vec::new(),
-			timeout: None,
 			log: Verbosity::Terse,
 			config: None,
 		}
@@ -167,12 +167,6 @@ impl RigBuilder {
 	/// Open a bench Channel the script can speak on.
 	pub fn channel(mut self, kind: crate::domain::ChannelKind) -> Self {
 		self.channels.push(kind);
-		self
-	}
-
-	/// Bound for whole case, overriding `bench.timeout`. Trips when exceeded.
-	pub fn timeout(mut self, within: Duration) -> Self {
-		self.timeout = Some(within);
 		self
 	}
 
@@ -297,9 +291,7 @@ impl RigBuilder {
 		}
 
 		// Assemble rig
-		let timeout = self
-			.timeout
-			.unwrap_or_else(|| Duration::from_secs(config.bench.timeout));
+		let timeout = Duration::from_secs(config.bench.timeout);
 
 		Ok(Rig {
 			harness,
@@ -310,7 +302,7 @@ impl RigBuilder {
 			events: subscription,
 			tripwires: Vec::new(),
 			started_at: now,
-			deadline: Some(now.plus(timeout)),
+			deadline: now.plus(timeout),
 			dir,
 			drivers,
 		})
@@ -395,18 +387,15 @@ impl Rig {
 
 			// Enforce deadline
 			let now = self.harness.now();
-			if let Some(deadline) = self.deadline {
-				if now >= deadline {
-					return Err(Trip::Timeout { what: what.to_string() });
-				}
+			if now >= self.deadline {
+				return Err(Trip::Timeout { what: what.to_string() });
 			}
 
 			// Wait for event or deadline
-			let wait = self.deadline.map(|d| now.until(d));
-			let sleep = tokio::time::sleep(match wait {
-				Some(d) => std::time::Duration::from_millis(d.0.max(1) as u64),
-				None => std::time::Duration::from_secs(3600),
-			});
+			let wait = now.until(self.deadline);
+			let sleep = tokio::time::sleep(std::time::Duration::from_millis(
+				wait.0.max(1) as u64,
+			));
 			tokio::pin!(sleep);
 			tokio::select! {
 				_ = &mut sleep => {},
@@ -433,12 +422,10 @@ impl Rig {
 			}
 
 			// Enforce case bound
-			if let Some(deadline) = self.deadline {
-				if now >= deadline {
-					let seconds =
-						(deadline.0 - self.started_at.0).max(0) / 1000;
-					return Err(Trip::CaseTimeout { seconds: seconds as u64 });
-				}
+			if now >= self.deadline {
+				let seconds =
+					(self.deadline.0 - self.started_at.0).max(0) / 1000;
+				return Err(Trip::CaseTimeout { seconds: seconds as u64 });
 			}
 
 			// Wait for event or target
