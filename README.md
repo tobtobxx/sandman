@@ -82,6 +82,9 @@ working directory. Deleting all of it gives you a fresh Sandman.
   process is replaced.
 - `$XDG_CONFIG_HOME/sandman/config.toml` — the configuration, written once on
   first start.
+- `$XDG_STATE_HOME/sandman/matrix` — the Matrix Channel's crypto store and its
+  `session.json`, from `[channels.matrix] store_path`. Delete it and Sandman
+  comes back as a new, unverified Matrix device.
 
 ## Test it
 

@@ -123,7 +123,7 @@ pub enum MatrixError {
 	Store { path: PathBuf, source: std::io::Error },
 	#[error("could not write the session: {0}")]
 	Session(serde_json::Error),
-	#[error("could not reach {0}")]
+	#[error("could not reach the homeserver: {0}")]
 	Homeserver(#[from] matrix_sdk::ClientBuildError),
 	#[error("{0}")]
 	Matrix(#[from] matrix_sdk::Error),

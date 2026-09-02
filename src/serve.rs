@@ -174,12 +174,8 @@ pub async fn interactive(
 ) -> Result<(), String> {
 	let (harness, logger) = assemble(&paths, config.clone(), verbosity).await?;
 
-	if config.channels.stdio.enable {
-		sandman::channels::stdio::attach(harness.clone())
-			.await
-			.map_err(|e| format!("could not open the terminal: {e}"))?;
-	}
-
+	// Matrix first: it is the one that can fail, and a failure should not
+	// leave a prompt behind on the terminal.
 	if config.channels.matrix.enable {
 		sandman::channels::matrix::attach(
 			harness.clone(),
@@ -188,6 +184,12 @@ pub async fn interactive(
 		)
 		.await
 		.map_err(|e| format!("could not open the Matrix channel: {e}"))?;
+	}
+
+	if config.channels.stdio.enable {
+		sandman::channels::stdio::attach(harness.clone())
+			.await
+			.map_err(|e| format!("could not open the terminal: {e}"))?;
 	}
 
 	let web_channel = if config.channels.web.enable {
