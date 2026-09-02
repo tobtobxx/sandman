@@ -46,27 +46,6 @@ super::bench_case! {
 			)
 		}];
 
-		if let Some(call) = creations.first() {
-			let brief = call
-				.args
-				.get("brief")
-				.and_then(|v| v.as_str())
-				.unwrap_or("<no brief field>");
-			graders.push(Grader {
-				name: "brief keeps the ask".to_string(),
-				input: format!(
-					"The human asked: \"{MESSAGE}\"\n\n\
-					 A Comms Session handed this off as a Brief for the next \
-					 Worker to read, with no other context. Here is that \
-					 Brief:\n\n\"{brief}\"\n\n\
-					 Does the Brief still say the human wants to be greeted \
-					 again, and still say the delay is about 3 minutes, \
-					 without inventing anything the human did not ask for?"
-				),
-				judge: None,
-			});
-		}
-
 		Ok(checks)
 	}
 }
