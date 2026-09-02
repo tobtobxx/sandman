@@ -123,10 +123,12 @@ async fn watcher_streams_patches_after_say() {
 
 	// Exactly what killed `watch` before the fix: a non-Text frame on the
 	// incoming side, same as any WebSocket client's periodic keepalive ping.
-	ws.send(WsMessage::Ping(Vec::new())).await.unwrap();
+	ws.send(WsMessage::Ping(Vec::new().into())).await.unwrap();
 
 	ws.send(WsMessage::Text(
-		serde_json::json!({"t": "say", "text": "hello"}).to_string(),
+		serde_json::json!({"t": "say", "text": "hello"})
+			.to_string()
+			.into(),
 	))
 	.await
 	.unwrap();
@@ -176,7 +178,7 @@ async fn try_next_text(
 			.await
 			.ok()??;
 		match msg.ok()? {
-			WsMessage::Text(text) => return Some(text),
+			WsMessage::Text(text) => return Some(text.to_string()),
 			_ => continue,
 		}
 	}
