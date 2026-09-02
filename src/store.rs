@@ -111,24 +111,40 @@ fn read_optional<T>(
 	Ok(row.transpose()?)
 }
 
-/// Resolve Channel awaiting Creator's Task. Reads `sessions.channel`. Returns `None` for non-Comms creators.
+/// Resolve Channel awaiting Creator's Task. `Creator::Session` reads
+/// `sessions.channel`; `Creator::CronTask` reads the cron Task's subscriber.
+/// `None` for Cli/Control.
 fn subscriber_of(
 	conn: &rusqlite::Connection,
 	created_by: Creator,
 ) -> Result<Option<ChannelId>, StoreError> {
-	let Creator::Session(session) = created_by else {
-		return Ok(None);
-	};
-	let channel: Option<i64> = conn
-		.query_row(
-			"SELECT channel FROM sessions WHERE id = ?1",
-			[session.0],
-			|row| row.get(0),
-		)
-		.optional()
-		.store()?
-		.flatten();
-	Ok(channel.map(|c| ChannelId(c as u32)))
+	match created_by {
+		Creator::Session(session) => {
+			let channel: Option<i64> = conn
+				.query_row(
+					"SELECT channel FROM sessions WHERE id = ?1",
+					[session.0],
+					|row| row.get(0),
+				)
+				.optional()
+				.store()?
+				.flatten();
+			Ok(channel.map(|c| ChannelId(c as u32)))
+		},
+		// A daughter inherits the subscriber of the cron Task it came from.
+		Creator::CronTask(cron) => {
+			let subscriber: Option<Option<i64>> = conn
+				.query_row(
+					"SELECT subscriber FROM tasks WHERE id = ?1",
+					[cron.0],
+					|row| row.get(0),
+				)
+				.optional()
+				.store()?;
+			Ok(subscriber.flatten().map(|c| ChannelId(c as u32)))
+		},
+		Creator::Cli | Creator::Control => Ok(None),
+	}
 }
 
 /// Insert one `Pending` Task, minting its id in the same transaction.
