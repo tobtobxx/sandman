@@ -2,10 +2,6 @@
 
 Scratchpad. Debt goes here as it is created, not afterwards.
 
-Known rough edges, not fixed here:
-- A failed Lessons search (`on_search`) answers with an empty `Ranked` rather than
-  surfacing the error — `Frame::Ranked` has no error field to put one in.
-
 ## Known debt
 
 - **A Worker cannot report failure as failure.** A Result is written from the review's
@@ -28,6 +24,9 @@ Known rough edges, not fixed here:
   what it costs never reaches the run total or the UI. It is small — a batch of a few
   dozen short texts is a fraction of a cent — but the number shown is knowingly
   incomplete rather than exact, which is a worse property than the size suggests.
+
+- A failed Lessons search (`on_search`) answers with an empty `Ranked` rather than
+  surfacing the error — `Frame::Ranked` has no error field to put one in.
 
 - Use sqlite vec instead of manual cosine
 - Memory search results cutoff by similarity
