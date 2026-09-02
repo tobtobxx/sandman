@@ -483,6 +483,10 @@ impl Harness {
 	}
 
 	/// Stop new work, cancel remaining Tasks and wait for calls to settle.
+	///
+	/// Cron Tasks are left standing: they outlive the Run that made them and
+	/// come round again on the next start. Everything else this Run leaves
+	/// unfinished is cancelled.
 	pub async fn wind_down(self: &Arc<Self>, timeout: crate::domain::Duration) {
 		self.stop();
 
@@ -491,6 +495,7 @@ impl Harness {
 			let ids: Vec<TaskId> = tasks
 				.iter()
 				.filter(|t| !t.state.is_terminal())
+				.filter(|t| !matches!(t.schedule, Schedule::Cron { .. }))
 				.map(|t| t.id)
 				.collect();
 			for id in ids {
