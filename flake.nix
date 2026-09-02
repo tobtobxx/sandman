@@ -13,7 +13,7 @@
 			in {
 				packages.default = pkgs.rustPlatform.buildRustPackage (finalAttrs: {
 					pname = "sandman";
-					version = "4.1.0";
+					version = "4.1.1";
 					src = ./.;
 					cargoHash = "sha256-tsa3qN3+nL44GUeWb3I3KF9q66SznBSiAsc8kGwm2P4=";
 				});

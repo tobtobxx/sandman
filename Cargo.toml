@@ -1,6 +1,6 @@
 [package]
 name = "sandman"
-version = "4.1.0"
+version = "4.1.1"
 edition = "2024"
 description = "An agent swarm that coordinates through a shared queue"
 
