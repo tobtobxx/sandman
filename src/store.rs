@@ -135,7 +135,8 @@ fn subscriber_of(
 ///
 /// The row and the `Task` returned say the same thing, so the caller emits
 /// `TaskCreated` without reading back. Takes `subscriber` rather than deriving
-/// it: a daughter inherits its cron Task's, everyone else derives from Creator.
+/// it: a daughter resolves through its `Creator::CronTask`, everyone else
+/// derives from Creator.
 fn insert_task(
 	tx: &rusqlite::Transaction<'_>,
 	run: RunId,
@@ -405,12 +406,13 @@ impl Store {
 
 	/// Copy a cron Task into a daughter due now and re-arm the cron Task.
 	///
-	/// The daughter carries everything but the schedule and inherits the
-	/// subscriber, so its answer reaches whoever the cron Task's would have.
-	/// The cron Task stays `Pending` throughout. `Ok(None)` means the
-	/// expression has no occurrence left, and the cron Task was cancelled
-	/// rather than left due forever. Emits `TaskCreated` plus `TaskReArmed`,
-	/// or `TaskStateChanged` when it runs out.
+	/// The daughter carries everything but the schedule, names the cron Task
+	/// as its `Creator::CronTask`, and inherits the subscriber, so its answer
+	/// reaches whoever the cron Task's would have. The cron Task stays
+	/// `Pending` throughout. `Ok(None)` means the expression has no
+	/// occurrence left, and the cron Task was cancelled rather than left due
+	/// forever. Emits `TaskCreated` plus `TaskReArmed`, or `TaskStateChanged`
+	/// when it runs out.
 	pub fn fire_cron(
 		&self,
 		cron: &Task,
@@ -443,7 +445,7 @@ impl Store {
 				role: cron.role,
 				schedule: Schedule::Now,
 				priority: cron.priority,
-				created_by: cron.created_by,
+				created_by: Creator::CronTask(cron.id),
 			},
 			cron.subscriber,
 			now,

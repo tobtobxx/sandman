@@ -92,6 +92,10 @@ async fn a_due_cron_task_makes_a_daughter_instead_of_running() {
 		daughter.brief,
 		tasks.iter().find(|t| t.id == cron).unwrap().brief
 	);
+	assert_eq!(
+		daughter.created_by,
+		sandman::domain::Creator::CronTask(cron)
+	);
 
 	// The cron Task is still pending, armed for the occurrence after
 	let parent = harness.store.task(cron).unwrap().unwrap();

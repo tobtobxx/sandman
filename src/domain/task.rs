@@ -35,7 +35,7 @@
 //! Seam: domain is data — `Store` owns rows and Events, scheduling owns
 //! time, `Turn` owns policy. `TaskState`/`Schedule` never decide; callers match them.
 //!
-//! Rules: **one task concept — human, investigation, and delegated work are the same type.** **`Completed` has `TaskResult`, `Cancelled` has none.** **`Cancelled` is terminal and reaches one Task only — a daughter's end is not its cron Task's.** **a cron Task never runs; it only makes daughters.** **pick is time only; `await_result` is not a queue wait.** **`subscriber` derived from `Creator`, never chosen.** **only review completes; only unreachable fails without it.** **store is the only writer; `Tier`≠`TaskPriority`.**
+//! Rules: **one task concept — human, investigation, and delegated work are the same type.** **`Completed` has `TaskResult`, `Cancelled` has none.** **`Cancelled` is terminal and reaches one Task only — a daughter's end is not its cron Task's.** **a cron Task never runs; it only makes daughters, naming itself in `Creator::CronTask`.** **pick is time only; `await_result` is not a queue wait.** **`subscriber` derived from `Creator`, never chosen.** **only review completes; only unreachable fails without it.** **store is the only writer; `Tier`≠`TaskPriority`.**
 //!
 //! Defines: [`Task`], [`TaskState`]/[`TaskStateName`], [`TaskResult`], [`Schedule`], [`CronExpr`], [`ScheduleError`], [`TaskPriority`], [`Creator`], [`NewTask`], [`TaskSummary`]
 
@@ -202,6 +202,9 @@ pub enum Creator {
 	Cli,
 	/// Another process, through the control socket.
 	Control,
+	/// A cron Task coming round. The id is the cron Task itself, so the
+	/// succession is queryable and the original creator one hop away.
+	CronTask(TaskId),
 }
 
 /// Everything needed to put a task on the queue. Store mints the id.

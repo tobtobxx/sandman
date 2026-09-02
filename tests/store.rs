@@ -169,9 +169,14 @@ fn a_comms_session_subscribes_the_task_it_creates() {
 		store.task(id).unwrap().unwrap().subscriber
 	};
 
+	let comms_task = store
+		.create_task(task(Creator::Session(comms)), Timestamp(0))
+		.unwrap();
 	assert_eq!(subscriber_of(Creator::Session(comms)), Some(channel));
 	assert_eq!(subscriber_of(Creator::Cli), None);
 	assert_eq!(subscriber_of(Creator::Control), None);
+	// A daughter derives its subscriber from the cron Task it came from.
+	assert_eq!(subscriber_of(Creator::CronTask(comms_task)), Some(channel));
 
 	// A Worker stands on a Task rather than a Channel, so it resolves to
 	// nobody. It waits for a child with `await_result` instead.
@@ -236,6 +241,7 @@ fn a_cron_task_makes_daughters_and_stays_pending() {
 	assert_eq!(daughter.title, armed.title);
 	assert_eq!(daughter.brief, armed.brief);
 	assert_eq!(daughter.subscriber, Some(channel));
+	assert_eq!(daughter.created_by, Creator::CronTask(cron));
 
 	let parent = store.task(cron).unwrap().unwrap();
 	assert_eq!(parent.state, TaskState::Pending);
