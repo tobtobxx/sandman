@@ -190,7 +190,7 @@ pub fn stamp(at: Timestamp) -> String {
 	// Resolve local time
 	let local = chrono::Local.timestamp_millis_opt(at.0).unwrap();
 	// Format for model
-	local.format("%A, %Y-%m-%d %H:%M").to_string()
+	local.format("%a %Y-%m-%d %H:%M").to_string()
 }
 
 impl fmt::Display for Cost {
