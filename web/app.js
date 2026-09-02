@@ -7,6 +7,11 @@
 // exception: it names a Session and an index, so a message can be added to a
 // running conversation without resending the whole thing.
 //
+// What the inspector is open on lives in the URL's `#id` and nowhere else, so
+// every id one entity prints of another is a link: a Session's Task, a call's
+// Session. Following one is the browser's own job, and Back walks the trail
+// back.
+//
 // `/` and `/chat` are the same page; only the body's `chat` class (set below,
 // from the path) decides which of the right-hand panels — the inspector or
 // the chat window — CSS shows. That is what lets `/chat` be its own link: a
@@ -69,6 +74,11 @@ function onFrame(frame) {
       spend = frame.spend;
       runStartedAt = frame.run.started_at;
       paintLink();
+      // A link opened on an `#id` is honoured once there is something to
+      // show — before `init` the entity it names does not exist yet, and the
+      // inspector would drop the selection. Not on a reconnect's `init`: what
+      // the reader has open by then wins over the address bar.
+      if (!selected) openHash();
       break;
     case "patch":
       state[frame.bucket][frame.id] = frame.entity;
@@ -117,6 +127,20 @@ function payloadOf(v) {
 /** The number in an id — every id reads `<prefix>-<n>`, and the number is the
  *  order it was made in. */
 const serialOf = (id) => Number(id.slice(id.lastIndexOf("-") + 1));
+
+/** Which list an id belongs to, by its prefix. The one place that reads a
+ *  prefix; the wire already commits to these strings. */
+const BUCKET_OF = { t: "tasks", s: "sessions", ch: "channels", call: "calls", l: "lessons" };
+
+/** An id as a link to the thing it names. Anything a row or the inspector
+ *  prints that is another entity's id goes through here, so following a
+ *  reference is a click rather than a hunt through the lists. The link is a
+ *  plain `#id` anchor — see `openHash`. An id with a prefix nothing is kept
+ *  under stays plain text. */
+function ref(id) {
+  if (!BUCKET_OF[String(id).slice(0, String(id).lastIndexOf("-"))]) return esc(id);
+  return `<a class="ref" href="#${esc(id)}">${esc(id)}</a>`;
+}
 
 const money = (nanoUsd) => `$${((nanoUsd ?? 0) / 1e9).toFixed(6)}`;
 const when = (ms) => (ms ? new Date(ms).toLocaleTimeString() : "");
@@ -253,8 +277,8 @@ function sessionRow(s) {
   const kind = tagOf(s.kind);
   const detail =
     kind === "worker"
-      ? `${esc(payloadOf(s.kind).role)} · ${esc(payloadOf(s.kind).task)}`
-      : `channel ${esc(payloadOf(s.kind).channel)}`;
+      ? `${esc(payloadOf(s.kind).role)} · ${ref(payloadOf(s.kind).task)}`
+      : `channel ${ref(payloadOf(s.kind).channel)}`;
   const n = s.calls?.length ?? 0;
   return `<span class="id">${esc(s.id)}</span>
     <span class="ttl">${esc(kind)} · ${detail}</span>
@@ -266,7 +290,7 @@ function callRow(c) {
   const usage = usageOf(c);
   const { wall } = spansOf(c);
   return `<span class="id">${esc(c.id)}</span>
-    <span class="ttl">${esc(c.session)} · tier ${esc(c.tier)} · ${esc(c.model)}</span>
+    <span class="ttl">${ref(c.session)} · tier ${esc(c.tier)} · ${esc(c.model)}</span>
     ${stateTag(tagOf(c.status))}
     <span class="cost">${usage ? money(usage.cost) : "—"}</span>
     <span class="tok">${usage ? `${usage.tokens} tok` : ""}</span>
@@ -296,7 +320,7 @@ const ROW = { sessions: sessionRow, calls: callRow, channels: channelRow };
 function row(bucketName, id, inner, depth = 0) {
   const sel = selected?.bucket === bucketName && selected?.id === id ? " sel" : "";
   const indent = depth ? ` style="padding-left: calc(1rem + ${Math.min(depth, 4) * 12}px)"` : "";
-  return `<div class="row${sel}" data-bucket="${bucketName}" data-id="${esc(id)}"${indent}>${inner}</div>`;
+  return `<div class="row${sel}" data-id="${esc(id)}"${indent}>${inner}</div>`;
 }
 
 // --- the inspector, one detail renderer per bucket ----------------------
@@ -315,10 +339,17 @@ function taskDetail(t) {
       ["priority", esc(t.priority)],
       ["state", esc(tagOf(t.state))],
       ["schedule", esc(tagOf(t.schedule))],
-      ["subscriber", t.subscriber ? esc(t.subscriber) : undefined],
-      ["created by", esc(tagOf(t.created_by))],
+      ["subscriber", t.subscriber ? ref(t.subscriber) : undefined],
+      // `created_by` is a variant name on its own — `cli`, `comms` — except
+      // for `session`, which names the Session that asked for the Task.
+      [
+        "created by",
+        tagOf(t.created_by) === "session"
+          ? `session · ${ref(payloadOf(t.created_by))}`
+          : esc(tagOf(t.created_by)),
+      ],
       ["created at", when(t.created_at)],
-      ["session", s ? esc(s.id) : undefined],
+      ["session", s ? ref(s.id) : undefined],
     ]) +
     (cancel ? `<div class="actions">${cancel}</div>` : "") +
     `<h3>Brief</h3><pre>${esc(t.brief)}</pre>` +
@@ -337,7 +368,7 @@ function sessionDetail(s) {
       ["status", esc(tagOf(s.status))],
       [
         kind === "worker" ? "task" : "channel",
-        esc(kind === "worker" ? payloadOf(s.kind).task : payloadOf(s.kind).channel),
+        ref(kind === "worker" ? payloadOf(s.kind).task : payloadOf(s.kind).channel),
       ],
       ["calls", s.calls?.length ?? 0],
       ["started", when(s.started_at)],
@@ -375,7 +406,7 @@ function callDetail(c) {
   return (
     kv([
       ["call", esc(c.id)],
-      ["session", esc(c.session)],
+      ["session", ref(c.session)],
       ["tier", esc(c.tier)],
       ["model", esc(c.model)],
       ["status", esc(tagOf(c.status))],
@@ -402,7 +433,7 @@ function channelDetail(c) {
     kv([
       ["channel", esc(c.id)],
       ["kind", esc(c.kind)],
-      ["session", esc(c.session)],
+      ["session", ref(c.session)],
     ]) +
     `<h3>Transcript (${c.transcript?.length ?? 0})</h3>` +
     (c.transcript ?? [])
@@ -415,12 +446,15 @@ function channelDetail(c) {
 }
 
 function lessonDetail(l) {
+  // Whichever it is about, the subject carries the id of the thing it happened
+  // on — a Worker's Task, or the Channel a conversation was held over.
+  const about = payloadOf(l.about) ?? {};
   return (
     kv([
       ["lesson", esc(l.id)],
       ["day", esc(l.day)],
-      ["about", esc(tagOf(l.about))],
-      ["session", esc(l.session)],
+      ["about", `${esc(tagOf(l.about))} · ${ref(about.task ?? about.channel)}`],
+      ["session", ref(l.session)],
     ]) + `<h3>Kept</h3><pre>${esc(l.text)}</pre>`
   );
 }
@@ -534,10 +568,35 @@ function render() {
 
 // --- interaction -----------------------------------------------------------
 
+function openBucket(name) {
+  bucket = name;
+  document
+    .querySelectorAll(".tab")
+    .forEach((t) => t.classList.toggle("here", t.dataset.bucket === name));
+}
+
+/** Open whatever the URL's `#id` names — the list it lives in as well as the
+ *  inspector, since an id selected in a list that is not showing would
+ *  highlight nothing. Selection lives in the address bar and nowhere else, so
+ *  a reference link, a row click and a pasted link all land in one place, and
+ *  Back walks the trail of references followed. Ignores a hash naming no
+ *  bucket rather than clearing what is open. */
+function openHash() {
+  const id = decodeURIComponent(location.hash.slice(1));
+  const target = BUCKET_OF[id.slice(0, id.lastIndexOf("-"))];
+  if (!target) return;
+  openBucket(target);
+  selected = { bucket: target, id };
+}
+
+window.addEventListener("hashchange", () => {
+  openHash();
+  render();
+});
+
 document.querySelectorAll(".tab").forEach((b) =>
   b.addEventListener("click", () => {
-    bucket = b.dataset.bucket;
-    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("here", t === b));
+    openBucket(b.dataset.bucket);
     render();
   }),
 );
@@ -552,10 +611,15 @@ document.getElementById("rows").addEventListener("click", (ev) => {
     }
     return;
   }
+  // A reference printed inside a row points somewhere else; let the link
+  // through rather than selecting the row it happens to sit in.
+  if (ev.target.closest("a.ref")) return;
   const r = ev.target.closest(".row[data-id]");
   if (!r) return;
-  selected = { bucket: r.dataset.bucket, id: r.dataset.id };
-  render();
+  // Through the hash, so a row click and a reference agree on where selection
+  // is kept. The row already open is already open — nothing to do, and
+  // assigning the same hash would not event anyway.
+  if (location.hash !== `#${r.dataset.id}`) location.hash = r.dataset.id;
 });
 
 document.getElementById("insp-body").addEventListener("click", (ev) => {

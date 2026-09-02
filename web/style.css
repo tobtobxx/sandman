@@ -162,6 +162,17 @@ main {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* A reference reads as an id first and a link second: no underline until the
+   pointer is on it, so a row full of them stays a row. */
+.ref {
+  font-family: ui-monospace, monospace;
+  color: var(--accent);
+  text-decoration: none;
+}
+.ref:hover {
+  text-decoration: underline;
+}
 .row .snip {
   flex: 1;
   overflow: hidden;
