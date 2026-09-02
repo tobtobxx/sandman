@@ -39,7 +39,10 @@ pub trait Embedder: Send + Sync {
 	fn model(&self) -> &str;
 
 	/// Embed a batch, order preserved.
-	async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError>;
+	async fn embed(
+		&self,
+		texts: &[String],
+	) -> Result<Vec<Vec<f32>>, EmbedError>;
 }
 
 /// Real embedder — calls the embedding service directly.
@@ -80,7 +83,10 @@ impl Embedder for OpenRouterEmbedder {
 		&self.model
 	}
 
-	async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+	async fn embed(
+		&self,
+		texts: &[String],
+	) -> Result<Vec<Vec<f32>>, EmbedError> {
 		// Build request
 		let body = EmbedRequest { model: &self.model, input: texts };
 

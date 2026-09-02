@@ -29,7 +29,7 @@ use sandman::domain::Duration;
 use sandman::harness::{Drive, Harness};
 use sandman::log::Logger;
 
-use crate::paths::{make_room_for, Paths};
+use crate::paths::{Paths, make_room_for};
 
 /// Assemble a full Harness from config.
 ///
@@ -82,23 +82,23 @@ pub async fn assemble(
 	// block startup. Fail fast before touching the DB so a bad model
 	// leaves no Run behind.
 	{
-		use std::collections::HashSet;
 		use sandman::model::{Model, OpenRouter};
+		use std::collections::HashSet;
 		use strum::VariantArray;
 		let mut seen: HashSet<sandman::config::ModelSpec> = HashSet::new();
 		let mut distinct: Vec<&sandman::config::ModelSpec> = Vec::new();
 		for spec in [
-				config.for_all(),
-				config.for_comms(),
-				config.for_metacognition(),
-				config.for_grader(),
-			]
-			.into_iter()
-			.chain(
-				sandman::roles::RoleName::VARIANTS
-					.iter()
-					.map(|r| config.for_role(*r)),
-			) {
+			config.for_all(),
+			config.for_comms(),
+			config.for_metacognition(),
+			config.for_grader(),
+		]
+		.into_iter()
+		.chain(
+			sandman::roles::RoleName::VARIANTS
+				.iter()
+				.map(|r| config.for_role(*r)),
+		) {
 			if seen.insert(spec.clone()) {
 				distinct.push(spec);
 			}

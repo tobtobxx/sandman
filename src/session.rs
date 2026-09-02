@@ -27,7 +27,7 @@ use crate::domain::{
 use crate::event::Events;
 use crate::harness::Harness;
 use crate::model::Purpose;
-use crate::roles::{SchemaCtx, COMMS_SESSION_TOOLS};
+use crate::roles::{COMMS_SESSION_TOOLS, SchemaCtx};
 use crate::scheduler::{Scheduler, SchedulerError, Tier};
 use crate::store::Store;
 use crate::tools::ToolRunner;

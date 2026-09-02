@@ -24,7 +24,7 @@ use sandman::model::{Model, Models};
 use sandman::scheduler::Scheduler;
 use sandman::store::Store;
 use sandman::tools::Registry;
-use sandman::web::server::{serve, AppState};
+use sandman::web::server::{AppState, serve};
 
 const PORT: u16 = 18_080;
 

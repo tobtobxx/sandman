@@ -38,7 +38,7 @@ pub mod report;
 pub mod rig;
 pub mod script;
 
-pub use cases::{Case, CASES};
+pub use cases::{CASES, Case};
 pub use grader::{Grader, GraderOutcome, Verdict};
 pub use intercept::{Interceptor, RecordedToolCall, ToolsChoice};
 pub use rig::{Rig, RigBuilder, Watch};

@@ -222,7 +222,7 @@ impl Tool for ViewSession {
 			let task = match TaskId::from_str(s) {
 				Ok(id) => id,
 				Err(_) => {
-					return ToolError::NoSuchTask(s.to_string()).to_string()
+					return ToolError::NoSuchTask(s.to_string()).to_string();
 				},
 			};
 			match ctx.harness.store.session_for_task(task) {

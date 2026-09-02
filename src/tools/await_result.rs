@@ -79,7 +79,7 @@ impl Tool for AwaitResult {
 			Some(s) => match TaskId::from_str(s) {
 				Ok(id) => id,
 				Err(_) => {
-					return ToolError::NoSuchTask(s.to_string()).to_string()
+					return ToolError::NoSuchTask(s.to_string()).to_string();
 				},
 			},
 		};

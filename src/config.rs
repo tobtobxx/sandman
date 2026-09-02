@@ -179,9 +179,7 @@ pub enum ConfigError {
 		 that is"
 	)]
 	NoSuchSlug { key: String, slug: String },
-	#[error(
-		"$XDG_CONFIG_HOME is not set. Name a configuration with --config."
-	)]
+	#[error("$XDG_CONFIG_HOME is not set. Name a configuration with --config.")]
 	Nowhere,
 }
 

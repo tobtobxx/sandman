@@ -185,7 +185,7 @@ pub struct SchemaCtx {
 /// Sole implementation — `Registry` delegates here so descriptions never diverge.
 pub fn schemas_for(names: &[ToolName], ctx: &SchemaCtx) -> Vec<ToolSchema> {
 	use crate::tools::{
-		await_result, create_task, message_human, queue, recall, web, Tool,
+		Tool, await_result, create_task, message_human, queue, recall, web,
 	};
 
 	// Map names to schemas

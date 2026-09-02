@@ -99,9 +99,7 @@ pub async fn work_turn(ctx: &SessionCtx) -> Worked {
 		},
 
 		// Silent - review with Continue as fallback
-		crate::session::Turn::Silent => {
-			review(ctx, Worked::Continue).await
-		},
+		crate::session::Turn::Silent => review(ctx, Worked::Continue).await,
 	}
 }
 

@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use sandman::bench::report::{self, CaseSummary, RunReport};
-use sandman::bench::{Case, CASES};
+use sandman::bench::{CASES, Case};
 use sandman::config::Config;
 
 use crate::cli::BenchFlags;
@@ -146,8 +146,7 @@ pub async fn bench(
 			.collect::<Result<Vec<_>, String>>()?
 	};
 
-	let path =
-		Config::path(config_flag).map_err(|e| e.to_string())?;
+	let path = Config::path(config_flag).map_err(|e| e.to_string())?;
 	let config = Config::load(&path).map_err(|e| e.to_string())?;
 	let config = Arc::new(config);
 
@@ -198,9 +197,9 @@ pub async fn bench(
 				bench_announce(on, case.name, k, times);
 				let dir = report::run_dir(&flags.out, &stamp, case.name, k);
 				let cfg = config.clone();
-				set.spawn(
-					async move { (case.name, bench_run_once(case, &dir, cfg).await) },
-				);
+				set.spawn(async move {
+					(case.name, bench_run_once(case, &dir, cfg).await)
+				});
 			}
 		}
 		while let Some(outcome) = set.join_next().await {

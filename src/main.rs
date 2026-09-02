@@ -42,7 +42,9 @@ async fn main() {
 	let cli = Cli::try_parse().unwrap_or_else(|e| e.exit());
 
 	let Cli { command, config: config_flag, verbose, break_lock } = cli;
-	let load = || paths::load_config_and_paths(config_flag.clone(), break_lock, verbose);
+	let load = || {
+		paths::load_config_and_paths(config_flag.clone(), break_lock, verbose)
+	};
 	let result = match command {
 		Cmd::Serve => {
 			let (paths, config, verbosity) = match load() {

@@ -52,9 +52,10 @@ use super::{CheckResult, Grader, Rig, Trip, Watch};
 /// out of it; it is absent only when the Rig could not be built, which still
 /// reports. A tripwire is not an error here — it is [`RunReport::tripped`], so a
 /// run that ended early still says what it saw on the way.
-type CaseFn = fn(
-	Arc<Config>,
-) -> Pin<Box<dyn Future<Output = (Option<Rig>, RunReport)> + Send>>;
+type CaseFn =
+	fn(
+		Arc<Config>,
+	) -> Pin<Box<dyn Future<Output = (Option<Rig>, RunReport)> + Send>>;
 
 /// One question put to the harness-and-model combination.
 pub struct Case {
@@ -73,8 +74,7 @@ pub const CASES: &[Case] = &[
 	},
 	Case {
 		name: "greet-again",
-		description:
-			"Asking to be greeted again in ~3 minutes creates one Task.",
+		description: "Asking to be greeted again in ~3 minutes creates one Task.",
 		run: |config| Box::pin(greet_again::run(config)),
 	},
 	Case {

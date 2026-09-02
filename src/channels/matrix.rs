@@ -44,29 +44,29 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use matrix_sdk::{
+	Client, Room, RoomMemberships, RoomState,
 	authentication::matrix::MatrixSession,
 	config::SyncSettings,
 	encryption::recovery::RecoveryError,
 	ruma::{
+		EventId, OwnedUserId, UserId,
 		api::client::{
 			receipt::create_receipt,
 			uiaa::{AuthData, Password, UserIdentifier},
 		},
 		events::{
+			AnySyncMessageLikeEvent, AnySyncTimelineEvent,
+			OriginalSyncMessageLikeEvent, SyncMessageLikeEvent,
 			receipt::ReceiptThread,
 			room::message::{
 				MessageType, OriginalSyncRoomMessageEvent, Relation,
 				RoomMessageEventContent,
 			},
-			AnySyncMessageLikeEvent, AnySyncTimelineEvent,
-			OriginalSyncMessageLikeEvent, SyncMessageLikeEvent,
 		},
-		EventId, OwnedUserId, UserId,
 	},
 	store::RoomLoadSettings,
-	Client, Room, RoomMemberships, RoomState,
 };
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::domain::{ChannelId, ChannelKind, IncomingFrom, SessionStatus};
 use crate::event::Event;

@@ -193,7 +193,12 @@ pub fn vector_to_blob(v: &[f32]) -> Vec<u8> {
 
 /// Decode little-endian bytes back to `Vec<f32>`.
 pub fn vector_from_blob(bytes: &[u8]) -> Vec<f32> {
-	bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()
+	bytes
+		.as_chunks::<4>()
+		.0
+		.iter()
+		.map(|c| f32::from_le_bytes(*c))
+		.collect()
 }
 
 // --- Whole entities ----------------------------------------------------------

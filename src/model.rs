@@ -299,7 +299,10 @@ impl Model for OpenRouter {
 			.await
 			.map_err(|e| ModelError::Transport(e.to_string()))?;
 		if !status.is_success() {
-			return Err(ModelError::Status { status: status.as_u16(), body: text });
+			return Err(ModelError::Status {
+				status: status.as_u16(),
+				body: text,
+			});
 		}
 		let parsed: WireResponse = serde_json::from_str(&text)
 			.map_err(|e| ModelError::Malformed(e.to_string()))?;

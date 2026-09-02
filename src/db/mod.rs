@@ -50,7 +50,9 @@ pub enum DbError {
 	Sqlite(#[from] rusqlite::Error),
 	#[error("could not read a stored value: {0}")]
 	Json(#[from] serde_json::Error),
-	#[error("this database is at schema version {found}; this build writes {expected}")]
+	#[error(
+		"this database is at schema version {found}; this build writes {expected}"
+	)]
 	SchemaVersion { found: u32, expected: u32 },
 	#[error("a stored `{what}` had the unknown variant `{tag}`")]
 	UnknownVariant { what: &'static str, tag: String },
