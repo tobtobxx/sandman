@@ -44,6 +44,11 @@ pub trait Model: Send + Sync {
 		&self,
 		request: &CallRequest,
 	) -> Result<Completion, ModelError>;
+
+	/// Probe the model with a tiny `max_tokens: 1` request.
+	///
+	/// Used at startup to fail fast when a model is unreachable.
+	async fn probe(&self) -> Result<(), ModelError>;
 }
 
 /// Why `Model::send` failed.
@@ -190,6 +195,7 @@ impl Model for OpenRouter {
 				.is_none()
 				.then_some(WireChatTemplateKwargs { enable_thinking: false }),
 			usage: WireUsageConfig { include: true },
+			max_tokens: None,
 		};
 
 		// Send request
@@ -254,6 +260,54 @@ impl Model for OpenRouter {
 			cost,
 		})
 	}
+
+	async fn probe(&self) -> Result<(), ModelError> {
+		let body = ChatRequest {
+			model: &self.model,
+			messages: vec![WireMessage {
+				role: "user",
+				content: Some("ping".to_string()),
+				tool_calls: None,
+				tool_call_id: None,
+			}],
+			tools: Vec::new(),
+			reasoning: Some(match &self.effort {
+				None => WireReasoning { enabled: Some(false), effort: None },
+				Some(effort) => WireReasoning {
+					enabled: None,
+					effort: Some(effort.clone()),
+				},
+			}),
+			chat_template_kwargs: self
+				.effort
+				.is_none()
+				.then_some(WireChatTemplateKwargs { enable_thinking: false }),
+			usage: WireUsageConfig { include: true },
+			max_tokens: Some(1),
+		};
+		let response = self
+			.client
+			.post(&self.endpoint)
+			.bearer_auth(&self.api_key)
+			.json(&body)
+			.send()
+			.await
+			.map_err(|e| ModelError::Transport(e.to_string()))?;
+		let status = response.status();
+		let text = response
+			.text()
+			.await
+			.map_err(|e| ModelError::Transport(e.to_string()))?;
+		if !status.is_success() {
+			return Err(ModelError::Status { status: status.as_u16(), body: text });
+		}
+		let parsed: WireResponse = serde_json::from_str(&text)
+			.map_err(|e| ModelError::Malformed(e.to_string()))?;
+		if parsed.choices.is_empty() {
+			return Err(ModelError::Malformed("no choices in response".into()));
+		}
+		Ok(())
+	}
 }
 
 // Wire shape — private so reasoning never reaches the wire.
@@ -270,6 +324,8 @@ struct ChatRequest<'a> {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	chat_template_kwargs: Option<WireChatTemplateKwargs>,
 	usage: WireUsageConfig,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	max_tokens: Option<u32>,
 }
 
 #[derive(serde::Serialize)]

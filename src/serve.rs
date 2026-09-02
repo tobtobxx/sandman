@@ -72,6 +72,55 @@ pub async fn assemble(
 			format!("could not clear the lock on {}: {e}", paths.db.display())
 		})?;
 	}
+	// Probe each distinct *used* model with a tiny max_tokens=1 request.
+	// Only models referenced by `models.*`, `metacognition.model` or
+	// `bench.grader` are probed — an unused `[model.*]` table does not
+	// block startup. Fail fast before touching the DB so a bad model
+	// leaves no Run behind.
+	{
+		use std::collections::HashSet;
+		use sandman::model::{Model, OpenRouter};
+		use strum::VariantArray;
+		let mut seen: HashSet<sandman::config::ModelSpec> = HashSet::new();
+		let mut distinct: Vec<&sandman::config::ModelSpec> = Vec::new();
+		for spec in [
+				config.for_all(),
+				config.for_comms(),
+				config.for_metacognition(),
+				config.for_grader(),
+			]
+			.into_iter()
+			.chain(
+				sandman::roles::RoleName::VARIANTS
+					.iter()
+					.map(|r| config.for_role(*r)),
+			) {
+			if seen.insert(spec.clone()) {
+				distinct.push(spec);
+			}
+		}
+		distinct.sort_by(|a, b| a.model.cmp(&b.model));
+		for spec in distinct {
+			logger.note(
+				"model",
+				&format!("probing {} at {} ...", spec.model, spec.endpoint),
+			);
+			let m = OpenRouter::from_spec(spec);
+			match m.probe().await {
+				Ok(()) => {
+					logger.note("model", &format!("{} ok", spec.model));
+				},
+				Err(e) => {
+					let msg = format!(
+						"model {} at {} failed probe: {e}",
+						spec.model, spec.endpoint
+					);
+					logger.note("model", &msg);
+					return Err(msg);
+				},
+			}
+		}
+	}
 	let model_name = config.for_all().model.clone();
 	make_room_for(&paths.db)?;
 	let store = Arc::new(

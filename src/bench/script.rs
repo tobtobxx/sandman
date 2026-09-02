@@ -107,6 +107,10 @@ impl Model for ScriptedModel {
 		"scripted"
 	}
 
+	async fn probe(&self) -> Result<(), ModelError> {
+		Ok(())
+	}
+
 	async fn send(
 		&self,
 		request: &CallRequest,
