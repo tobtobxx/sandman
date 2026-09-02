@@ -17,6 +17,7 @@
 //! **One fallback in file.** Optional `[models]` keys (`comms`, `planning`, …) fall back to `all`; absence means something, which is why it may mean it.
 //! **Every string is expanded.** `$NAME` / `${NAME}` / `$$` on the parsed tree before it becomes `Config`; unset is an error, not empty; keys never expanded.
 //! **Every named slug must exist.** `check_slugs` fails at start, not mid-run; a slug nothing names is kept without complaint.
+//! **The favorite Channel is not checked.** `channels.favorite` names a kind; `Harness::favorite_channel` resolves it, and a favorite that is off drops the message it was to carry.
 //! **Hash by value.** `ModelSpec` hashed by all fields, so two slugs naming the same endpoint share one adapter in `Models`.
 //!
 //! ```text
@@ -30,6 +31,7 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
+use crate::domain::ChannelKind;
 use crate::roles::RoleName;
 
 /// Single defaults text, written on first start.
@@ -107,6 +109,8 @@ pub struct Embedding {
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Channels {
+	/// The Channel a Worker speaks on when it names none. Must be enabled.
+	pub favorite: ChannelKind,
 	pub stdio: Toggle,
 	pub web: Toggle,
 	pub matrix: Matrix,
@@ -493,6 +497,7 @@ mod tests {
 		assert_eq!(config.metacognition.interrupt_interval, 15);
 		assert!(config.channels.stdio.enable && config.channels.web.enable);
 		assert!(!config.channels.matrix.enable);
+		assert_eq!(config.channels.favorite, ChannelKind::Stdio);
 	}
 
 	#[test]

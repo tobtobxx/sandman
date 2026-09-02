@@ -255,6 +255,18 @@ impl Harness {
 		);
 	}
 
+	/// The open Channel of the configured favorite kind, if one is open.
+	///
+	/// `channels.favorite` names a kind and nothing checks it is turned on, so
+	/// a favorite that never attached is `None` and its message is dropped.
+	pub fn favorite_channel(&self) -> Option<ChannelId> {
+		let favorite = self.config.channels.favorite;
+		self.open_channels()
+			.into_iter()
+			.find(|(_, kind)| *kind == favorite)
+			.map(|(id, _)| id)
+	}
+
 	/// List open Channels for schema generation.
 	pub fn open_channels(&self) -> Vec<(ChannelId, ChannelKind)> {
 		self.comms

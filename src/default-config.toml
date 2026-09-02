@@ -106,6 +106,11 @@ webui_port = 8080
 # The ways a human reaches the swarm. One table per transport, each with its own
 # `enable`.
 
+[channels]
+# Where the swarm speaks when it names no Channel. Name one that is turned off,
+# and every message it would carry is dropped.
+favorite = "stdio"
+
 # The terminal. Turned off, the trace goes to stdout as well as to the log,
 # because nothing else is using it.
 [channels.stdio]

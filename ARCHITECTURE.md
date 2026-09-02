@@ -173,7 +173,8 @@ Two boundaries hold without a trait, and matter as much:
 That is **pull**. **Push**: a Worker creates a `planning` Task nobody subscribed to, whose
 Worker calls `message_human` — the swarm saying something unasked. Push is where the
 guessing lives: several Channels may be open, and a Brief carries no record of where the
-work came from. See [TASKS.md](./TASKS.md).
+work came from. A Worker that names none speaks on `channels.favorite`. See
+[TASKS.md](./TASKS.md).
 
 Three ways in, then: a human on a Channel, a control socket request, a one-shot command
 line run. The Harness does not round-robin. Every Session loop runs at once and every call
