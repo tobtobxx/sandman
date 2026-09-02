@@ -1,5 +1,6 @@
 /target
 /bench/runs
+/output
 
 # State and trace of a local run.
 *.sqlite
