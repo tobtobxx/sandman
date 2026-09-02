@@ -55,5 +55,3 @@ Known rough edges, not fixed here:
   human" guess visible. A unit bench like the rest — the call is intercepted, not
   delivered.
 
-## Prio
- - Show better token usage
