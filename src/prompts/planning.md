@@ -17,3 +17,6 @@ research: finds things out in the world. Searches and reads the web.
 memory: knows about what the swarm already did or learned.
   It's a good idea to ask memory first, before launching an expensive task.
 task_manager: Can control the current task queue. Can list, search and cancel tasks.
+planning (you): High level planner. Can schedule detailed tasks and delegate.
+  This role can also do other high-level work like messaging the human.
+  planning is the default if none of the other fit exactly.
