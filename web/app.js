@@ -310,6 +310,9 @@ function sessionRow(s) {
     <span class="cost">${n} call${n === 1 ? "" : "s"}</span>`;
 }
 
+/** One call as a row. The token pair is `prefill/produced` — what the model had
+ *  to read and what it wrote. Cache hits are left to the detail view: they cost
+ *  nothing to process, and a third number would not be read at a glance. */
 function callRow(c) {
   const usage = usageOf(c);
   const { wall } = spansOf(c);
@@ -317,7 +320,7 @@ function callRow(c) {
     <span class="ttl">${ref(c.session)} · tier ${esc(c.tier)} · ${esc(c.model)}</span>
     ${stateTag(tagOf(c.status))}
     <span class="cost">${usage ? money(usage.cost) : "—"}</span>
-    <span class="tok">${usage ? `${usage.tokens} tok` : ""}</span>
+    <span class="tok">${usage ? `${usage.prefill}/${usage.produced} tok` : ""}</span>
     <span class="wall">${span(wall) ?? ""}</span>`;
 }
 
@@ -453,7 +456,9 @@ function callDetail(c) {
       ["finished", when(status?.finished_at)],
       ["waited", span(waited)],
       ["wall", span(wall)],
-      ["tokens", usage?.tokens],
+      ["cached", usage?.cached],
+      ["prefill", usage?.prefill],
+      ["produced", usage?.produced],
       ["cost", usage ? money(usage.cost) : undefined],
       ["error", tagOf(c.status) === "failed" ? esc(status.error) : undefined],
       ["tools offered", c.request.tools.map((t) => esc(t.name)).join(", ") || "none"],

@@ -219,7 +219,8 @@ main {
    the same quantity lands in the same place on every row, whatever it holds.
    `.ttl` is the only cell that flexes, so it absorbs the slack and everything
    after it stays put. Widths fit the longest value each cell can hold —
-   `reflecting` for a state, `$0.000000` for a cost. */
+   `reflecting` for a state, `$0.000000` for a cost, `123456/8192 tok` for the
+   two token counts. */
 .row .tag.state {
   width: 5.5rem;
   text-align: center;
@@ -237,7 +238,7 @@ main {
   width: 6rem;
 }
 .row .tok {
-  width: 5rem;
+  width: 9rem;
 }
 .row .wall {
   width: 3.5rem;
