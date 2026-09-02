@@ -7,6 +7,9 @@
 //! `recv`s and `write`s one `timestamp category detail` line per `Event` under
 //! a single `Mutex<File>`; `note` writes a non-Event line (banner, warnings);
 //! `render` + `body` build the detail, `banner` builds the opening line.
+//! Watch: `history` reads the file back for whoever joins late, `subscribe`
+//! hands out every line written from then on — the Watcher UI's Logs tab is
+//! the two put together.
 //!
 //! Consumers:
 //! | Caller | Builds | Echo |
@@ -37,11 +40,13 @@
 //! - **Terminal owns conversation.** `Quiet` keeps trace in file alone; `Stdout` only when no Channel owns terminal.
 //! - **One `Mutex<File>` guards both file and stdout.** Prevents interleaved lines.
 //! - **Broadcast is lossy, not blocking.** `Lagged(n)` is noted, never stalls the swarm.
+//! - **The file is the history, the line stream is only the tail.** Nothing is kept
+//!   in memory for a reader that is not there yet — `history` re-reads the file.
 //!
 //! Defines: [`Logger`], [`Verbosity`], [`Echo`], [`banner`].
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use strum::IntoDiscriminant;
 
@@ -70,12 +75,17 @@ pub enum Echo {
 
 /// Append-only trace writer.
 ///
-/// Holds file, verbosity and echo.
+/// Holds file, its path, verbosity, echo and the line stream late readers follow.
 pub struct Logger {
 	file: std::sync::Mutex<std::fs::File>,
+	path: PathBuf,
 	verbosity: Verbosity,
 	echo: Echo,
+	lines: tokio::sync::broadcast::Sender<String>,
 }
+
+/// How many lines a reader may fall behind before it loses some.
+const BACKLOG: usize = 256;
 
 impl Logger {
 	/// Create log file at `path`, truncating existing content.
@@ -91,7 +101,35 @@ impl Logger {
 			.write(true)
 			.truncate(true)
 			.open(path)?;
-		Ok(Logger { file: std::sync::Mutex::new(file), verbosity, echo })
+		Ok(Logger {
+			file: std::sync::Mutex::new(file),
+			path: path.to_path_buf(),
+			verbosity,
+			echo,
+			lines: tokio::sync::broadcast::channel(BACKLOG).0,
+		})
+	}
+
+	/// Every line written so far, oldest first.
+	///
+	/// Reads the file back under the write lock, so no line is caught half
+	/// written. Empty when the file cannot be read — a reader that joins late
+	/// misses history, it does not fail.
+	pub fn history(&self) -> Vec<String> {
+		let _writing = self.file.lock().unwrap();
+		std::fs::read_to_string(&self.path)
+			.unwrap_or_default()
+			.lines()
+			.map(str::to_string)
+			.collect()
+	}
+
+	/// Follow lines written from now on.
+	///
+	/// Lossy: a reader that falls behind by more than `BACKLOG` lines is told
+	/// how many it lost, and nothing waits for it.
+	pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<String> {
+		self.lines.subscribe()
 	}
 
 	/// Follow Event stream until closed.
@@ -150,6 +188,8 @@ impl Logger {
 			// Mirror to stdout
 			println!("{line}");
 		}
+		// Offer to followers
+		let _ = self.lines.send(line.to_string());
 	}
 
 	/// Render detail after timestamp and category.

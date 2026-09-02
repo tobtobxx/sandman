@@ -7,6 +7,11 @@
 // exception: it names a Session and an index, so a message can be added to a
 // running conversation without resending the whole thing.
 //
+// The Logs tab is the odd one out: it holds no entities at all, only the
+// harness's own trace. `init` carries `sandman.log` as it stands and a `logged`
+// frame follows per line written after, so what the tab shows and what the file
+// holds are the same text.
+//
 // What the inspector is open on lives in the URL's `#id` and nowhere else, so
 // every id one entity prints of another is a link: a Session's Task, a call's
 // Session. Following one is the browser's own job, and Back walks the trail
@@ -24,6 +29,20 @@ for (const a of document.querySelectorAll("#routes a")) {
 }
 
 const state = { tasks: {}, sessions: {}, calls: {}, channels: {}, lessons: {} };
+
+/** The Logs tab is not a bucket of entities: it is the harness's own trace,
+ *  `sandman.log`, line for line. `init` carries the file as it stands, and one
+ *  `logged` frame follows per line written after. Only the newest `LOG_KEEP`
+ *  are held — the file keeps the rest, and a window that has been open all day
+ *  should not grow without bound. */
+let logs = [];
+const LOG_KEEP = 2000;
+
+/** Whether the Logs view follows the newest line. True until the reader
+ *  scrolls back to read something, and true again once they return to the
+ *  foot — a trace that yanks itself away mid-sentence cannot be read. */
+let logsPinned = true;
+
 let spend = { calls: 0, tokens: 0, cost: 0 };
 let bucket = "tasks";
 let selected = null; // { bucket, id } | null — what the inspector shows
@@ -72,6 +91,7 @@ function onFrame(frame) {
     case "init":
       for (const key of Object.keys(state)) state[key] = frame.state[key] ?? {};
       spend = frame.spend;
+      logs = (frame.logs ?? []).slice(-LOG_KEEP);
       runStartedAt = frame.run.started_at;
       paintLink();
       // A link opened on an `#id` is honoured once there is something to
@@ -93,6 +113,10 @@ function onFrame(frame) {
     }
     case "ranked":
       if (find && find.query === frame.query) find.hits = frame.hits;
+      break;
+    case "logged":
+      logs.push(frame.line);
+      if (logs.length > LOG_KEEP) logs.splice(0, logs.length - LOG_KEEP);
       break;
   }
   render();
@@ -311,6 +335,20 @@ function lessonRow(l, score) {
     <span class="snip">${esc(l.text)}</span>`;
 }
 
+/** One line of the trace, as the Logger wrote it: `time category detail`. Taken
+ *  back apart so the categories read as a column down the page. Only a line
+ *  that opens with a timestamp is split; anything else — the socket's own note
+ *  that it dropped lines, a line wrapped over two — is printed whole. */
+function logRow(line) {
+  const parts = /^(\d\d:\d\d:\d\d\.\d+)\s+(\S+)\s+([\s\S]*)$/.exec(line);
+  const inner = parts
+    ? `<span class="at">${esc(parts[1])}</span>
+       <span class="cat">${esc(parts[2])}</span>
+       <span class="detail">${esc(parts[3])}</span>`
+    : `<span class="detail">${esc(line)}</span>`;
+  return `<div class="row log">${inner}</div>`;
+}
+
 const ROW = { sessions: sessionRow, calls: callRow, channels: channelRow };
 
 /** Wrap one row's markup with what a click needs to select it. `depth` nudges
@@ -473,6 +511,17 @@ function renderRows() {
   const box = document.getElementById("rows");
   const findBox = document.getElementById("find");
 
+  // A trace reads forwards, so the newest line is at the foot rather than the
+  // head. The view follows it only while the reader is already there — scrolled
+  // back to read something, they stay where they are.
+  if (bucket === "logs") {
+    findBox.classList.add("hidden");
+    box.innerHTML =
+      logs.map(logRow).join("") || `<p class="empty">Nothing logged yet.</p>`;
+    if (logsPinned) box.scrollTop = box.scrollHeight;
+    return;
+  }
+
   if (bucket === "tasks") {
     findBox.classList.add("hidden");
     const items = taskTree();
@@ -569,6 +618,9 @@ function render() {
 // --- interaction -----------------------------------------------------------
 
 function openBucket(name) {
+  // Opening the Logs tab lands at the newest line, whatever was left scrolled
+  // where in the tab before it.
+  if (name === "logs" && bucket !== "logs") logsPinned = true;
   bucket = name;
   document
     .querySelectorAll(".tab")
@@ -600,6 +652,14 @@ document.querySelectorAll(".tab").forEach((b) =>
     render();
   }),
 );
+
+document.getElementById("rows").addEventListener("scroll", (ev) => {
+  if (bucket !== "logs") return;
+  const box = ev.currentTarget;
+  // A line's worth of slack: a scroll that stops a pixel short of the foot is
+  // still the reader watching the newest line arrive.
+  logsPinned = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+});
 
 document.getElementById("rows").addEventListener("click", (ev) => {
   const cancel = ev.target.closest("[data-cancel]");

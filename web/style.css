@@ -264,6 +264,38 @@ main {
   margin: 0.6rem 0;
 }
 
+/* A log line is not a row that opens anything: no pointer, no hover, and the
+   rules between rows gone — what is wanted is a page of trace, close set and
+   monospaced, with the timestamps and categories lining up as columns. Long
+   details wrap rather than being cut, since the tail of a line is often the
+   whole point. */
+.row.log {
+  cursor: default;
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+  gap: 0.5rem;
+  padding: 0.1rem 1rem;
+  border-bottom: none;
+}
+.row.log:hover {
+  background: none;
+}
+.row.log .at {
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.row.log .cat {
+  color: var(--accent);
+  width: 4.5rem;
+  flex: none;
+}
+.row.log .detail {
+  flex: 1;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .empty {
   color: var(--dim);
   padding: 1rem;

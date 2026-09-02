@@ -33,6 +33,10 @@ One Event stream, read by `log.rs`, `web/` and bench cases. Broadcast: a slow co
 loses Events, never slows the swarm. Tool calls are not state changes, so the registry
 emits `ToolCalled`/`ToolReturned` on its own handle.
 
+The Watcher's Logs tab is not on that stream. `Logger` hands it `sandman.log` read back,
+then every line written after — so the tab and the file hold the same text, including the
+`note` lines no Event carries.
+
 ## Queue, Roles, ways in
 
 - Picked on one condition: time.
@@ -222,7 +226,7 @@ src/
   session.rs      The Turn loop. Both shapes run it; policy is in worker.rs and comms.rs.
   harness.rs      Task lifecycle, delivery, and the loops that start work.
   channels/       One connection to a human each; control.rs is the socket for the rest.
-  web/            The Watcher UI: sockets, and Events as frames.
+  web/            The Watcher UI: sockets, Events as frames, log lines as text.
   bench/          A Sandman under test, with four seams to make unreal, and the cases.
                   bench_driver.rs runs them, on the bench subcommand; no test does.
 ```

@@ -207,6 +207,7 @@ pub async fn interactive(
 	let web_state = sandman::web::server::AppState {
 		harness: harness.clone(),
 		channel: web_channel,
+		logger: logger.clone(),
 	};
 	let address = config.sandman.webui_address;
 	let port = config.sandman.webui_port;

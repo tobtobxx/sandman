@@ -1,10 +1,10 @@
 //! Event → Frame: what a Watcher sees, decided in one place.
 //!
-//! Construct: no state — `init_frame(&Snapshot, Spend) -> Frame::Init` and
-//! `patch_for(&Store, &Event) -> Option<Frame>` are pure translators.
+//! Construct: no state — `init_frame(&Snapshot, Spend, Vec<String>) -> Frame::Init`
+//! and `patch_for(&Store, &Event) -> Option<Frame>` are pure translators.
 //! Use: `server::watch` sends one `Init` on connect (full `Snapshot` plus
-//! `Spend` and `Run`), then one `patch_for` per `Event`; `Ranked` is built
-//! in `server::on_search`, not here.
+//! `Spend`, `Run` and the log so far), then one `patch_for` per `Event`;
+//! `Ranked` and `Logged` are built in `server`, not here.
 //! Consumers: browser JS over `/ws` via `server::watch` — sole external
 //! consumer; `Store` is read for fresh entities, `Events` is the input bus.
 //! Seam: `Event` → `Frame` translation lives only here; `server` owns
@@ -28,6 +28,9 @@
 //! **reconnect gets fresh `Init`, no replay.**
 //! **broadcast is lossy — slow Watcher loses Events, never slows the swarm.**
 //!
+//! Log lines are not `Event`s and never come through here: `server` reads them
+//! off the `Logger` and sends `Logged`.
+//!
 //! Defines: [`Frame`], [`Bucket`], [`patch_for`], [`init_frame`].
 
 use crate::event::Event;
@@ -48,11 +51,12 @@ pub enum Bucket {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Frame {
-	/// Everything on connect — every entity plus `Spend` and `Run`.
+	/// Everything on connect — every entity plus `Spend`, `Run` and the log so far.
 	Init {
 		state: serde_json::Value,
 		spend: serde_json::Value,
 		run: serde_json::Value,
+		logs: Vec<String>,
 	},
 	/// One entity that changed — whole current value.
 	Patch {
@@ -68,12 +72,19 @@ pub enum Frame {
 	},
 	/// Answer to a Lessons search — ids and scores in rank order.
 	Ranked { query: String, hits: Vec<(String, f32)> },
+	/// One line the `Logger` wrote, verbatim.
+	Logged { line: String },
 }
 
 /// Build the first frame a browser gets.
 ///
-/// Maps every entity in the `Snapshot` by id and bundles `Spend` and `Run`.
-pub fn init_frame(snapshot: &Snapshot, spend: crate::domain::Spend) -> Frame {
+/// Maps every entity in the `Snapshot` by id and bundles `Spend`, `Run` and
+/// every log line written so far — `Logged` carries the ones after it.
+pub fn init_frame(
+	snapshot: &Snapshot,
+	spend: crate::domain::Spend,
+	logs: Vec<String>,
+) -> Frame {
 	// Build id map
 	fn map<T: serde::Serialize>(
 		items: &[T],
@@ -100,6 +111,7 @@ pub fn init_frame(snapshot: &Snapshot, spend: crate::domain::Spend) -> Frame {
 		state,
 		spend: serde_json::to_value(spend).unwrap(),
 		run: serde_json::to_value(&snapshot.run).unwrap(),
+		logs,
 	}
 }
 

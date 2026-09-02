@@ -1,7 +1,8 @@
 //! Transport for the Watcher UI: static files and one WebSocket per browser.
 //!
-//! Construct: `AppState { harness: Arc<Harness>, channel: Option<ChannelId> }` where
-//! `None` means `[channels].web` is off — UI still watches, chat has nowhere to send;
+//! Construct: `AppState { harness: Arc<Harness>, channel: Option<ChannelId>,
+//! logger: Arc<Logger> }` where `channel: None` means `[channels].web` is off — UI
+//! still watches, chat has nowhere to send;
 //! `serve(state, addr, port)` binds axum, serves embedded `web/` and upgrades `/ws`.
 //! Use: browser loads `/` or `/chat` (same embedded `index.html`) then `ws_handler → watch`
 //! sends one `Frame::Init` then one `Frame` per [`crate::event::Event`]; inbound
@@ -18,8 +19,12 @@
 //! | `Find` | `on_search` | `memory::rank` with same `Embedder` as `memory` tool |
 //! | `Cancel` | `on_cancel` | `Harness::cancel_task` — stops pending/running chain |
 //!
+//! The Logs tab is the `Logger` seen twice: `Init` carries `Logger::history`, the
+//! log file read back, and every line written after arrives as `Frame::Logged`.
+//!
 //! Call trace: `serve → ws_handler → watch → init → send(Init)` then
-//! `select! { events.recv → patch_for → send; rx.next → Say | Find → send(Ranked) }`
+//! `select! { events.recv → patch_for → send; lines.recv → send(Logged);
+//! rx.next → Say | Find → send(Ranked) }`
 //! — subscribed before snapshot so gap is duplicated, never lost.
 //! Rules: **one `Init` then `Patch`/`Appended`; `Init` is fresh on every connect or `Lagged`.**
 //! **broadcast is lossy — Watcher that falls behind loses `Event`s, never slows the swarm.**
@@ -56,6 +61,7 @@ struct Assets;
 pub struct AppState {
 	pub harness: Arc<Harness>,
 	pub channel: Option<crate::domain::ChannelId>,
+	pub logger: Arc<crate::log::Logger>,
 }
 
 /// How many hits a Lessons search returns.
@@ -160,6 +166,7 @@ async fn ws_handler(
 async fn watch(state: AppState, socket: WebSocket) {
 	// Subscribe before snapshot
 	let mut events = state.harness.events.subscribe();
+	let mut lines = state.logger.subscribe();
 	let (mut tx, mut rx) = socket.split();
 
 	// Send snapshot
@@ -188,6 +195,23 @@ async fn watch(state: AppState, socket: WebSocket) {
 					if send(&mut tx, &frame).await.is_err() {
 						return;
 					}
+				}
+			},
+			line = lines.recv() => {
+				// Map log line to frame
+				let line = match line {
+					// Line — as the Logger wrote it
+					Ok(line) => line,
+					// Lagged — say so in the reader's own stream
+					Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+						format!("dropped {n} log line(s), see the log file")
+					},
+					// Closed — the Logger outlives the socket, so never
+					Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+				};
+				// Send frame
+				if send(&mut tx, &Frame::Logged { line }).await.is_err() {
+					return;
 				}
 			},
 			incoming = rx.next() => {
@@ -227,12 +251,16 @@ async fn watch(state: AppState, socket: WebSocket) {
 
 /// Build the opening `Init` frame.
 ///
-/// Reads `Store::snapshot` and `Harness::spend`. Returns `None` if the `Store`
-/// cannot be read.
+/// Reads `Store::snapshot`, `Harness::spend` and the log file so far. Returns
+/// `None` if the `Store` cannot be read.
 fn init(state: &AppState) -> Option<Frame> {
 	let snapshot = state.harness.store.snapshot().ok()?;
 	let spend = state.harness.spend().unwrap_or_default();
-	Some(super::wire::init_frame(&snapshot, spend))
+	Some(super::wire::init_frame(
+		&snapshot,
+		spend,
+		state.logger.history(),
+	))
 }
 
 /// Send one `Frame` as a text message.

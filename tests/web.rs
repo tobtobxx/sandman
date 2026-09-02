@@ -1,6 +1,9 @@
 //! The Watcher UI end to end: connect, get an `init`, say something, and see
 //! the Events that follow arrive as frames.
 //!
+//! The Logs tab is checked from both ends: a line written before the browser
+//! dials comes down inside `init`, one written after arrives as its own frame.
+//!
 //! Regression coverage for a real bug: a browser's periodic WebSocket ping was
 //! read by `watch` as "not text, give up", which silently ended the connection
 //! after the first frame. A client that never writes anything (as this test's
@@ -19,6 +22,7 @@ use sandman::db::Backing;
 use sandman::domain::{Clock, SystemClock};
 use sandman::event::Events;
 use sandman::harness::{Drive, Harness};
+use sandman::log::{Echo, Logger, Verbosity};
 use sandman::memory::{Embedder, OpenRouterEmbedder};
 use sandman::model::{Model, Models};
 use sandman::scheduler::Scheduler;
@@ -77,7 +81,24 @@ async fn watcher_streams_patches_after_say() {
 	});
 
 	let channel = channels::web::attach(harness.clone()).await.unwrap();
-	let state = AppState { harness: harness.clone(), channel: Some(channel) };
+
+	// The Logs tab reads the log file back on connect, so a line written before
+	// the browser dials has to come down in `init`.
+	let logger = Arc::new(
+		Logger::create(
+			&std::env::temp_dir().join("sandman-web-ui-test.log"),
+			Verbosity::Terse,
+			Echo::Quiet,
+		)
+		.expect("the temp dir takes a log file"),
+	);
+	logger.note("test", "written before the browser connected");
+
+	let state = AppState {
+		harness: harness.clone(),
+		channel: Some(channel),
+		logger: logger.clone(),
+	};
 	tokio::spawn(async move {
 		let _ =
 			serve(state, std::net::IpAddr::from([127, 0, 0, 1]), PORT).await;
@@ -95,6 +116,10 @@ async fn watcher_streams_patches_after_say() {
 		init.contains("\"type\":\"init\""),
 		"first frame was: {init}"
 	);
+	assert!(
+		init.contains("written before the browser connected"),
+		"init carried no log history: {init}"
+	);
 
 	// Exactly what killed `watch` before the fix: a non-Text frame on the
 	// incoming side, same as any WebSocket client's periodic keepalive ping.
@@ -106,18 +131,25 @@ async fn watcher_streams_patches_after_say() {
 	.await
 	.unwrap();
 
+	// And a line written after it dialed has to arrive on its own frame.
+	logger.note("test", "written after the browser connected");
+
 	let mut saw_patch = false;
 	let mut saw_appended = false;
-	for _ in 0..20 {
+	let mut saw_logged = false;
+	for _ in 0..30 {
 		let Some(text) = try_next_text(&mut ws).await else {
 			break;
 		};
 		saw_patch |= text.contains("\"type\":\"patch\"");
 		saw_appended |= text.contains("\"type\":\"appended\"");
-		if saw_patch && saw_appended {
+		saw_logged |= text.contains("written after the browser connected");
+		if saw_patch && saw_appended && saw_logged {
 			break;
 		}
 	}
+
+	assert!(saw_logged, "expected a Logged frame for the new log line");
 
 	assert!(saw_patch, "expected a Patch frame after saying something");
 	assert!(
