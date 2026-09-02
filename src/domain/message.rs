@@ -29,7 +29,7 @@
 //! Defines: [`Message`], [`AssistantBody`], [`Reply`], [`ToolCall`],
 //! [`ToolSchema`], [`Completion`], [`NonEmpty`].
 
-use super::time::Cost;
+use super::call::Usage;
 
 /// One entry in a Session transcript.
 ///
@@ -114,14 +114,12 @@ pub struct ToolSchema {
 
 /// What the transport returned for one exchange.
 ///
-/// `cost` is taken from the provider's response, not a local price list.
+/// `usage` is counted and priced by the provider, not by a local price list.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Completion {
 	pub reply: Reply,
 	pub reasoning: Option<String>,
-	pub tokens: u64,
-	/// Billed cost from the response. Stays right when pricing changes.
-	pub cost: Cost,
+	pub usage: Usage,
 }
 
 /// A list that cannot be empty.

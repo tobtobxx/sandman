@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use crate::domain::{
 	CallId, CallRequest, CallStatus, Clock, Completion, NewCall, SessionId,
-	TaskPriority, Usage,
+	TaskPriority,
 };
 use crate::model::{ModelError, Models, Purpose};
 use crate::store::Store;
@@ -170,15 +170,13 @@ impl Scheduler {
 		match outcome {
 			// Call succeeded - record Done
 			Ok(completion) => {
-				let usage =
-					Usage { tokens: completion.tokens, cost: completion.cost };
 				self.store.set_call_status(
 					id,
 					CallStatus::Done {
 						sent_at,
 						finished_at,
 						reply: completion.reply.clone(),
-						usage,
+						usage: completion.usage,
 					},
 				)?;
 				Ok((id, completion))

@@ -26,7 +26,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::config::{Config, ModelSpec};
-use crate::domain::{CallRequest, Completion, Cost, NonEmpty, Reply, ToolCall};
+use crate::domain::{
+	CallRequest, Completion, Cost, NonEmpty, Reply, ToolCall, Usage,
+};
 use crate::roles::RoleName;
 
 /// One exchange with a model.
@@ -248,17 +250,20 @@ impl Model for OpenRouter {
 			None => Reply::Text(choice.message.content.unwrap_or_default()),
 		};
 
-		// Compute cost
-		let usage = parsed.usage.unwrap_or_default();
-		let cost =
-			Cost((usage.cost.unwrap_or(0.0) * 1_000_000_000.0).round() as i64);
+		// Count and price the exchange. `prompt_tokens` counts the whole prompt,
+		// cache hits included, so what was processed is the remainder.
+		let wire = parsed.usage.unwrap_or_default();
+		let cached = wire.prompt_tokens_details.cached_tokens;
+		let usage = Usage {
+			cached,
+			prefill: wire.prompt_tokens.saturating_sub(cached),
+			produced: wire.completion_tokens,
+			cost: Cost(
+				(wire.cost.unwrap_or(0.0) * 1_000_000_000.0).round() as i64
+			),
+		};
 
-		Ok(Completion {
-			reply,
-			reasoning: choice.message.reasoning,
-			tokens: usage.total_tokens.unwrap_or(0),
-			cost,
-		})
+		Ok(Completion { reply, reasoning: choice.message.reasoning, usage })
 	}
 
 	async fn probe(&self) -> Result<(), ModelError> {
@@ -481,8 +486,20 @@ struct WireResponseFunctionCall {
 #[derive(Default, serde::Deserialize)]
 struct WireResponseUsage {
 	#[serde(default)]
-	total_tokens: Option<u64>,
-	/// Present when `WireUsageConfig::include` was set.
+	prompt_tokens: u64,
+	#[serde(default)]
+	completion_tokens: u64,
+	#[serde(default)]
+	prompt_tokens_details: WireResponsePromptDetails,
+	/// Present when `WireUsageConfig::include` was set. A local provider
+	/// bills nothing and sends none.
 	#[serde(default)]
 	cost: Option<f64>,
+}
+
+/// The cache half of the prompt count; absent from providers that do not cache.
+#[derive(Default, serde::Deserialize)]
+struct WireResponsePromptDetails {
+	#[serde(default)]
+	cached_tokens: u64,
 }

@@ -1137,17 +1137,23 @@ impl Store {
 	) -> Result<(), StoreError> {
 		let conn = self.conn.lock().unwrap();
 		let row = crate::db::rows::call_status_to_row(&status)?;
-		let (tokens, cost) = match &status {
-			CallStatus::Done { usage, .. } => {
-				(Some(usage.tokens as i64), Some(usage.cost.0))
-			},
-			_ => (None, None),
+		let usage = match &status {
+			CallStatus::Done { usage, .. } => Some(usage),
+			_ => None,
 		};
 		let updated = conn
 			.execute(
-				"UPDATE calls SET status = ?1, status_json = ?2, tokens = ?3,
-				 cost = ?4 WHERE id = ?5",
-				rusqlite::params![row.tag, row.json, tokens, cost, id.0],
+				"UPDATE calls SET status = ?1, status_json = ?2, cached = ?3,
+				 prefill = ?4, produced = ?5, cost = ?6 WHERE id = ?7",
+				rusqlite::params![
+					row.tag,
+					row.json,
+					usage.map(|u| u.cached as i64),
+					usage.map(|u| u.prefill as i64),
+					usage.map(|u| u.produced as i64),
+					usage.map(|u| u.cost.0),
+					id.0
+				],
 			)
 			.store()?;
 		if updated == 0 {
@@ -1173,11 +1179,14 @@ impl Store {
 	}
 
 	/// Sum `Spend` for Run from `Done` calls. Re-summed, not accumulated.
+	///
+	/// Tokens are the ones computed — `prefill + produced`. A cache hit costs
+	/// nothing to process, so counting it here would flatter the total.
 	pub fn spend(&self, run: RunId) -> Result<Spend, StoreError> {
 		let conn = self.conn.lock().unwrap();
 		let (calls, tokens, cost): (i64, Option<i64>, Option<i64>) = conn
 			.query_row(
-				"SELECT COUNT(*), SUM(tokens), SUM(cost) FROM calls
+				"SELECT COUNT(*), SUM(prefill + produced), SUM(cost) FROM calls
 				 WHERE run = ?1 AND status = 'done'",
 				[run.0],
 				|row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),

@@ -96,6 +96,8 @@ pub struct Cost(pub i64);
 )]
 pub struct Spend {
 	pub calls: u32,
+	/// Tokens computed: `prefill + produced` over the Run. Cache hits are not
+	/// counted — see [`crate::domain::Usage`].
 	pub tokens: u64,
 	pub cost: Cost,
 }

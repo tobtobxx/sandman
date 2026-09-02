@@ -114,7 +114,7 @@ pub async fn run(
 		verdict,
 		detail,
 		raw: text,
-		cost: completion.cost,
+		cost: completion.usage.cost,
 	})
 }
 

@@ -189,8 +189,9 @@ fewer Turns finishes first.
 
 A Session is `waiting`, `thinking`, `tools`, `idle` (Comms only), `reflecting`, then
 `finished`, `failed` or `cancelled`, and stays in the database once done. A model call is
-`queued`, `in_flight`, then `done`, `failed` or `dropped`, recording tokens and what the
-provider billed as an integer of nano-dollars. And everywhere:
+`queued`, `in_flight`, then `done`, `failed` or `dropped`, recording tokens cached,
+prefilled and produced, and what the provider billed as an integer of nano-dollars. A
+`Spend` sums the computed ones, prefill plus produced. And everywhere:
 
 - One Task concept: human request, investigation and delegated work are the same thing.
 - A Task has exactly one Result, on success or failure — or it is cancelled and has none.

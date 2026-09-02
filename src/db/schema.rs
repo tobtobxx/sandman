@@ -105,7 +105,9 @@ pub const MIGRATIONS: &[&str] = &[
         request_json TEXT    NOT NULL,
         status       TEXT    NOT NULL,
         status_json  TEXT    NOT NULL,
-        tokens       INTEGER,
+        cached       INTEGER,
+        prefill      INTEGER,
+        produced     INTEGER,
         cost         INTEGER,
         queued_at    INTEGER NOT NULL
     );

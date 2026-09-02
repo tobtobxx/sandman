@@ -102,11 +102,28 @@ pub enum CallStatus {
 }
 
 /// Tokens and cost of one finished call.
+///
+/// The prompt is split by what the provider had to compute: `cached` was
+/// served from its prefix cache, `prefill` was processed for this call. The two
+/// add up to the prompt sent — a long transcript re-sent unchanged is nearly
+/// all `cached`, and that is the difference between a fast turn and a slow one.
 #[derive(
-	Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+	Debug,
+	Clone,
+	Copy,
+	Default,
+	PartialEq,
+	Eq,
+	serde::Serialize,
+	serde::Deserialize,
 )]
 pub struct Usage {
-	pub tokens: u64,
+	/// Prompt tokens the provider read back from its cache.
+	pub cached: u64,
+	/// Prompt tokens processed for this call; excludes `cached`.
+	pub prefill: u64,
+	/// Tokens generated, reasoning included.
+	pub produced: u64,
 	pub cost: Cost,
 }
 

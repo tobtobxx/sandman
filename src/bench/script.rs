@@ -21,7 +21,7 @@
 //! Rules:
 //! - **One queue for every [`crate::model::Purpose`]** — a scripted case is not asking which model would have replied (`Models::uniform`).
 //! - **FIFO, no retry** — one `send` consumes one reply; `Transport` on empty or on queued `Err`.
-//! - **Zero-cost fixtures** — helpers set tokens and cost to zero; build [`crate::domain::Completion`] directly to override.
+//! - **Zero-cost fixtures** — helpers set every [`crate::domain::Usage`] field to zero; build [`crate::domain::Completion`] directly to override.
 //! - **Recording is a clone** — `requests()` returns a snapshot for system-prompt and tool-schema assertions.
 //!
 //! Defines: [`ScriptedModel`].
@@ -61,8 +61,7 @@ impl ScriptedModel {
 		Completion {
 			reply: crate::domain::Reply::Text(text.to_string()),
 			reasoning: None,
-			tokens: 0,
-			cost: crate::domain::Cost(0),
+			usage: crate::domain::Usage::default(),
 		}
 	}
 
@@ -81,8 +80,7 @@ impl ScriptedModel {
 				calls: crate::domain::NonEmpty::new(call, Vec::new()),
 			},
 			reasoning: None,
-			tokens: 0,
-			cost: crate::domain::Cost(0),
+			usage: crate::domain::Usage::default(),
 		}
 	}
 
