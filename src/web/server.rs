@@ -272,7 +272,7 @@ async fn send(
 	frame: &Frame,
 ) -> Result<(), axum::Error> {
 	let text = serde_json::to_string(frame).expect("a Frame always serializes");
-	tx.send(Message::Text(text)).await
+	tx.send(Message::Text(text.into())).await
 }
 
 /// Enqueue a human message from the browser.

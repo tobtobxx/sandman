@@ -9,23 +9,23 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query"] }
 async-trait = "0.1"
-thiserror = "2.0.20"
-axum = { version = "0.7", features = ["ws"] }
+thiserror = "2"
+axum = { version = "0.8", features = ["ws"] }
 rust-embed = { version = "8", features = ["debug-embed"] }
 futures-util = "0.3"
 tempfile = "3"
-chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
-strum = { version = "0.28.0", features = ["derive"] }
-num_enum = "0.7.6"
-toml = "1.1.4"
+strum = { version = "0.28", features = ["derive"] }
+num_enum = "0.7"
+toml = "1"
 matrix-sdk = { version = "0.18", features = ["markdown", "sqlite", "e2e-encryption"] }
-croner = { version = "4.0.0", features = ["chrono"] }
+croner = { version = "4", features = ["chrono"] }
 
 [dev-dependencies]
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.30"
 
 
 [lib]
