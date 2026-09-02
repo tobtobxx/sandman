@@ -39,9 +39,6 @@ use crate::scheduler::Scheduler;
 use crate::store::Store;
 use crate::tools::{Registry, ToolRunner};
 
-/// Default per-case bound. Used when `RigBuilder::timeout` is not set.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
-
 /// Where model replies come from.
 pub enum ModelChoice {
 	/// Real model over the wire.
@@ -173,7 +170,7 @@ impl RigBuilder {
 		self
 	}
 
-	/// Bound for whole case. Trips when exceeded.
+	/// Bound for whole case, overriding `bench.timeout`. Trips when exceeded.
 	pub fn timeout(mut self, within: Duration) -> Self {
 		self.timeout = Some(within);
 		self
@@ -300,7 +297,9 @@ impl RigBuilder {
 		}
 
 		// Assemble rig
-		let timeout = self.timeout.unwrap_or(DEFAULT_TIMEOUT);
+		let timeout = self
+			.timeout
+			.unwrap_or_else(|| Duration::from_secs(config.bench.timeout));
 
 		Ok(Rig {
 			harness,

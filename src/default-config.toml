@@ -84,6 +84,8 @@ searxng_endpoint = "https://priv.au/" # Must have json replies enabled.
 [bench]
 # The grader's model. Should be stronger than the swarms model.
 grader = "glm-flash"
+# Seconds one case can run before it trips.
+timeout = 120
 
 
 # --- Sandman -----------------------------------------------------------------

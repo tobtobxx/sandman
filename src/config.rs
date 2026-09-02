@@ -119,6 +119,8 @@ pub struct Tools {
 #[serde(deny_unknown_fields)]
 pub struct Bench {
 	pub grader: String,
+	/// Per-case bound in seconds. A case that runs past it trips.
+	pub timeout: i64,
 }
 
 /// Failure to obtain a `Config`.
