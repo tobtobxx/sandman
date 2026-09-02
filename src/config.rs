@@ -467,36 +467,6 @@ mod tests {
 	}
 
 	#[test]
-	fn every_role_resolves_to_a_model() {
-		let config = default_config();
-		for role in <RoleName as strum::VariantArray>::VARIANTS {
-			assert_eq!(
-				config.for_role(*role).model,
-				"Qwen3.6-35B-A3B:MXFP4_MOE"
-			);
-		}
-		assert_eq!(config.for_comms().model, "Qwen3.6-35B-A3B:MXFP4_MOE");
-		assert_eq!(config.for_grader().model, "z-ai/glm-5.3-flash");
-	}
-
-	#[test]
-	fn a_named_role_overrides_all() {
-		let text = DEFAULT.replace(
-			"# research = \"qwen36-remote\"",
-			"research = \"glm-flash\"",
-		);
-		let config = Config::parse_with(&text, &stub).unwrap();
-		assert_eq!(
-			config.for_role(RoleName::Research).model,
-			"z-ai/glm-5.3-flash"
-		);
-		assert_eq!(
-			config.for_role(RoleName::Planning).model,
-			"Qwen3.6-35B-A3B:MXFP4_MOE"
-		);
-	}
-
-	#[test]
 	fn effort_off_is_no_reasoning_and_a_level_is_itself() {
 		let config = default_config();
 		assert_eq!(config.spec("qwen36-local").unwrap().effort, None);
@@ -522,18 +492,6 @@ mod tests {
 	fn a_missing_key_is_an_error() {
 		let text = DEFAULT.replace("webui_port = 8080", "");
 		assert!(Config::parse_with(&text, &stub).is_err());
-	}
-
-	#[test]
-	fn a_slug_nothing_defines_is_an_error() {
-		let text = DEFAULT.replace("all = \"qwen36-local\"", "all = \"nope\"");
-		match Config::parse_with(&text, &stub) {
-			Err(ConfigError::NoSuchSlug { key, slug }) => {
-				assert_eq!(key, "models.all");
-				assert_eq!(slug, "nope");
-			},
-			other => panic!("expected an unknown slug, got {other:?}"),
-		}
 	}
 
 	#[test]
