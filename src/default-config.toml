@@ -107,8 +107,7 @@ webui_port = 8080
 # `enable`.
 
 [channels]
-# Where the swarm speaks when it names no Channel. Name one that is turned off,
-# and every message it would carry is dropped.
+# Where the swarm speaks when it names no Channel. It should always be open.
 favorite = "stdio"
 
 # The terminal. Turned off, the trace goes to stdout as well as to the log,

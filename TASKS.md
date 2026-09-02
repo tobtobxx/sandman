@@ -15,34 +15,6 @@ Known rough edges, not fixed here:
   only when the model cannot be reached. A Worker or review that decides a Task is
   impossible submits that statement as a successful Result saying so.
 
-- **A recurring chain has no identity.** A repeating Task is a chain of ordinary
-  Tasks, and cancelling one must stop the chain. Identity is by what the re-arm copies
-  verbatim — Role, Title, Brief, creator, interval — so two identical
-  recurring Tasks would cancel together. A chain-root id on the Task would settle it.
-
-- **A restart ends a recurring chain that was mid-run.** The next occurrence is only
-  created when one completes, so a Task cancelled by `Store::recover` never re-arms:
-  Ctrl+C at the wrong moment loses a daily Task for good. Deliberate for now — the
-  rework that gives a chain its own identity is where this gets fixed.
-
-- **A clean shutdown leaves its Comms Sessions open.** `wind_down` cancels Tasks but
-  ends no Session, so after `/quit` the two Comms Sessions sit at `idle` with no
-  `ended_at` until the next start cancels them. Harmless and self-correcting; it does
-  mean `cancelled` does not distinguish "aborted" from "shut down".
-
-- **A Worker picks a Channel by guessing.** `message_human` names a Channel, and
-  several may be open. A Task carries no record of which human it came from — Briefs
-  stand alone, by design — so a Worker deciding who to tell has nothing principled to
-  go on. It reads the Brief and guesses. Carrying provenance on a Task would fix it and
-  would weaken the standalone Brief; neither side of that is obviously right. The pull
-  direction does not guess: an answer a Comms Session subscribed to lands in its
-  Mailbox with no Worker choosing anything. Push still does.
-
-- **Repetition counts intervals, not wall-clock.** `repeat_seconds: 86400` means every
-  24 hours from the anchor, not "every morning at nine". Anchored to the schedule so it
-  does not drift, but a true time-of-day schedule needs an absolute one, which nobody
-  has needed yet.
-
 - **A Comms Session's context grows without bound.** It is standing, one per Channel,
   and keeps context across every message — it never dies, so nothing trims it. Worker
   Sessions avoid this by being ephemeral. Now that Sessions persist, the context also
@@ -83,8 +55,5 @@ Known rough edges, not fixed here:
   human" guess visible. A unit bench like the rest — the call is intercepted, not
   delivered.
 
-
 ## Prio
- - Fix scheduling
  - Show better token usage
- - Task/session/call references clickable
