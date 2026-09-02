@@ -69,5 +69,5 @@ pub fn system_prompt(role: crate::roles::RoleName) -> String {
 		RoleName::TaskManager => TASK_MANAGER,
 	};
 	// Join mechanics and role
-	format!("{MECHANICS}\n\n{role_text}")
+	format!("{MECHANICS}\n{role_text}")
 }
