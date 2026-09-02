@@ -187,6 +187,42 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for NonEmpty<T> {
 }
 
 impl Message {
+	/// Render for a reader: `[role]` prefix, tool calls inline.
+	///
+	/// For anything that reads a transcript as text rather than replaying it as
+	/// context — `recall`'s Session view and metacognition. `reasoning` stays
+	/// out; it is inspection and never travels. No trailing newline: callers
+	/// separate entries themselves.
+	pub fn render(&self) -> String {
+		match self {
+			// System - the Role's prompt
+			Message::System { content } => format!("[system] {content}"),
+			// User - Brief, mail, or feedback
+			Message::User { content } => format!("[user] {content}"),
+			// Assistant - text, or preamble above its calls
+			Message::Assistant { body, .. } => match body {
+				AssistantBody::Text(text) => format!("[assistant] {text}"),
+				AssistantBody::Calls { preamble, calls } => {
+					let mut out = String::new();
+					if let Some(preamble) = preamble {
+						out.push_str(&format!("[assistant] {preamble}\n"));
+					}
+					for call in calls.iter() {
+						out.push_str(&format!(
+							"  tool call: {}({})\n",
+							call.name, call.arguments
+						));
+					}
+					out.trim_end().to_string()
+				},
+			},
+			// Tool - result for one call
+			Message::Tool { content, .. } => {
+				format!("[tool result] {content}")
+			},
+		}
+	}
+
 	/// One-line kind for the log. Body stays in the database.
 	pub fn describe(&self) -> String {
 		match self {

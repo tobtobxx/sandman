@@ -2,9 +2,9 @@
 //!
 //! Review judges a finished turn; interrupt judges a running one. Neither is an
 //! agent, has a Role, or holds tools — both share `metacognise`, which builds a
-//! sandwiched `CallRequest` (`META_SYSTEM` + transcript with `System→User` +
-//! question) and sends it via `Scheduler::request` at `Tier::Metacognition` /
-//! `Purpose::Metacognition`.
+//! sandwiched `CallRequest` (`META_SYSTEM` + the transcript rendered into one
+//! `User` message + question) and sends it via `Scheduler::request` at
+//! `Tier::Metacognition` / `Purpose::Metacognition`.
 //!
 //! Construct: nothing to build — `SessionCtx` in (`Harness::ctx(id)` builds it).
 //! Use: `reflect(ctx) → Outcome` after a Worker `Text`/`Silent`; `interrupt(ctx) → Nudge`
@@ -18,6 +18,8 @@
 //! | `Interrupt` | mid-turn, counted from last metacognition | `session::check_in` inside `turn` | `Nudge::{Feedback,Nothing}` | never — `Nudge` has no `Complete` |
 //!
 //! Rules: **both are bare calls, not agents — no Role, no tools, synchronous.**
+//! **the judged transcript arrives as one rendered `User` message, its system prompt
+//! dropped — a judge that is handed roles reads them as its own and continues the work.**
 //! **both fail open — `FailedOpen` or `Store` error is `Nothing` and never wedges a run.**
 //! **interrupt cannot complete a Task — enforced by `Nudge` having no `Complete`.**
 //! **only `Feedback` re-enters context via `tell`; `Reflection` and `Lesson` never do.**
@@ -87,16 +89,22 @@ async fn metacognise(
 		return Outcome::Nothing;
 	};
 
+	// Render the transcript as text — the judge reads a conversation, it does
+	// not continue one. The judged Session's own system prompt is left out; it
+	// instructs a Worker, and metacognition is not the Worker.
+	let rendered = transcript
+		.iter()
+		.filter(|message| !matches!(message, Message::System { .. }))
+		.map(|message| message.render())
+		.collect::<Vec<_>>()
+		.join("\n\n");
+
 	// Build sandwiched request
-	let mut messages = Vec::with_capacity(transcript.len() + 2);
-	messages.push(Message::System { content: system.to_string() });
-	for message in transcript {
-		messages.push(match message {
-			Message::System { content } => Message::User { content },
-			other => other,
-		});
-	}
-	messages.push(Message::System { content: question.to_string() });
+	let messages = vec![
+		Message::System { content: system.to_string() },
+		Message::User { content: rendered },
+		Message::System { content: question.to_string() },
+	];
 
 	let request = CallRequest { messages, tools: Vec::new() };
 	let now = ctx.clock.now();

@@ -37,8 +37,8 @@ use std::str::FromStr;
 use async_trait::async_trait;
 
 use crate::domain::{
-	AssistantBody, Hit, Lesson, Message, ReflectionResult, Session, SessionId,
-	Task, TaskId, TaskState, ToolSchema,
+	Hit, Lesson, ReflectionResult, Session, SessionId, Task, TaskId, TaskState,
+	ToolSchema,
 };
 use crate::roles::{SchemaCtx, ToolName};
 use crate::session::SessionCtx;
@@ -351,40 +351,8 @@ fn render_session(session: &Session) -> String {
 	// Collect transcript
 	let mut out = String::new();
 	for message in &session.messages {
-		match message {
-			// System - append content
-			Message::System { content } => {
-				out.push_str(&format!("[system] {content}\n\n"));
-			},
-			// User - append content
-			Message::User { content } => {
-				out.push_str(&format!("[user] {content}\n\n"));
-			},
-			// Assistant - render body
-			Message::Assistant { body, .. } => match body {
-				// Text - append
-				AssistantBody::Text(text) => {
-					out.push_str(&format!("[assistant] {text}\n\n"));
-				},
-				// Calls - render preamble and calls
-				AssistantBody::Calls { preamble, calls } => {
-					if let Some(preamble) = preamble {
-						out.push_str(&format!("[assistant] {preamble}\n"));
-					}
-					for call in calls.iter() {
-						out.push_str(&format!(
-							"  tool call: {}({})\n",
-							call.name, call.arguments
-						));
-					}
-					out.push('\n');
-				},
-			},
-			// Tool - append result
-			Message::Tool { content, .. } => {
-				out.push_str(&format!("[tool result] {content}\n\n"));
-			},
-		}
+		out.push_str(&message.render());
+		out.push_str("\n\n");
 	}
 
 	// Append metacognition
