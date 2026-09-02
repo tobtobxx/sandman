@@ -2,7 +2,7 @@
 //!
 //! Construct: `RigBuilder::default` → `RigBuilder::{model,clock,tools,drive,channel,config}` → `build() → Rig`.
 //! Use: seed state (`seed_task`, `seed_lesson`, `send`), drive (`until`, `idle_for`, `converse`, `await_task`) with tripwires, read (`tool_calls`, `transcript`, `tasks`, `spend`, `failed_calls`), end (`wind_down`, `save_to`).
-//! Consumers: `cases` via `Case::run`, `report::assemble` (winds down and reports), `bin/bench` and `tests/cases.rs`.
+//! Consumers: `cases` via `Case::run`, `report::assemble` (winds down and reports), `bench_driver`.
 //!
 //! Seams — real unless replaced:
 //! | Seam | Real | Bench |

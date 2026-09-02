@@ -14,8 +14,9 @@
 //! Report: [`report::assemble`] winds down, waits for in-flight calls, emits
 //! `RunReport` + `store.sqlite`/`sandman.log`/`result.json`.
 //!
-//! Consumers: [`cases::CASES`] via `tests/cases.rs` (`cargo test -- --ignored`)
-//! and `bin/bench`; both call `Case::run` → `(Option<Rig>, RunReport)`.
+//! Consumers: `bench_driver`, on the `bench` subcommand — it walks
+//! [`cases::CASES`] and calls `Case::run` → `(Option<Rig>, RunReport)`. No test
+//! runs a case; they spend money.
 //!
 //! Seams — real unless the case replaces them:
 //! | Seam | Real | Bench |

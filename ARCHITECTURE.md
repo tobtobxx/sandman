@@ -218,6 +218,5 @@ src/
   channels/       One connection to a human each; control.rs is the socket for the rest.
   web/            The Watcher UI: sockets, and Events as frames.
   bench/          A Sandman under test, with four seams to make unreal, and the cases.
-                  bin/ holds sandman and the bench driver; tests/cases.rs wraps each
-                  case as a test.
+                  bench_driver.rs runs them, on the bench subcommand; no test does.
 ```

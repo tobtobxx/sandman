@@ -1,10 +1,9 @@
 //! The bench cases themselves.
 //!
-//! One file per case, each opening with what it tests in plain language.
-//! `cargo test -- --ignored` runs the `#[cfg(test)]` wrapper next to each one,
-//! and `bin/bench` runs the same [`CASES`] table several times over and keeps
-//! the artifacts. Everything lives in the library, because `bin/bench` cannot
-//! reach into an integration test crate.
+//! One file per case, each opening with what it tests in plain language. The
+//! `bench` subcommand is the only thing that runs them: it walks the [`CASES`]
+//! table, several times over, and keeps the artifacts. A case spends money on a
+//! real model, so `cargo test` never touches one.
 //!
 //! Every case is a unit bench: one Session, one real Brief, every tool call
 //! intercepted. It asks what the model reached for — which tool, with what
@@ -169,14 +168,14 @@ pub(crate) fn at_most_creations(
 
 /// A whole case, from just the parts that make it unique.
 ///
-/// Expands to `pub(super) async fn run()` plus its `#[ignore]`d test — the
-/// look-up, the build-or-report ceremony, the tripwires, and the wind-down are
-/// all written once here rather than once per case. `body` runs with
+/// Expands to `pub(super) async fn run()` — the look-up, the build-or-report
+/// ceremony, the tripwires, and the wind-down are all written once here rather
+/// than once per case. `body` runs with
 /// `rig: &mut Rig` and a `graders: &mut Vec<Grader>` in scope (empty unless it
 /// pushes to it), ending in the `Result<Vec<CheckResult>, Trip>` `run` reports
 /// — a `?` anywhere inside ends the case as `tripped`, not as a Rust panic.
 ///
-/// ```ignore
+/// ```text
 /// super::bench_case! {
 ///     name: "hello",
 ///     builder: Rig::builder().drive(Drive::CommsOnly).channel(ChannelKind::Scripted),

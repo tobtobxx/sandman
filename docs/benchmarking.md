@@ -8,20 +8,15 @@ whole-swarm case.
 
 Code: `src/bench/` (`rig.rs`, `intercept.rs`, `grader.rs`, `report.rs`). Cases: one file
 per case under `src/bench/cases/`, each opening with the scenario in plain language.
-Cases live in the library, because `bin/bench` cannot reach into a test crate; the
-`#[tokio::test]` wrapper for each lives in a `#[cfg(test)]` module at the bottom of its
-own case file rather than in `tests/`, so the case and the test that runs it never drift
-apart.
+Cases live in the library, and the `bench` subcommand is the only thing that runs them.
+A case spends money on a real model, so `cargo test` knows nothing about the bench.
 
 ## Running
 
 ```sh
-cargo test                            # everything that spends nothing
-cargo test -- --ignored               # the cases, against a real model
-cargo test -- --ignored greet         # one of them
-cargo run --bin bench -- --list       # which cases there are, and what each asks
-cargo run --bin bench                 # report and artifacts; all cases, in parallel
-cargo run --bin bench -- --case hello --times 5 --serial
+cargo run -- bench --list                    # which cases there are, and what each asks
+cargo run -- bench                           # report and artifacts; all cases, in parallel
+cargo run -- bench --case hello --times 5 --serial
 ```
 `--times N` is for variance. Parallel runs hit the model concurrently; rate limiting
 under load shows up as inflated wall time, not as failures.
@@ -92,7 +87,7 @@ known at the end, a check; if a machine cannot judge it at all, a grader.
 
 ## Artifacts
 
-`cargo run --bin bench` writes `bench/runs/<stamp>/<case>-run<k>/`: `result.json`,
+`cargo run -- bench` writes `bench/runs/<stamp>/<case>-run<k>/`: `result.json`,
 `store.sqlite` and `sandman.log` — see `src/bench/report.rs` for what is in each.
 ```sh
 sqlite3 bench/runs/*/plan-greet-run1/store.sqlite \
@@ -103,7 +98,7 @@ sqlite3 bench/runs/*/plan-greet-run1/store.sqlite \
 
 A new file under `src/bench/cases/` — its module doc comment says the scenario in plain
 language, one `bench_case!` invocation says the rest — and a line in `CASES` in
-`cases/mod.rs` so `bin/bench` and `find` can see it. Decide two things first: **which
+`cases/mod.rs` so the driver and `find` can see it. Decide two things first: **which
 Session is it about** — a question that needs two Sessions is two cases — and **what must
 never happen**, which is the tripwire that keeps a failing case cheap.
 

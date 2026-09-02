@@ -86,9 +86,8 @@ working directory. Deleting all of it gives you a fresh Sandman.
 ## Test it
 
 ```sh
-cargo test                           # spends nothing
-cargo test -- --ignored              # the bench cases, against a real model
-cargo run --bin bench -- --times 5   # with a report and artifacts
+cargo test                      # spends nothing, and never touches the bench
+cargo run -- bench --times 5    # the bench cases, against a real model
 ```
 
 ## Configuration
