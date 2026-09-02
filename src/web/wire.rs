@@ -12,7 +12,7 @@
 //!
 //! | `Event` | `Frame` |
 //! | --- | --- |
-//! | `TaskCreated` / `TaskStateChanged` | `Patch(Tasks)` — whole Task re-read, browser replaces |
+//! | `TaskCreated` / `TaskStateChanged` / `TaskReArmed` | `Patch(Tasks)` — whole Task re-read, browser replaces |
 //! | `SessionStarted` / `SessionStatusChanged` / `ReflectionRecorded` | `Patch(Sessions)` — whole Session re-read |
 //! | `CallQueued` / `CallStatusChanged` | `Patch(Calls)` — whole Call re-read |
 //! | `ChannelOpened` / `Said` | `Patch(Channels)` — whole Channel re-read |
@@ -122,8 +122,9 @@ pub fn patch_for(store: &Store, event: &Event) -> Option<Frame> {
 		Event::TaskCreated(task) => {
 			patch(Bucket::Tasks, task.id.to_string(), json(task))
 		},
-		// Task changed - re-read then patch
-		Event::TaskStateChanged { task, .. } => {
+		// Task changed or re-armed - re-read then patch
+		Event::TaskStateChanged { task, .. }
+		| Event::TaskReArmed { task, .. } => {
 			let task = store.task(*task).ok().flatten()?;
 			patch(Bucket::Tasks, task.id.to_string(), json(&task))
 		},

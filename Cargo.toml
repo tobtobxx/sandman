@@ -1,7 +1,7 @@
 [package]
 name = "sandman"
-version = "0.1.0"
-edition = "2021"
+version = "4.1.0"
+edition = "2024"
 description = "An agent swarm that coordinates through a shared queue"
 
 [dependencies]
@@ -22,6 +22,7 @@ strum = { version = "0.28.0", features = ["derive"] }
 num_enum = "0.7.6"
 toml = "1.1.4"
 matrix-sdk = { version = "0.18", features = ["markdown", "sqlite", "e2e-encryption"] }
+croner = { version = "4.0.0", features = ["chrono"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"

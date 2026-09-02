@@ -15,7 +15,7 @@
 //!
 //! | `Request` | `Harness`/`Store` call | `Response` |
 //! |---|---|---|
-//! | `CreateTask` | parse `RoleName`/`Title`/`Brief`/`Schedule::from_offsets` → `Harness::create_task` | `Created` |
+//! | `CreateTask` | parse `RoleName`/`Title`/`Brief`/`Schedule::parse` → `Harness::create_task` | `Created` |
 //! | `ListTasks` | parse `TaskStateName` → `Store::list_tasks` | `Tasks` |
 //! | `Spend` | `Harness::spend` | `Spent` |
 //! | bad JSON / bad fields | — | `Error` |
@@ -53,9 +53,9 @@ pub enum Request {
 		title: String,
 		brief: String,
 		/// Seconds to wait before it may run.
-		run_at_seconds: Option<i64>,
-		/// Seconds between occurrences.
-		repeat_seconds: Option<i64>,
+		in_seconds: Option<i64>,
+		/// Cron expression it comes round on. Not with `in_seconds`.
+		cron: Option<String>,
 		priority: Option<String>,
 	},
 	ListTasks {
@@ -201,8 +201,8 @@ async fn handle(harness: &Arc<Harness>, request: Request) -> Response {
 			role,
 			title,
 			brief,
-			run_at_seconds,
-			repeat_seconds,
+			in_seconds,
+			cron,
 			priority,
 		} => {
 			// Validate role
@@ -237,11 +237,14 @@ async fn handle(harness: &Arc<Harness>, request: Request) -> Response {
 				},
 			};
 			// Build schedule and create task
-			let schedule = Schedule::from_offsets(
-				run_at_seconds,
-				repeat_seconds,
+			let schedule = match Schedule::parse(
+				in_seconds,
+				cron.as_deref(),
 				harness.now(),
-			);
+			) {
+				Ok(schedule) => schedule,
+				Err(e) => return Response::Error { message: e.to_string() },
+			};
 			let new = NewTask {
 				title,
 				brief,
@@ -304,7 +307,7 @@ impl From<TaskSummary> for TaskLine {
 			title: t.title.to_string(),
 			role: t.role.to_string(),
 			state: t.state.discriminant().to_string(),
-			not_before: t.schedule.not_before(t.created_at).map(|ts| ts.0),
+			not_before: t.schedule.not_before().map(|ts| ts.0),
 			created_at: t.created_at.0,
 		}
 	}

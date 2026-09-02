@@ -12,7 +12,7 @@
 //! `CancelOutcome`.
 //! Consumers: `roles.rs` assigns both to `TaskManager` (with `SearchTasks`/
 //! `CreateTaskFull`); `Store` owns list filtering, `Harness` owns cancel policy
-//! (`chain_of` → `cancel_tasks` → `waiters::resolve`); bench replaces
+//! (`cancel_tasks` → `waiters::resolve`); bench replaces
 //! `ToolRunner` to observe without touching the queue.
 //!
 //! Call trace: `turn → scheduler.request → tools.run(list_tasks) → store.list_tasks → String → loop`
@@ -23,9 +23,9 @@
 //! | `NotFound` | no such Task |
 //! | `Completed` | already completed, nothing to stop |
 //! | `Already` | already cancelled |
-//! | `Cancelled{ids, running}` | ids stopped; notes if Session halts at next decision |
+//! | `Cancelled{running}` | it stopped; notes if its Session halts at next decision |
 //!
-//! Rules: **cancel is terminal — no Result, stops repeating chain, no re-arm.**
+//! Rules: **cancel is terminal — no Result, and reaches the named Task alone.**
 //! **pending never runs, running stops at next decision with no Result.**
 //! **waiters told so `await_result` never hangs.**
 //! **list order is newest first; state enum from `TaskStateName` so impossible states cannot be named.**
@@ -155,12 +155,12 @@ impl Tool for CancelTask {
 			Some(s) => match TaskId::from_str(s) {
 				Ok(id) => id,
 				Err(_) => {
-					return ToolError::NoSuchTask(s.to_string()).to_string()
+					return ToolError::NoSuchTask(s.to_string()).to_string();
 				},
 			},
 		};
 
-		// Cancel chain
+		// Cancel task
 		match ctx.harness.cancel_task(task).await {
 			// - Not found
 			Ok(CancelOutcome::NotFound) => {
@@ -174,20 +174,15 @@ impl Tool for CancelTask {
 			Ok(CancelOutcome::Already) => {
 				format!("{task} was already cancelled.")
 			},
-			// - Cancelled with chain
-			Ok(CancelOutcome::Cancelled { ids, running }) => {
-				let ids = ids
-					.iter()
-					.map(TaskId::to_string)
-					.collect::<Vec<_>>()
-					.join(", ");
+			// - Cancelled
+			Ok(CancelOutcome::Cancelled { running }) => {
 				if running {
 					format!(
-						"Cancelled {ids}. One of them was running; its Session \
-						 will stop at its next decision point."
+						"Cancelled {task}. It was running; its Session will \
+						 stop at its next decision point."
 					)
 				} else {
-					format!("Cancelled {ids}.")
+					format!("Cancelled {task}.")
 				}
 			},
 			// - Store error

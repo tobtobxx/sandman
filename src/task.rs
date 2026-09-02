@@ -22,8 +22,8 @@ pub async fn into_running(args: TaskArgs, paths: Paths) -> Result<(), String> {
 		role: args.role,
 		title: args.title.unwrap_or_else(|| args.brief.clone()),
 		brief: args.brief,
-		run_at_seconds: args.at_seconds,
-		repeat_seconds: args.every_seconds,
+		in_seconds: args.in_seconds,
+		cron: args.cron,
 		priority: args.priority,
 	};
 

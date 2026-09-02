@@ -9,7 +9,7 @@
 //! | --- | --- | --- | --- | --- |
 //! | `CreateTask` | `Planning` fixed | `Now` fixed | `Normal` fixed | every Worker + Comms |
 //! | `CreateResearchTask` | `Research` fixed | `Now` fixed | `Normal` fixed | `Research` |
-//! | `CreateTaskFull` | caller chooses | caller chooses (`run_at`/`repeat`) | caller chooses | `Planning`, `TaskManager` |
+//! | `CreateTaskFull` | caller chooses | caller chooses (`in_seconds`/`cron`) | caller chooses | `Planning`, `TaskManager` |
 //!
 //! Call trace: `Tool::call → parse_args → require_* → NewTask → Harness::create_task → Store::create_task → created_reply`
 //!
@@ -31,8 +31,7 @@ use super::{Tool, ToolError};
 /// Shared wording, so three schemas cannot describe the same argument three ways.
 pub const TITLE_DESC: &str =
 	"One line describing the Task, so a human can scan it.";
-pub const BRIEF_DESC: &str =
-	"The full instructions. The Worker sees nothing else, so include \
+pub const BRIEF_DESC: &str = "The full instructions. The Worker sees nothing else, so include \
      every fact it needs. Write it for someone with no context.";
 
 /// Enqueue a planning Task. No Role and no timing to choose.
@@ -50,8 +49,8 @@ struct ParsedArgs {
 	title: Option<String>,
 	brief: Option<String>,
 	role: Option<String>,
-	run_at_seconds: Option<i64>,
-	repeat_seconds: Option<i64>,
+	in_seconds: Option<i64>,
+	cron: Option<String>,
 	priority: Option<String>,
 }
 
@@ -64,8 +63,8 @@ fn parse_args(args: &serde_json::Value) -> ParsedArgs {
 		title: str_field("title"),
 		brief: str_field("brief"),
 		role: str_field("role"),
-		run_at_seconds: args.get("run_at_seconds").and_then(|v| v.as_i64()),
-		repeat_seconds: args.get("repeat_seconds").and_then(|v| v.as_i64()),
+		in_seconds: args.get("in_seconds").and_then(|v| v.as_i64()),
+		cron: str_field("cron"),
 		priority: str_field("priority"),
 	}
 }
@@ -234,7 +233,7 @@ impl Tool for CreateTaskFull {
 		ToolName::CreateTaskFull
 	}
 
-	/// Schema with `role`, `run_at_seconds`, `repeat_seconds` and `priority`.
+	/// Schema with `role`, `in_seconds`, `cron` and `priority`.
 	/// `role` enum is built from `RoleName`, so no unknown Role.
 	fn schema(&self, _ctx: &SchemaCtx) -> ToolSchema {
 		// Collect roles
@@ -256,17 +255,21 @@ impl Tool for CreateTaskFull {
 						"enum": roles,
 						"description": "Which Role should do this work.",
 					},
-					"run_at_seconds": {
+					"in_seconds": {
 						"type": "integer",
 						"description": "Delay in seconds from now before this \
 										Task may run. Omit to run as soon as \
 										the queue reaches it.",
 					},
-					"repeat_seconds": {
-						"type": "integer",
-						"description": "If set, this Task repeats every this \
-										many seconds, anchored to \
-										`run_at_seconds`.",
+					"cron": {
+						"type": "string",
+						"description": "Cron expression, five fields as \
+										crontab writes them, in local time \
+										(`0 9 * * *` is every day at nine). \
+										This Task then never runs itself: each \
+										time it comes round it makes a copy of \
+										itself that does. Cancel it to stop \
+										them.",
 					},
 					"priority": {
 						"type": "string",
@@ -285,11 +288,14 @@ impl Tool for CreateTaskFull {
 		// Parse arguments
 		let parsed = parse_args(&args);
 		// Build schedule
-		let schedule = Schedule::from_offsets(
-			parsed.run_at_seconds,
-			parsed.repeat_seconds,
+		let schedule = match Schedule::parse(
+			parsed.in_seconds,
+			parsed.cron.as_deref(),
 			ctx.clock.now(),
-		);
+		) {
+			Ok(schedule) => schedule,
+			Err(e) => return e.to_string(),
+		};
 		// Validate priority
 		let priority = match priority_from(parsed.priority) {
 			Ok(p) => p,

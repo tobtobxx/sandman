@@ -19,8 +19,8 @@ pub struct TaskArgs {
 	pub role: String,
 	pub title: Option<String>,
 	pub brief: String,
-	pub at_seconds: Option<i64>,
-	pub every_seconds: Option<i64>,
+	pub in_seconds: Option<i64>,
+	pub cron: Option<String>,
 	pub priority: Option<String>,
 }
 
@@ -70,11 +70,11 @@ pub struct TaskFlags {
 	#[arg(long)]
 	pub brief: String,
 	/// Seconds from now before this Task may run.
-	#[arg(long = "at")]
-	pub at: Option<i64>,
-	/// Seconds between occurrences, anchored to `--at`.
-	#[arg(long = "every")]
-	pub every: Option<i64>,
+	#[arg(long = "in")]
+	pub in_: Option<i64>,
+	/// Cron expression this Task comes round on. Not with `--in`.
+	#[arg(long)]
+	pub cron: Option<String>,
 	#[arg(long)]
 	pub priority: Option<String>,
 }
@@ -114,8 +114,8 @@ impl From<TaskFlags> for TaskArgs {
 			role: f.role,
 			title: f.title,
 			brief: f.brief,
-			at_seconds: f.at,
-			every_seconds: f.every,
+			in_seconds: f.in_,
+			cron: f.cron,
 			priority: f.priority,
 		}
 	}

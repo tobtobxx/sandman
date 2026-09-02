@@ -18,7 +18,7 @@
 //! | `Event` | Detail after `timestamp category` |
 //! | --- | --- |
 //! | `RunStarted`/`RunEnded` | `run id` + model |
-//! | `TaskCreated`/`TaskStateChanged` | `task id` + title/role/brief or new state |
+//! | `TaskCreated`/`TaskStateChanged`/`TaskReArmed` | `task id` + title/role/brief, new state or next occurrence |
 //! | `SessionStarted`/`SessionStatusChanged`/`MessageAppended`/`ReflectionRecorded`/`MailReceived` | `session id` + kind/status/index/body |
 //! | `CallQueued`/`CallStatusChanged` | `call id` + model/tier or new status |
 //! | `ChannelOpened`/`Said` | `channel id` + session/utterance |
@@ -173,6 +173,9 @@ impl Logger {
 			),
 			Event::TaskStateChanged { task, to } => {
 				format!("{task} -> {}", to.discriminant())
+			},
+			Event::TaskReArmed { task, to } => {
+				format!("{task} re-armed, next {:?}", to.not_before())
 			},
 
 			// Render session

@@ -3,8 +3,8 @@
 //! A `Task` is the single unit of work — human request, investigation, and
 //! delegated work are the same type. `TaskState` and `Schedule` make invalid
 //! states unrepresentable: a completed task always has a result, a pending one
-//! never does, a running one always names its `Session`, a repeating task always
-//! has an anchor.
+//! never does, a running one always names its `Session`, a cron task always
+//! knows when it next comes round.
 //!
 //! Construct via [`NewTask`] at [`crate::store::Store::create_task`] — the Store
 //! mints [`TaskId`] and stamps `created_at` in the same transaction, derives
@@ -13,9 +13,9 @@
 //!
 //! Use through [`crate::store::Store`]: `next_pending(now)` picks by
 //! `not_before`, `start_task` `Pending→Running`, `complete_task` and
-//! `cancel_tasks` reach terminals, `Schedule::next_occurrence` arms the next
-//! chain link anchored to schedule not wall-clock. `Schedule::from_offsets` is
-//! the single parser for tool, control, and CLI.
+//! `cancel_tasks` reach terminals, `fire_cron` copies a cron Task into a
+//! daughter and `Schedule::re_armed` sets when the next one is due.
+//! `Schedule::parse` is the single parser for tool, control, and CLI.
 //!
 //! Consumers — same `TaskState`/`Schedule` handled differently:
 //!
@@ -24,20 +24,20 @@
 //! | `Pending` | enqueues with `not_before` | `next_pending` picks by time | `TaskCreated` |
 //! | `Running` | records `session`+`started_at` | worker drives `Turn`s; cancel checked each turn | `TaskStateChanged` |
 //! | `Completed` | persists `result`+`at`; terminal | review `Complete`→`Succeeded`, `Unreachable`→`Failed` | `TaskStateChanged`+delivery |
-//! | `Cancelled` | terminal, no result, stops repeating chain | session ends at next decision; waiters resolved | `TaskStateChanged`+`render_cancelled` |
+//! | `Cancelled` | terminal, no result | session ends at next decision; waiters resolved | `TaskStateChanged`+`render_cancelled` |
 //!
-//! | Schedule | `not_before` | `next_occurrence` | pick |
+//! | Schedule | `not_before` | `re_armed(now)` | pick |
 //! | --- | --- | --- | --- |
-//! | `Now` | `None` | `None` | immediate |
-//! | `At(t)` | `Some(t)` | `None` | `t <= now` |
-//! | `Repeating{first,every}` | `Some(first)` | `Some(first+every)` | `first <= now`, anchored |
+//! | `Now` | `None` | `None` | runs immediately |
+//! | `At(t)` | `Some(t)` | `None` | runs at `t <= now` |
+//! | `Cron{expr,next}` | `Some(next)` | next match after `now` | makes a daughter, never runs |
 //!
 //! Seam: domain is data — `Store` owns rows and Events, scheduling owns
 //! time, `Turn` owns policy. `TaskState`/`Schedule` never decide; callers match them.
 //!
-//! Rules: **one task concept — human, investigation, and delegated work are the same type.** **`Completed` has `TaskResult`, `Cancelled` has none.** **`Cancelled` is terminal and chain-ending.** **pick is time only; `await_result` is not a queue wait.** **`subscriber` derived from `Creator`, never chosen.** **only review completes; only unreachable fails without it.** **store is the only writer; `Tier`≠`TaskPriority`.**
+//! Rules: **one task concept — human, investigation, and delegated work are the same type.** **`Completed` has `TaskResult`, `Cancelled` has none.** **`Cancelled` is terminal and reaches one Task only — a daughter's end is not its cron Task's.** **a cron Task never runs; it only makes daughters.** **pick is time only; `await_result` is not a queue wait.** **`subscriber` derived from `Creator`, never chosen.** **only review completes; only unreachable fails without it.** **store is the only writer; `Tier`≠`TaskPriority`.**
 //!
-//! Defines: [`Task`], [`TaskState`]/[`TaskStateName`], [`TaskResult`], [`Schedule`], [`TaskPriority`], [`Creator`], [`NewTask`], [`TaskSummary`]
+//! Defines: [`Task`], [`TaskState`]/[`TaskStateName`], [`TaskResult`], [`Schedule`], [`CronExpr`], [`ScheduleError`], [`TaskPriority`], [`Creator`], [`NewTask`], [`TaskSummary`]
 
 use super::ids::{ChannelId, RunId, SessionId, TaskId};
 use super::text::{Brief, Title};
@@ -96,7 +96,8 @@ pub enum TaskState {
 	Running { session: SessionId, started_at: Timestamp },
 	/// Done, with a result — success or failure. Terminal.
 	Completed { result: TaskResult, at: Timestamp },
-	/// Stopped before a result. Terminal; no result; ends a repeating chain.
+	/// Stopped before a result. Terminal; no result. Reaches this Task only —
+	/// cancelling a cron Task stops further daughters, not the ones running.
 	Cancelled { at: Timestamp },
 }
 
@@ -110,11 +111,10 @@ pub enum TaskResult {
 	Failed(String),
 }
 
-/// When a task may run, and whether finishing it arms another.
+/// When a task may run, and whether it makes work of its own.
 #[derive(
 	Debug,
 	Clone,
-	Copy,
 	PartialEq,
 	Eq,
 	serde::Serialize,
@@ -129,8 +129,37 @@ pub enum Schedule {
 	Now,
 	/// Not before this instant.
 	At(Timestamp),
-	/// Chain: completing one creates the next, anchored to schedule not end time.
-	Repeating { first: Timestamp, every: Duration },
+	/// Never runs. Each time `next` comes round the Harness copies this Task
+	/// into a daughter with `Schedule::Now` and re-arms; this one stays
+	/// `Pending` for as long as it stands. Cancel it to stop the daughters.
+	Cron { expr: CronExpr, next: Timestamp },
+}
+
+/// A cron expression, parsed once.
+///
+/// Five fields as `crontab` writes them (`0 9 * * *`), or six with leading
+/// seconds. Read in local time, so "every morning at nine" means nine where
+/// the swarm runs. Serialises as the bare string it was built from.
+///
+/// Boxed: the parsed form is a few hundred bytes of bit sets, and every Task
+/// carries a `Schedule` whether it is a cron or not.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CronExpr(Box<croner::Cron>);
+
+/// Why an asked-for schedule is not one.
+///
+/// Wording is model-facing — returned as tool output on `create_task_full`.
+#[derive(Debug, thiserror::Error)]
+pub enum ScheduleError {
+	#[error(
+		"`in_seconds` and `cron` are two different schedules. Give one, not both."
+	)]
+	Both,
+	#[error("`{expr}` is not a cron expression: {why}")]
+	NotACron { expr: String, why: String },
+	#[error("`{expr}` never comes round again")]
+	NeverFires { expr: String },
 }
 
 /// How urgently the swarm should spend a call on this task.
@@ -221,45 +250,90 @@ impl TaskResult {
 
 impl Schedule {
 	/// Earliest instant this schedule may run, if any.
-	pub fn not_before(&self, _created_at: Timestamp) -> Option<Timestamp> {
+	///
+	/// For a `Cron` this is when the next daughter is due, not when the Task
+	/// itself runs — it never does.
+	pub fn not_before(&self) -> Option<Timestamp> {
 		match self {
 			Schedule::Now => None,
 			Schedule::At(t) => Some(*t),
-			Schedule::Repeating { first, .. } => Some(*first),
+			Schedule::Cron { next, .. } => Some(*next),
 		}
 	}
 
-	/// Schedule for the next occurrence, if repeating.
+	/// The same cron schedule armed for the first occurrence after `now`.
 	///
-	/// Anchored to schedule, not to when the run ended, so drift does not accumulate.
-	pub fn next_occurrence(&self) -> Option<Schedule> {
+	/// `None` once the expression has no future occurrence left, and for a
+	/// schedule that is not a cron.
+	pub fn re_armed(&self, now: Timestamp) -> Option<Schedule> {
 		match self {
-			Schedule::Repeating { first, every } => Some(Schedule::Repeating {
-				first: first.plus(*every),
-				every: *every,
+			Schedule::Cron { expr, .. } => Some(Schedule::Cron {
+				expr: expr.clone(),
+				next: expr.next_after(now)?,
 			}),
 			_ => None,
 		}
 	}
 
-	/// Build a schedule from delay and repeat offsets in seconds.
+	/// Build a schedule from the two things a caller may ask for.
 	///
 	/// Single parser for tool, control, and CLI so the three cannot drift.
-	pub fn from_offsets(
-		run_at_seconds: Option<i64>,
-		repeat_seconds: Option<i64>,
+	pub fn parse(
+		in_seconds: Option<i64>,
+		cron: Option<&str>,
 		now: Timestamp,
-	) -> Schedule {
-		// Compute first instant
-		let first = now.plus(Duration::from_secs(run_at_seconds.unwrap_or(0)));
-		// Choose schedule
-		match repeat_seconds {
-			Some(secs) => {
-				Schedule::Repeating { first, every: Duration::from_secs(secs) }
+	) -> Result<Schedule, ScheduleError> {
+		match (in_seconds, cron) {
+			(Some(_), Some(_)) => Err(ScheduleError::Both),
+			(_, Some(expr)) => {
+				// Parse expression, then arm it
+				let expr = CronExpr::try_from(expr.to_string())?;
+				let next = expr.next_after(now).ok_or_else(|| {
+					ScheduleError::NeverFires { expr: expr.to_string() }
+				})?;
+				Ok(Schedule::Cron { expr, next })
 			},
-			None if run_at_seconds.is_some() => Schedule::At(first),
-			None => Schedule::Now,
+			(Some(secs), None) => {
+				Ok(Schedule::At(now.plus(Duration::from_secs(secs))))
+			},
+			(None, None) => Ok(Schedule::Now),
 		}
+	}
+}
+
+impl CronExpr {
+	/// First instant this expression matches strictly after `now`.
+	///
+	/// `None` when nothing matches any more — a year-bounded expression that
+	/// has run out.
+	pub fn next_after(&self, now: Timestamp) -> Option<Timestamp> {
+		use chrono::TimeZone;
+		let from = chrono::Local.timestamp_millis_opt(now.0).single()?;
+		let next = self.0.find_next_occurrence(&from, false).ok()?;
+		Some(Timestamp(next.timestamp_millis()))
+	}
+}
+
+impl TryFrom<String> for CronExpr {
+	type Error = ScheduleError;
+
+	fn try_from(expr: String) -> Result<Self, ScheduleError> {
+		match expr.parse::<croner::Cron>() {
+			Ok(cron) => Ok(CronExpr(Box::new(cron))),
+			Err(e) => Err(ScheduleError::NotACron { expr, why: e.to_string() }),
+		}
+	}
+}
+
+impl From<CronExpr> for String {
+	fn from(expr: CronExpr) -> String {
+		expr.to_string()
+	}
+}
+
+impl std::fmt::Display for CronExpr {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", self.0.as_str())
 	}
 }
 

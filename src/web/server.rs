@@ -29,12 +29,12 @@
 
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::Router;
 use axum::extract::State;
-use axum::http::{header, StatusCode, Uri};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::http::{StatusCode, Uri, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use rust_embed::RustEmbed;
 
@@ -64,7 +64,7 @@ const FIND_LIMIT: usize = 10;
 /// One write from a browser.
 ///
 /// `Say` is the human talking on own `Channel`; `Find` is the Lessons search box;
-/// `Cancel` stops a Task and its repeating chain.
+/// `Cancel` stops one Task.
 #[derive(serde::Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 enum ClientMessage {
@@ -260,7 +260,7 @@ async fn on_message(state: &AppState, text: &str) {
 		.await;
 }
 
-/// Cancel a Task and its repeating chain from the browser.
+/// Cancel one Task from the browser.
 ///
 /// Parses the id and delegates to `Harness::cancel_task`. Failures are silent —
 /// the `Patch` on success or no change on failure is the feedback.

@@ -28,7 +28,7 @@
 
 use crate::domain::{
 	CallId, CallStatus, ChannelId, Incoming, Lesson, LlmCall, Message,
-	Reflection, Run, Session, SessionId, SessionStatus, Task, TaskId,
+	Reflection, Run, Schedule, Session, SessionId, SessionStatus, Task, TaskId,
 	TaskState, Utterance,
 };
 use crate::roles::ToolName;
@@ -47,6 +47,11 @@ pub enum Event {
 	TaskStateChanged {
 		task: TaskId,
 		to: TaskState,
+	},
+	/// A cron Task made a daughter and is now due at its next occurrence.
+	TaskReArmed {
+		task: TaskId,
+		to: Schedule,
 	},
 
 	SessionStarted(Session),
@@ -138,7 +143,9 @@ impl Event {
 		match self {
 			Event::RunStarted(_) | Event::RunEnded(_) => "run",
 
-			Event::TaskCreated(_) | Event::TaskStateChanged { .. } => "task",
+			Event::TaskCreated(_)
+			| Event::TaskStateChanged { .. }
+			| Event::TaskReArmed { .. } => "task",
 
 			Event::SessionStarted(_)
 			| Event::SessionStatusChanged { .. }

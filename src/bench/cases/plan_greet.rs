@@ -76,24 +76,24 @@ super::bench_case! {
 		});
 
 		if let Some(call) = creations.first() {
-			let delay = call.args.get("run_at_seconds").and_then(|v| v.as_i64());
+			let delay = call.args.get("in_seconds").and_then(|v| v.as_i64());
 			checks.push(match delay {
 				Some(seconds) if EXPECTED_DELAY_SECONDS.contains(&seconds) => {
 					CheckResult::ok(
 						"delay is about 3 minutes",
-						format!("run_at_seconds was {seconds}"),
+						format!("in_seconds was {seconds}"),
 					)
 				},
 				Some(seconds) => CheckResult::no(
 					"delay is about 3 minutes",
 					format!(
-						"run_at_seconds was {seconds}, outside \
+						"in_seconds was {seconds}, outside \
 						 {EXPECTED_DELAY_SECONDS:?}"
 					),
 				),
 				None => CheckResult::no(
 					"delay is about 3 minutes",
-					"run_at_seconds was not set",
+					"in_seconds was not set",
 				),
 			});
 		}

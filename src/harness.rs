@@ -19,7 +19,8 @@
 //!
 //! Call trace: `run → step → drive_comms → comms::respond → session::turn`
 //! and `step → drive_worker → worker::work_turn → session::turn`;
-//! `complete_task → deliver → waiters::resolve`; `cancel_task → chain_of → cancel_tasks → waiters::resolve`.
+//! `complete_task → deliver → waiters::resolve`; `step → store.fire_cron` for a cron Task;
+//! `cancel_task → cancel_tasks → waiters::resolve`.
 //! Rules: **only Store touches the database; every mutation emits one Event.**
 //! **a Turn decides nothing; ending policy lives in worker.rs/comms.rs, never session.rs.**
 //! **one model call in flight, ordered by Tier then arrival.**
@@ -34,7 +35,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::domain::{
 	ChannelId, ChannelKind, Clock, Incoming, IncomingFrom, Message, NewTask,
-	SessionId, Spend, TaskId, TaskResult, Timestamp, Utterance, Who,
+	Schedule, SessionId, Spend, TaskId, TaskResult, Timestamp, Utterance, Who,
 };
 use crate::event::{Event, Events};
 use crate::scheduler::Scheduler;
@@ -58,7 +59,7 @@ pub enum Drive {
 
 /// Result of cancelling a Task.
 ///
-/// Tells the caller which Tasks stopped and whether any was running.
+/// Tells the caller whether the Task stopped, and whether it was running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CancelOutcome {
 	NotFound,
@@ -67,9 +68,7 @@ pub enum CancelOutcome {
 	/// Already cancelled.
 	Already,
 	Cancelled {
-		/// Tasks that stopped, named one first.
-		ids: Vec<TaskId>,
-		/// At least one was running.
+		/// It was running, so its Session stops at its next decision.
 		running: bool,
 	},
 }
@@ -132,9 +131,9 @@ impl Harness {
 		self.store.create_task(new, now)
 	}
 
-	/// Record a Task's Result, deliver to subscriber and re-arm if repeating.
+	/// Record a Task's Result and deliver it to its subscriber.
 	///
-	/// Resolves waiters and creates the next occurrence when scheduled.
+	/// Resolves waiters. A cron Task never reaches here — it never runs.
 	async fn complete_task(
 		&self,
 		id: TaskId,
@@ -153,25 +152,15 @@ impl Harness {
 
 		self.deliver(id).await?;
 		self.waiters.resolve(id, &answer);
-
-		// Re-arm if repeating
-		if let Some(schedule) = task.schedule.next_occurrence() {
-			let next = NewTask {
-				title: task.title,
-				brief: task.brief,
-				role: task.role,
-				schedule,
-				priority: task.priority,
-				created_by: task.created_by,
-			};
-			self.store.create_task(next, now)?;
-		}
 		Ok(())
 	}
 
-	/// Cancel a Task and its repeating chain.
+	/// Cancel one Task.
 	///
-	/// Stops pending and running occurrences and releases blocked waiters.
+	/// Stops it pending or running and releases blocked waiters. Reaches that
+	/// Task alone: cancelling a cron Task makes no further daughters and lets
+	/// the ones already out finish; cancelling a daughter leaves its cron Task
+	/// armed.
 	pub async fn cancel_task(
 		&self,
 		id: TaskId,
@@ -192,25 +181,18 @@ impl Harness {
 		};
 		let running = running_session.is_some();
 
-		// Collect chain
-		let mut chain = self.store.chain_of(id)?;
-		chain.retain(|&t| t != id);
-		chain.insert(0, id);
-
 		// Cancel in store
 		let now = self.clock.now();
-		self.store.cancel_tasks(&chain, now)?;
+		self.store.cancel_tasks(&[id], now)?;
 
 		// Resolve waiters
 		let notice = task.render_cancelled();
-		for &chained in &chain {
-			self.waiters.resolve(chained, &notice);
-		}
+		self.waiters.resolve(id, &notice);
 		if let Some(session) = running_session {
 			self.waiters.resolve_held_by(session, &notice);
 		}
 
-		Ok(CancelOutcome::Cancelled { ids: chain, running })
+		Ok(CancelOutcome::Cancelled { running })
 	}
 
 	/// Hand a Task's answer to its subscriber.
@@ -334,6 +316,12 @@ impl Harness {
 		let Some(task) = self.store.next_pending(now)? else {
 			return Ok(false);
 		};
+
+		// A cron Task makes work instead of being work
+		if matches!(task.schedule, Schedule::Cron { .. }) {
+			self.store.fire_cron(&task, now)?;
+			return Ok(true);
+		}
 
 		let ctx = self.ctx(SessionId(0));
 		let session = crate::worker::new_worker_session(&ctx, &task).await?;

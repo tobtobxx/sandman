@@ -192,6 +192,65 @@ fn a_comms_session_subscribes_the_task_it_creates() {
 	assert_eq!(subscriber_of(Creator::Session(worker)), None);
 }
 
+/// A cron Task is not work, it makes work: it stays `Pending` for good and
+/// each occurrence is a daughter that runs in its place.
+#[test]
+fn a_cron_task_makes_daughters_and_stays_pending() {
+	let store = open();
+	let (comms, channel) = store
+		.open_comms(ChannelKind::Scripted, Vec::new(), Timestamp(0))
+		.unwrap();
+	let now = Timestamp(0);
+	let cron = store
+		.create_task(
+			NewTask {
+				title: Title::try_from("greet the human".to_string()).unwrap(),
+				brief: Brief::try_from("say good morning".to_string()).unwrap(),
+				role: RoleName::Planning,
+				schedule: Schedule::parse(None, Some("0 9 * * *"), now)
+					.unwrap(),
+				priority: TaskPriority::default(),
+				created_by: Creator::Session(comms),
+			},
+			now,
+		)
+		.unwrap();
+
+	// It waits for its first occurrence like any other Task
+	let due = store
+		.task(cron)
+		.unwrap()
+		.unwrap()
+		.schedule
+		.not_before()
+		.unwrap();
+	assert!(due > now);
+	assert!(store.next_pending(Timestamp(due.0 - 1)).unwrap().is_none());
+	assert_eq!(store.next_pending(due).unwrap().map(|t| t.id), Some(cron));
+
+	// Firing copies it into a daughter and arms the one after
+	let armed = store.next_pending(due).unwrap().unwrap();
+	let daughter = store.fire_cron(&armed, due).unwrap().expect("armed again");
+	let daughter = store.task(daughter).unwrap().unwrap();
+	assert_eq!(daughter.schedule, Schedule::Now);
+	assert_eq!(daughter.title, armed.title);
+	assert_eq!(daughter.brief, armed.brief);
+	assert_eq!(daughter.subscriber, Some(channel));
+
+	let parent = store.task(cron).unwrap().unwrap();
+	assert_eq!(parent.state, TaskState::Pending);
+	assert!(parent.schedule.not_before().unwrap() > due);
+
+	// The daughter is what the queue hands out, and ending it leaves the cron
+	// Task armed
+	assert_eq!(
+		store.next_pending(due).unwrap().map(|t| t.id),
+		Some(daughter.id)
+	);
+	store.cancel_tasks(&[daughter.id], due).unwrap();
+	assert_eq!(store.task(cron).unwrap().unwrap().state, TaskState::Pending);
+}
+
 #[test]
 fn lessons_and_vectors() {
 	let store = open();

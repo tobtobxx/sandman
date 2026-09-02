@@ -6,7 +6,7 @@
 //! `db::Lock` (file) or none (memory), migrates via `db::open`, mints `Run`
 //! via `counters::take` and calls `recover` before returning.
 //! Use: vocabulary mutations each emit one `Event`; reads return owned values:
-//! tasks `create/start/complete/cancel/next_pending/chain_of/list`, sessions
+//! tasks `create/start/complete/cancel/fire_cron/next_pending/list`, sessions
 //! `start/append/messages/reflect/mail`, calls `queue/set/spend`, channels
 //! `open_comms/say/transcript`, lessons/vectors, `snapshot`/`save_copy`.
 //! Consumers: `Harness` owns `Arc<Store>` and threads via `SessionCtx` into
@@ -17,7 +17,7 @@
 //! keeps them current (`log.rs`, `web::wire`, `bench::Rig`).
 //! | Entity | Writers | Readers | Event |
 //! | --- | --- | --- | --- |
-//! | `Task` | `create/start/complete/cancel` | `task/list/next_pending/chain_of` | `TaskCreated/TaskStateChanged` |
+//! | `Task` | `create/start/complete/cancel/fire_cron` | `task/list/next_pending` | `TaskCreated/TaskStateChanged/TaskReArmed` |
 //! | `Session` | `start/set/end/append/record` | `session/messages/last_reflection` | `SessionStarted/StatusChanged/MessageAppended/ReflectionRecorded` |
 //! | `LlmCall` | `queue/set/recover` | `call/spend/outstanding` | `CallQueued/CallStatusChanged` |
 //! | `Channel` | `open_comms/open/say/receive` | `channels/transcript/has_mail` | `ChannelOpened/Said/MailReceived` |
@@ -129,6 +129,67 @@ fn subscriber_of(
 		.store()?
 		.flatten();
 	Ok(channel.map(|c| ChannelId(c as u32)))
+}
+
+/// Insert one `Pending` Task, minting its id in the same transaction.
+///
+/// The row and the `Task` returned say the same thing, so the caller emits
+/// `TaskCreated` without reading back. Takes `subscriber` rather than deriving
+/// it: a daughter inherits its cron Task's, everyone else derives from Creator.
+fn insert_task(
+	tx: &rusqlite::Transaction<'_>,
+	run: RunId,
+	new: NewTask,
+	subscriber: Option<ChannelId>,
+	now: Timestamp,
+) -> Result<Task, StoreError> {
+	// Prepare rows
+	let id = TaskId(crate::db::counters::take(tx, TaskId::COUNTER)?);
+	let state = TaskState::Pending;
+	let state_row = crate::db::rows::task_state_to_row(&state)?;
+	let schedule_row = crate::db::rows::schedule_to_row(&new.schedule)?;
+	let priority_json = serde_json::to_string(&new.priority).store()?;
+	let created_by_json = serde_json::to_string(&new.created_by).store()?;
+
+	// Insert task
+	tx.execute(
+		"INSERT INTO tasks (
+			id, run, title, brief, role, state, state_json,
+			schedule, schedule_json, not_before, subscriber, priority,
+			created_by, created_at
+		) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+		rusqlite::params![
+			id.0,
+			run.0,
+			new.title.as_str(),
+			new.brief.as_str(),
+			new.role.to_string(),
+			state_row.tag,
+			state_row.json,
+			schedule_row.tag,
+			schedule_row.json,
+			new.schedule.not_before().map(|t| t.0),
+			subscriber.map(|c| c.0),
+			priority_json,
+			created_by_json,
+			now.0,
+		],
+	)
+	.store()?;
+
+	Ok(Task {
+		id,
+		run,
+		title: new.title,
+		brief: new.brief,
+		role: new.role,
+		state,
+		schedule: new.schedule,
+		subscriber,
+		priority: new.priority,
+		created_by: new.created_by,
+		created_at: now,
+	})
 }
 
 fn task_state_columns(row: &Row<'_>) -> Result<TaskState, DbError> {
@@ -329,62 +390,85 @@ impl Store {
 		// Derive subscriber
 		let mut conn = self.conn.lock().unwrap();
 		let tx = conn.transaction().store()?;
-		let id = TaskId(crate::db::counters::take(&tx, TaskId::COUNTER)?);
 		let subscriber = subscriber_of(&tx, new.created_by)?;
 
-		// Prepare rows
-
-		let state = TaskState::Pending;
-		let state_row = crate::db::rows::task_state_to_row(&state)?;
-		let schedule_row = crate::db::rows::schedule_to_row(&new.schedule)?;
-		let not_before = new.schedule.not_before(now);
-		let priority_json = serde_json::to_string(&new.priority).store()?;
-		let created_by_json = serde_json::to_string(&new.created_by).store()?;
-
 		// Insert task
+		let task = insert_task(&tx, self.run, new, subscriber, now)?;
+		tx.commit().store()?;
+
+		// Emit event
+		let id = task.id;
+		drop(conn);
+		self.events.emit(Event::TaskCreated(task));
+		Ok(id)
+	}
+
+	/// Copy a cron Task into a daughter due now and re-arm the cron Task.
+	///
+	/// The daughter carries everything but the schedule and inherits the
+	/// subscriber, so its answer reaches whoever the cron Task's would have.
+	/// The cron Task stays `Pending` throughout. `Ok(None)` means the
+	/// expression has no occurrence left, and the cron Task was cancelled
+	/// rather than left due forever. Emits `TaskCreated` plus `TaskReArmed`,
+	/// or `TaskStateChanged` when it runs out.
+	pub fn fire_cron(
+		&self,
+		cron: &Task,
+		now: Timestamp,
+	) -> Result<Option<TaskId>, StoreError> {
+		// Arm the next occurrence, or retire the Task
+		let mut conn = self.conn.lock().unwrap();
+		let Some(schedule) = cron.schedule.re_armed(now) else {
+			let state = TaskState::Cancelled { at: now };
+			let row = crate::db::rows::task_state_to_row(&state)?;
+			conn.execute(
+				"UPDATE tasks SET state = ?1, state_json = ?2 WHERE id = ?3",
+				rusqlite::params![row.tag, row.json, cron.id.0],
+			)
+			.store()?;
+			drop(conn);
+			self.events
+				.emit(Event::TaskStateChanged { task: cron.id, to: state });
+			return Ok(None);
+		};
+
+		// Create the daughter and re-arm in one transaction
+		let tx = conn.transaction().store()?;
+		let daughter = insert_task(
+			&tx,
+			self.run,
+			NewTask {
+				title: cron.title.clone(),
+				brief: cron.brief.clone(),
+				role: cron.role,
+				schedule: Schedule::Now,
+				priority: cron.priority,
+				created_by: cron.created_by,
+			},
+			cron.subscriber,
+			now,
+		)?;
+		let schedule_row = crate::db::rows::schedule_to_row(&schedule)?;
 		tx.execute(
-			"INSERT INTO tasks (
-				id, run, title, brief, role, state, state_json,
-				schedule, schedule_json, not_before, subscriber, priority,
-				created_by, created_at
-			) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+			"UPDATE tasks SET schedule = ?1, schedule_json = ?2,
+			                  not_before = ?3 WHERE id = ?4",
 			rusqlite::params![
-				id.0,
-				self.run.0,
-				new.title.as_str(),
-				new.brief.as_str(),
-				new.role.to_string(),
-				state_row.tag,
-				state_row.json,
 				schedule_row.tag,
 				schedule_row.json,
-				not_before.map(|t| t.0),
-				subscriber.map(|c| c.0),
-				priority_json,
-				created_by_json,
-				now.0,
+				schedule.not_before().map(|t| t.0),
+				cron.id.0,
 			],
 		)
 		.store()?;
 		tx.commit().store()?;
 
-		// Emit event
-		let task = Task {
-			id,
-			run: self.run,
-			title: new.title,
-			brief: new.brief,
-			role: new.role,
-			state,
-			schedule: new.schedule,
-			subscriber,
-			priority: new.priority,
-			created_by: new.created_by,
-			created_at: now,
-		};
+		// Emit events
+		let id = daughter.id;
 		drop(conn);
-		self.events.emit(Event::TaskCreated(task));
-		Ok(id)
+		self.events.emit(Event::TaskCreated(daughter));
+		self.events
+			.emit(Event::TaskReArmed { task: cron.id, to: schedule });
+		Ok(Some(id))
 	}
 
 	/// Move Task to `Running` for Session. Emits `TaskStateChanged`. Fails if missing.
@@ -551,57 +635,6 @@ impl Store {
 			)
 			.store()?;
 		Ok(earliest.map(|t| now.until(Timestamp(t))))
-	}
-
-	/// Collect unfinished ids in same repeating chain. Single id if not repeating. Fails if anchor missing.
-	pub fn chain_of(&self, id: TaskId) -> Result<Vec<TaskId>, StoreError> {
-		// Load anchor
-		let conn = self.conn.lock().unwrap();
-		let anchor = read_optional(
-			&conn,
-			"SELECT * FROM tasks WHERE id = ?1",
-			[id.0],
-			crate::db::rows::read_task,
-		)?
-		.ok_or_else(|| StoreError::NoSuch {
-			what: "task",
-			id: id.to_string(),
-		})?;
-		let Schedule::Repeating { every, .. } = anchor.schedule else {
-			return Ok(vec![id]);
-		};
-
-		// Scan candidates
-		let mut stmt = conn
-			.prepare(
-				"SELECT id, schedule, schedule_json FROM tasks
-				 WHERE role = ?1 AND title = ?2 AND brief = ?3
-				   AND created_by = ?4
-				   AND state IN ('pending', 'running')",
-			)
-			.store()?;
-		let created_by = serde_json::to_string(&anchor.created_by).store()?;
-		let mut rows = stmt
-			.query(rusqlite::params![
-				anchor.role.to_string(),
-				anchor.title.as_str(),
-				anchor.brief.as_str(),
-				created_by,
-			])
-			.store()?;
-
-		let mut chain = Vec::new();
-		while let Some(row) = rows.next().store()? {
-			let candidate: i64 = row.get(0).store()?;
-			let tag: String = row.get(1).store()?;
-			let json: String = row.get(2).store()?;
-			let schedule = crate::db::rows::schedule_from_row(&tag, &json)?;
-			if matches!(schedule, Schedule::Repeating { every: e, .. } if e == every)
-			{
-				chain.push(TaskId(candidate as u32));
-			}
-		}
-		Ok(chain)
 	}
 
 	pub fn list_tasks(
