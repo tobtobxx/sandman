@@ -36,9 +36,14 @@ emits `ToolCalled`/`ToolReturned` on its own handle.
 ## Queue, Roles, ways in
 
 - Picked on one condition: time.
-- Completing a repeating Task creates the next occurrence, anchored to the schedule.
-- Cancel is terminal. The Session stops at its next decision point, no Result; a repeating
-  chain ends; waiters are told.
+- A cron Task never runs. Coming due makes a daughter Task with the same Brief and
+  `Schedule::Now`, then re-arms — `Store::fire_cron`, no model call in it. Missed
+  occurrences are not caught up.
+- Cancel is terminal and reaches one Task. The Session stops at its next decision point,
+  no Result; waiters are told. Cancelling a cron Task stops the daughters to come, not
+  the ones already out.
+- A cron Task outlives its Run: `wind_down` cancels what the Run left unfinished but
+  leaves cron Tasks standing, and the next start picks them up.
 - A Role added without a prompt or without tools does not compile — `RoleName` is matched
   exhaustively.
 - Prompts: Markdown, `include_str!`, shared mechanics plus the Role's file. Nothing

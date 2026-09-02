@@ -23,9 +23,13 @@ stopping over: either the project has a word for it, or you are inventing langua
 - **Subscription** — The link between a Task and the Channel its answer should reach.
   Only a Comms Session subscribes; a Worker holds in `await_result` instead. An
   unsubscribed Result is recorded and nothing more. _Avoid_: Callback, Await, Listener.
-- **Schedule** — When a Task may run and whether finishing it arms another: now, not
-  before a time, or repeating on an interval anchored to the schedule, so a late run does
-  not push the next back. A repeating Task is a chain. _Avoid_: Timer, Cron, Delay.
+- **Schedule** — When a Task may run, and whether it makes work of its own: now, not
+  before a time, or a cron expression in local time. `in_seconds` and `cron` are the two
+  ways to ask, never together. _Avoid_: Timer, Interval, Delay.
+- **Cron Task** — A Task on a cron Schedule. It never runs and stays `Pending`: every
+  occurrence it makes a **Daughter** instead — the same Title, Brief, Role, Priority and
+  creator, running now. Cancel the cron Task to end the succession, a Daughter to skip
+  one occurrence. _Avoid_: Chain, Recurring Task, Parent, Child, Occurrence.
 - **Priority** — high, normal or low, default normal. Decides the Tier its Worker's calls
   wait at, and nothing else. _Avoid_: Urgency, Weight, Rank.
 

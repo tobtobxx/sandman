@@ -63,8 +63,10 @@ cargo run --bin sandman -- task \
   --role research \
   --title "Check the weather" \
   --brief "Find tomorrow's forecast for Bern and say what to wear." \
-  --at 600
+  --in 600
 ```
+`--in <seconds>` delays one run; `--cron "0 7 * * *"` instead makes a Task that
+never runs itself and puts a copy of itself on the queue at every occurrence.
 
 ## Produced files
 
