@@ -21,6 +21,7 @@
 //! | `Pending` | blocks, then resolved text |
 //! | `Completed` (already finished) | resolved text at once |
 //! | `Cancelled` | cancellation notice, so nobody hangs |
+//! | cron schedule | explanation at once — a cron Task never completes |
 //!
 //! Rules: **already finished resolves at once — outcome kept, not forgotten.**
 //! **cancelled returns its notice in place of a Result.**
@@ -68,10 +69,12 @@ impl Tool for AwaitResult {
 		}
 	}
 
-	/// Parse `task_id`, validate it exists, then block until resolved.
+	/// Parse `task_id`, load the Task, then block until resolved. A cron
+	/// Task answers at once: its schedule variant is stable (re-arming moves
+	/// `next` only), so the check before parking cannot miss a transition.
 	///
-	/// Returns the Task's answer or its cancellation notice. Invalid or
-	/// unknown id returns an error string.
+	/// Returns the Task's answer, its cancellation notice, or the cron
+	/// explanation. Invalid or unknown id returns an error string.
 	async fn call(&self, ctx: &SessionCtx, args: serde_json::Value) -> String {
 		// Parse task id
 		let task = match args.get("task_id").and_then(|v| v.as_str()) {
@@ -83,9 +86,17 @@ impl Tool for AwaitResult {
 				},
 			},
 		};
-		// Validate Task exists
-		if ctx.harness.store.task(task).ok().flatten().is_none() {
+		// Load to validate and to check the schedule
+		let Some(existing) = ctx.harness.store.task(task).ok().flatten() else {
 			return ToolError::NoSuchTask(task.to_string()).to_string();
+		};
+		// A cron Task never runs, so it never completes
+		if matches!(existing.schedule, crate::domain::Schedule::Cron { .. }) {
+			return format!(
+				"Task {task} is on a cron schedule: every occurrence runs as \
+				 its own Task, and the answer goes to the subscriber. There is \
+				 no single Result to wait for."
+			);
 		}
 		// Wait for answer
 		ctx.harness.waiters.wait(ctx.id, task).await
